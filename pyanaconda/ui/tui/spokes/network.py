@@ -17,30 +17,34 @@
 # Red Hat, Inc.
 #
 import gi
-gi.require_version("NM", "1.0")
-from gi.repository import NM
 
+gi.require_version("NM", "1.0")
 import socket
 
-from pyanaconda import network
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.modules.common.constants.services import NETWORK
-from pyanaconda.modules.common.structures.network import NetworkDeviceConfiguration
-from pyanaconda.flags import flags
-from pyanaconda.ui.categories.system import SystemCategory
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.tui.tuiobject import Dialog, report_if_failed
-from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda.core.i18n import N_, _
-from pyanaconda.core.regexes import IPV4_PATTERN_WITH_ANCHORS, IPV4_NETMASK_WITH_ANCHORS, IPV4_OR_DHCP_PATTERN_WITH_ANCHORS
-from pyanaconda.core.constants import ANACONDA_ENVIRON
-from pyanaconda.anaconda_loggers import get_module_logger
-
+from gi.repository import NM
 from simpleline.render.containers import ListColumnContainer
 from simpleline.render.prompt import Prompt
 from simpleline.render.screen import InputState
 from simpleline.render.screen_handler import ScreenHandler
-from simpleline.render.widgets import TextWidget, CheckboxWidget, EntryWidget
+from simpleline.render.widgets import CheckboxWidget, EntryWidget, TextWidget
+
+from pyanaconda import network
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import ANACONDA_ENVIRON
+from pyanaconda.core.i18n import N_, _
+from pyanaconda.core.regexes import (
+    IPV4_NETMASK_WITH_ANCHORS,
+    IPV4_OR_DHCP_PATTERN_WITH_ANCHORS,
+    IPV4_PATTERN_WITH_ANCHORS,
+)
+from pyanaconda.flags import flags
+from pyanaconda.modules.common.constants.services import NETWORK
+from pyanaconda.modules.common.structures.network import NetworkDeviceConfiguration
+from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.common import FirstbootSpokeMixIn
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
+from pyanaconda.ui.tui.tuiobject import Dialog, report_if_failed
 
 log = get_module_logger(__name__)
 
@@ -198,12 +202,16 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
        .. inheritance-diagram:: NetworkSpoke
           :parts: 3
     """
-    helpFile = "NetworkSpoke.txt"
     category = SystemCategory
     configurable_device_types = [
         NM.DeviceType.ETHERNET,
         NM.DeviceType.INFINIBAND,
     ]
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "network-configuration"
 
     def __init__(self, data, storage, payload):
         NormalTUISpoke.__init__(self, data, storage, payload)
@@ -251,7 +259,8 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
         """ Check whether this spoke is complete or not."""
         # If we can't configure network, don't require it
         return (not conf.system.can_configure_network
-                or self._network_module.GetActivatedInterfaces())
+                or self._network_module.IsConnecting
+                or self._network_module.Connected)
 
     @property
     def mandatory(self):
@@ -400,10 +409,6 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
         if new_spoke.apply_configuration:
             self._apply = True
-            device = self.nm_client.get_device_by_iface(iface)
-            log.debug("activating connection %s with device %s",
-                      connection_uuid, iface)
-            self.nm_client.activate_connection_async(connection, device, None, None)
 
         self._network_module.LogConfigurationState(
             "Settings of {} updated in TUI.".format(iface)
@@ -428,7 +433,7 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
         (valid, error) = network.is_valid_hostname(self.hostname, local=True)
         if not self.hostname or valid:
-            self._network_module.SetHostname(self.hostname)
+            self._network_module.Hostname = self.hostname
         else:
             self.errors.append(_("Host name is not valid: %s") % error)
             self.hostname = self._network_module.Hostname
@@ -437,7 +442,7 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
             self._apply = False
             if ANACONDA_ENVIRON in flags.environs:
                 from pyanaconda.payload.manager import payloadMgr
-                payloadMgr.restart_thread(self.payload, checkmount=False)
+                payloadMgr.start(self.payload)
 
 
 class ConfigureDeviceSpoke(NormalTUISpoke):
@@ -604,6 +609,12 @@ class ConfigureDeviceSpoke(NormalTUISpoke):
         connection.update2_finish(result)
         log.debug("updated connection %s:\n%s", connection_uuid,
                   connection.to_dbus(NM.ConnectionSerializationFlags.ALL))
+        if self.apply_configuration:
+            nm_client = network.get_nm_client()
+            device = nm_client.get_device_by_iface(self._iface)
+            log.debug("activating connection %s with device %s",
+                      connection_uuid, self._iface)
+            nm_client.activate_connection_async(connection, device, None, None)
 
 
 def get_default_connection(iface, device_type):

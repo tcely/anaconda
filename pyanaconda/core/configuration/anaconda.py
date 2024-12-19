@@ -18,26 +18,39 @@
 #  Author(s):  Vendula Poncova <vponcova@redhat.com>
 #
 import os
-import warnings
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.base import (
+    Configuration,
+    ConfigurationError,
+    Section,
+)
 from pyanaconda.core.configuration.bootloader import BootloaderSection, BootloaderType
 from pyanaconda.core.configuration.license import LicenseSection
+from pyanaconda.core.configuration.localization import LocalizationSection
 from pyanaconda.core.configuration.network import NetworkSection
 from pyanaconda.core.configuration.payload import PayloadSection
+from pyanaconda.core.configuration.profile import ProfileLoader
 from pyanaconda.core.configuration.security import SecuritySection
 from pyanaconda.core.configuration.storage import StorageSection
 from pyanaconda.core.configuration.storage_constraints import StorageConstraints
-from pyanaconda.core.configuration.system import SystemType, SystemSection
-from pyanaconda.core.configuration.target import TargetType, TargetSection
-from pyanaconda.core.configuration.base import Section, Configuration, ConfigurationError
-from pyanaconda.core.configuration.profile import ProfileLoader
+from pyanaconda.core.configuration.system import SystemSection, SystemType
+from pyanaconda.core.configuration.target import TargetSection, TargetType
+from pyanaconda.core.configuration.timezone import TimezoneSection
 from pyanaconda.core.configuration.ui import UserInterfaceSection
-from pyanaconda.core.constants import ANACONDA_CONFIG_TMP, ANACONDA_CONFIG_DIR
+from pyanaconda.core.constants import (
+    ANACONDA_CONFIG_DIR,
+    ANACONDA_CONFIG_TMP,
+    GEOLOC_DEFAULT_PROVIDER,
+    GEOLOC_PROVIDER_FEDORA_GEOIP,
+    GEOLOC_PROVIDER_HOSTIP,
+    GEOLOC_URL_FEDORA_GEOIP,
+    GEOLOC_URL_HOSTIP,
+)
 
 log = get_module_logger(__name__)
 
-__all__ = ["conf", "AnacondaConfiguration"]
+__all__ = ["AnacondaConfiguration", "conf"]
 
 
 class AnacondaSection(Section):
@@ -59,27 +72,7 @@ class AnacondaSection(Section):
 
         :return: a list of patterns
         """
-        return self._get_deprecated_activatable_modules() \
-            or self._get_option("activatable_modules").split()
-
-    def _get_deprecated_activatable_modules(self):
-        """Get a list of deprecated activatable modules.
-
-        FIXME: This is a temporary workaround.
-
-        If the kickstart_modules option is defined in the configuration,
-        allow to activate only the specified modules and Anaconda addons.
-        """
-        if not self._has_option("kickstart_modules"):
-            return []
-
-        warnings.warn(
-            "The kickstart_modules configuration option is deprecated and "
-            "will be removed in in the future.", DeprecationWarning
-        )
-
-        return self._get_option("kickstart_modules").split() \
-            + ["org.fedoraproject.Anaconda.Addons.*"]
+        return self._get_option("activatable_modules").split()
 
     @property
     def forbidden_modules(self):
@@ -92,29 +85,7 @@ class AnacondaSection(Section):
 
         :return: a list of patterns
         """
-        return self._get_deprecated_forbidden_modules() \
-            + self._get_option("forbidden_modules").split()
-
-    def _get_deprecated_forbidden_modules(self):
-        """Get a list of deprecated forbidden modules.
-
-        FIXME: This is a temporary workaround.
-
-        If the addons_enabled option is defined in the configuration
-        and set to False, don't allow to activate Anaconda addons.
-        """
-        if not self._has_option("addons_enabled"):
-            return []
-
-        warnings.warn(
-            "The addons_enabled configuration option is deprecated and "
-            "will be removed in in the future.", DeprecationWarning
-        )
-
-        if self._get_option("addons_enabled", bool):
-            return []
-
-        return ["org.fedoraproject.Anaconda.Addons.*"]
+        return self._get_option("forbidden_modules").split()
 
     @property
     def optional_modules(self):
@@ -181,6 +152,13 @@ class AnacondaConfiguration(Configuration):
         self._license = LicenseSection(
             "License", self.get_parser()
         )
+        self._timezone = TimezoneSection(
+            "Timezone", self.get_parser()
+        )
+
+        self._localization = LocalizationSection(
+            "Localization", self.get_parser()
+        )
 
     @property
     def anaconda(self):
@@ -236,6 +214,16 @@ class AnacondaConfiguration(Configuration):
     def license(self):
         """The License section."""
         return self._license
+
+    @property
+    def timezone(self):
+        """The Timezone section."""
+        return self._timezone
+
+    @property
+    def localization(self):
+        """The Localization section."""
+        return self._localization
 
     def set_from_defaults(self):
         """Set the configuration from the default configuration files.
@@ -353,18 +341,30 @@ class AnacondaConfiguration(Configuration):
         if opts.debug:
             self.anaconda._set_option("debug", True)
 
+        # Set "nosave flags".
+        if "can_copy_input_kickstart" in opts:
+            self.target._set_option("can_copy_input_kickstart", opts.can_copy_input_kickstart)
+        if "can_save_output_kickstart" in opts:
+            self.target._set_option("can_save_output_kickstart", opts.can_save_output_kickstart)
+        if "can_save_installation_logs" in opts:
+            self.target._set_option("can_save_installation_logs", opts.can_save_installation_logs)
+
         # Set the bootloader type.
         if opts.extlinux:
             self.bootloader._set_option("type", BootloaderType.EXTLINUX.value)
+        if opts.sdboot:
+            self.bootloader._set_option("type", BootloaderType.SDBOOT.value)
 
         # Set the boot loader flags.
         self.bootloader._set_option("nonibft_iscsi_boot", opts.nonibftiscsiboot)
 
         # Set the storage flags.
-        self.storage._set_option("dmraid", opts.dmraid)
         self.storage._set_option("ibft", opts.ibft)
-        self.storage._set_option("gpt", opts.gpt)
         self.storage._set_option("multipath_friendly_names", opts.multipath_friendly_names)
+
+        # Set the disk label type.
+        if hasattr(opts, "disklabel"):
+            self.storage._set_option("disk_label_type", opts.disklabel)
 
         # Set up the rescue mode.
         if opts.rescue:
@@ -394,7 +394,33 @@ class AnacondaConfiguration(Configuration):
         if opts.noverifyssl:
             self.payload._set_option("verify_ssl", not opts.noverifyssl)
 
+        # Set geolocation provider
+        # FIXME: This will be removed once the boot option becomes a boolean
+        if "geoloc" in opts and opts.geoloc and opts.geoloc != "0":
+            self.timezone._set_option(
+                "geolocation_provider",
+                _convert_geoloc_provider_id_to_url(opts.geoloc)
+            )
+
         self.validate()
+
+
+def _convert_geoloc_provider_id_to_url(provider_id):
+    """Convert provider ID to URL of the corresponding service.
+
+    :param str provider_id: id of the geolocation provider service
+    :return str: URL to use
+    """
+    available_providers = {
+        GEOLOC_PROVIDER_FEDORA_GEOIP: GEOLOC_URL_FEDORA_GEOIP,
+        GEOLOC_PROVIDER_HOSTIP: GEOLOC_URL_HOSTIP,
+    }
+    try:
+        return available_providers[provider_id]
+    except KeyError:
+        log.error('Conf: Geoloc: wrong provider id specified: %s, using default %s',
+                  provider_id, GEOLOC_DEFAULT_PROVIDER)
+        return available_providers[GEOLOC_DEFAULT_PROVIDER]
 
 
 conf = AnacondaConfiguration.from_defaults()

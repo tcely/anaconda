@@ -17,11 +17,14 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.modules.common.base.base_template import KickstartModuleInterfaceTemplate
-from pyanaconda.modules.common.constants.interfaces import KICKSTART_MODULE
+from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
-from dasbus.server.interface import dbus_interface
+
+from pyanaconda.modules.common.base.base_template import (
+    KickstartModuleInterfaceTemplate,
+)
+from pyanaconda.modules.common.constants.interfaces import KICKSTART_MODULE
 from pyanaconda.modules.common.containers import TaskContainer
 from pyanaconda.modules.common.structures.kickstart import KickstartReport
 from pyanaconda.modules.common.structures.requirement import Requirement
@@ -71,7 +74,9 @@ class KickstartModuleInterface(KickstartModuleInterfaceTemplate):
         """
         return self.implementation.kickstarted
 
-    def SetKickstarted(self, kickstarted: Bool):
+    @Kickstarted.setter
+    @emits_properties_changed
+    def Kickstarted(self, kickstarted: Bool):
         """Set the Kickstarted property.
 
         FIXME: This method should be removed after we move the logic from UI.
@@ -96,19 +101,6 @@ class KickstartModuleInterface(KickstartModuleInterfaceTemplate):
         """
         return self.implementation.generate_kickstart()
 
-    def GenerateTemporaryKickstart(self) -> Str:
-        """Return a temporary kickstart representation of the module.
-
-        The kickstart representation should contain only commands that
-        are already replaced in UI. Commands that are not replaced in
-        UI will be generated from the kickstart data.
-
-        FIXME: This is just a temporary workaround.
-
-        :return: a kickstart string
-        """
-        return self.implementation.generate_temporary_kickstart()
-
     def CollectRequirements(self) -> List[Structure]:
         """Return installation requirements of this module.
 
@@ -130,7 +122,7 @@ class KickstartModuleInterface(KickstartModuleInterfaceTemplate):
 
         Examples: "cs_CZ.UTF-8", "fr_FR"
         """
-        return self.implementation.set_locale(locale)
+        self.implementation.set_locale(locale)
 
     def ConfigureWithTasks(self) -> List[ObjPath]:
         """Configure the runtime environment.

@@ -12,6 +12,7 @@ Contents:
    :maxdepth: 1
 
    intro
+   release-notes
    boot-options
    kickstart
    configuration-files
@@ -24,6 +25,8 @@ Contents:
    iscsi
    multipath
    list-harddrives
+   drop-in-scripts
    sysconfig-file
    mount-points
    Testing <testing>
+   ci-status

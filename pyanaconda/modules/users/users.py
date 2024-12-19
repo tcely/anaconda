@@ -17,21 +17,26 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.dbus import DBus
 from pyanaconda.core.signal import Signal
 from pyanaconda.modules.common.base import KickstartService
 from pyanaconda.modules.common.constants.services import USERS
 from pyanaconda.modules.common.containers import TaskContainer
-from pyanaconda.modules.common.structures.user import UserData
 from pyanaconda.modules.common.structures.group import GroupData
 from pyanaconda.modules.common.structures.sshkey import SshKeyData
+from pyanaconda.modules.common.structures.user import UserData
+from pyanaconda.modules.users.installation import (
+    ConfigureRootPasswordSSHLoginTask,
+    CreateGroupsTask,
+    CreateUsersTask,
+    SetRootPasswordTask,
+    SetSshKeysTask,
+)
 from pyanaconda.modules.users.kickstart import UsersKickstartSpecification
 from pyanaconda.modules.users.users_interface import UsersInterface
-from pyanaconda.modules.users.installation import SetRootPasswordTask, CreateUsersTask, \
-    CreateGroupsTask, SetSshKeysTask, ConfigureRootPasswordSSHLoginTask
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
@@ -79,6 +84,7 @@ class UsersService(KickstartService):
         """Process the kickstart data."""
         self.set_root_password(data.rootpw.password, crypted=data.rootpw.isCrypted)
         self.set_root_account_locked(data.rootpw.lock)
+        self.set_root_password_ssh_login_allowed(data.rootpw.allow_ssh)
         # make sure the root account is locked unless a password is set in kickstart
         if not data.rootpw.password:
             log.debug("root specified in kickstart without password, locking account")
@@ -115,6 +121,7 @@ class UsersService(KickstartService):
         data.rootpw.password = self._root_password
         data.rootpw.isCrypted = self._root_password_is_crypted
         data.rootpw.lock = self.root_account_locked
+        data.rootpw.allow_ssh = self.root_password_ssh_login_allowed
 
         for user_data in self.users:
             data.user.userList.append(self._user_data_to_ksdata(data.UserData(),

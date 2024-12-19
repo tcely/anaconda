@@ -24,21 +24,27 @@ import pyanaconda.core.timer
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 
-import queue
-import time
-import threading
 import functools
-
-from gi.repository import Gdk, Gtk
+import queue
+import threading
+import time
 from contextlib import contextmanager
 
-from pyanaconda.core import glib
-from pyanaconda.threading import threadMgr, AnacondaThread
-from pyanaconda.core.async_utils import async_action_wait, run_in_loop
-from pyanaconda.core.constants import NOTICEABLE_FREEZE, PASSWORD_HIDE, PASSWORD_SHOW, \
-                                      PASSWORD_HIDE_ICON, PASSWORD_SHOW_ICON
+from gi.repository import Gdk, Gtk
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import glib
+from pyanaconda.core.async_utils import async_action_wait, run_in_loop
+from pyanaconda.core.constants import (
+    NOTICEABLE_FREEZE,
+    PASSWORD_HIDE,
+    PASSWORD_HIDE_ICON,
+    PASSWORD_SHOW,
+    PASSWORD_SHOW_ICON,
+)
+from pyanaconda.core.i18n import _
+from pyanaconda.core.threads import thread_manager
+
 log = get_module_logger(__name__)
 
 # any better idea how to create a unique, distinguishable object that cannot be
@@ -93,7 +99,7 @@ def gtk_batch_map(action, items, args=(), pre_func=None, batch_size=1):
 
     """
 
-    assert(not threadMgr.in_main_thread())
+    assert(not thread_manager.in_main_thread())
 
     def preprocess(queue_instance):
         if pre_func:
@@ -138,9 +144,11 @@ def gtk_batch_map(action, items, args=(), pre_func=None, batch_size=1):
     log.debug("Starting applying %s on %s", action, object.__repr__(items))
 
     # start a thread putting preprocessed items into the queue_instance
-    threadMgr.add(AnacondaThread(prefix="AnaGtkBatchPre",
-                                 target=preprocess,
-                                 args=(item_queue_instance,)))
+    thread_manager.add_thread(
+        prefix="AnaGtkBatchPre",
+        target=preprocess,
+        args=(item_queue_instance,)
+    )
 
     run_in_loop(process_one_batch, (item_queue_instance, action, done_event))
     done_event.wait()
@@ -177,7 +185,7 @@ def timed_action(delay=300, threshold=750, busy_cursor=True):
 
     """
 
-    class TimedAction(object):
+    class TimedAction:
         """Class making the timing work."""
 
         def __init__(self, func):
@@ -244,7 +252,7 @@ def timed_action(delay=300, threshold=750, busy_cursor=True):
         # converts a regular function into an instance method. Bind to the
         # instance of whatever is being decorated by returning a curried version
         # of ourself with the instance applied as the first argument.
-        def __get__(self, instance, owner):
+        def __get__(self, instance, _owner):
             if instance not in self._instance_map:
                 self._instance_map[instance] = functools.partial(self, instance)
 
@@ -272,7 +280,7 @@ def busyCursor():
     if not window:
         return
 
-    window.set_cursor(Gdk.Cursor(Gdk.CursorType.WATCH))
+    window.set_cursor(Gdk.Cursor.new_for_display(Gdk.Display.get_default(), Gdk.CursorType.WATCH))
 
 
 def unbusyCursor():
@@ -280,7 +288,7 @@ def unbusyCursor():
     if not window:
         return
 
-    window.set_cursor(Gdk.Cursor(Gdk.CursorType.ARROW))
+    window.set_cursor(Gdk.Cursor.new_for_display(Gdk.Display.get_default(), Gdk.CursorType.ARROW))
 
 
 def ignoreEscape(dlg):
@@ -542,10 +550,10 @@ def set_password_visibility(entry, visible):
 
     if visible:
         icon = PASSWORD_HIDE_ICON
-        text = PASSWORD_HIDE
+        text = _(PASSWORD_HIDE)
     else:
         icon = PASSWORD_SHOW_ICON
-        text = PASSWORD_SHOW
+        text = _(PASSWORD_SHOW)
 
     entry.set_visibility(visible)
     entry.set_icon_from_icon_name(position, icon)

@@ -16,33 +16,37 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-import shutil
-import socket
+import ipaddress
 import itertools
 import os
-import time
-import threading
 import re
-import ipaddress
+import shutil
+import socket
+import threading
+import time
 
+import gi
 from dasbus.typing import get_native
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.core import util, constants
-from pyanaconda.core.i18n import _
-from pyanaconda.core.kernel import kernel_arguments
-from pyanaconda.core.regexes import HOSTNAME_PATTERN_WITHOUT_ANCHORS, \
-    IPV6_ADDRESS_IN_DRACUT_IP_OPTION, MAC_OCTET
+from pyanaconda.core import constants, util
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.constants import TIME_SOURCE_SERVER
-from pyanaconda.modules.common.constants.services import NETWORK, TIMEZONE, STORAGE
+from pyanaconda.core.i18n import _
+from pyanaconda.core.kernel import kernel_arguments
+from pyanaconda.core.path import make_directories
+from pyanaconda.core.regexes import (
+    HOSTNAME_PATTERN_WITHOUT_ANCHORS,
+    IPV6_ADDRESS_IN_DRACUT_IP_OPTION,
+    MAC_OCTET,
+)
 from pyanaconda.modules.common.constants.objects import FCOE
-from pyanaconda.modules.common.task import sync_run_task
+from pyanaconda.modules.common.constants.services import NETWORK, STORAGE, TIMEZONE
 from pyanaconda.modules.common.structures.network import NetworkDeviceInfo
 from pyanaconda.modules.common.structures.timezone import TimeSourceData
+from pyanaconda.modules.common.task import sync_run_task
 from pyanaconda.modules.common.util import is_module_available
 
-import gi
 gi.require_version("NM", "1.0")
 from gi.repository import NM
 
@@ -53,11 +57,23 @@ network_connected_condition = threading.Condition()
 
 _nm_client = None
 
-__all__ = ["get_supported_devices", "status_message", "wait_for_connectivity",
-           "wait_for_connecting_NM_thread", "wait_for_network_devices", "wait_for_connected_NM",
-           "initialize_network", "copy_resolv_conf_to_root", "prefix_to_netmask",
-           "netmask_to_prefix", "get_first_ip_address", "is_valid_hostname", "check_ip_address",
-           "get_nm_client", "write_configuration"]
+__all__ = [
+    "check_ip_address",
+    "copy_resolv_conf_to_root",
+    "get_first_ip_address",
+    "get_nm_client",
+    "get_supported_devices",
+    "initialize_network",
+    "is_valid_hostname",
+    "netmask_to_prefix",
+    "prefix_to_netmask",
+    "status_message",
+    "wait_for_connected_NM",
+    "wait_for_connecting_NM_thread",
+    "wait_for_connectivity",
+    "wait_for_network_devices",
+    "write_configuration",
+]
 
 
 def get_nm_client():
@@ -192,11 +208,11 @@ def hostname_from_cmdline(kernel_args):
                 # [fd00:10:100::84:5]::[fd00:10:100::86:49]:80:myhostname:ens9:none
                 ipopt = IPV6_ADDRESS_IN_DRACUT_IP_OPTION.sub('', ipopt)
             elements = ipopt.split(':')
-            # Hostname can be defined only in option having more than 6 elements.
+            # Hostname can be defined only in option having more than 5 elements.
             # But filter out auto ip= with mac address set by MAC_OCTET matching, eg:
             # ip=<interface>:dhcp::52:54:00:12:34:56
             # where the 4th element is not hostname.
-            if len(elements) > 6 and not re.match(MAC_OCTET, elements[6]):
+            if len(elements) > 5 and not re.match(MAC_OCTET, elements[5]):
                 hostname = ipopt.split(':')[4]
     return hostname
 
@@ -229,7 +245,7 @@ def copy_resolv_conf_to_root(root="/"):
         return
     dst_dir = os.path.dirname(dst)
     if not os.path.isdir(dst_dir):
-        util.mkdirChain(dst_dir)
+        make_directories(dst_dir)
     shutil.copyfile(src, dst)
 
 
@@ -257,6 +273,12 @@ def initialize_network():
     log.debug("Devices found: %s",
               [dev.device_name for dev in get_supported_devices()])
 
+    if util.is_stage2_on_nfs() and network_proxy.Kickstarted:
+        msg = "Using kickstart network configuration with installer image (stage2) provided " \
+            "via nfs server can freeze the installation."
+        log.warning(msg)
+        print("WARNING:", msg)
+
     run_network_initialization_task(network_proxy.ApplyKickstartWithTask())
     run_network_initialization_task(network_proxy.DumpMissingConfigFilesWithTask())
 
@@ -264,7 +286,7 @@ def initialize_network():
         bootopts_hostname = hostname_from_cmdline(kernel_arguments)
         if bootopts_hostname:
             log.debug("Updating host name from boot options: %s", bootopts_hostname)
-            network_proxy.SetHostname(bootopts_hostname)
+            network_proxy.Hostname = bootopts_hostname
 
     # Create device configuration tracking in the module.
     # It will be used to generate kickstart from persistent network configuration
@@ -334,9 +356,8 @@ def _set_ntp_servers_from_dhcp():
             server.options = ["iburst"]
             servers.append(server)
 
-        timezone_proxy.SetTimeSources(
+        timezone_proxy.TimeSources = \
             TimeSourceData.to_structure_list(servers)
-        )
 
 
 def wait_for_connected_NM(timeout=constants.NETWORK_CONNECTION_TIMEOUT, only_connecting=False):
@@ -435,6 +456,10 @@ def wait_for_connectivity(timeout=constants.NETWORK_CONNECTION_TIMEOUT):
 def get_activated_devices(nm_client):
     """Get activated NetworkManager devices."""
     activated_devices = []
+
+    if not nm_client:
+        return activated_devices
+
     for ac in nm_client.get_active_connections():
         if ac.get_state() != NM.ActiveConnectionState.ACTIVATED:
             continue

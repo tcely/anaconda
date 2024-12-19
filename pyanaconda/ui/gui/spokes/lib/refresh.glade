@@ -11,6 +11,9 @@
     <property name="destroy_with_parent">True</property>
     <property name="type_hint">dialog</property>
     <property name="decorated">False</property>
+    <child type="titlebar">
+      <object class="GtkDrawingArea"/>
+    </child>
     <child internal-child="vbox">
       <object class="GtkBox" id="dialog-vbox1">
         <property name="can_focus">False</property>
@@ -102,7 +105,7 @@
                   <object class="GtkImage" id="image1">
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
-                    <property name="icon_name">dialog-warning</property>
+                    <property name="icon_name">dialog-warning-symbolic</property>
                     <property name="icon_size">2</property>
                   </object>
                   <packing>

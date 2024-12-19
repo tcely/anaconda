@@ -1,3 +1,4 @@
+#!/bin/sh
 # Fix mount loops that prevent unmount/eject.
 #
 # During startup, we mount our repo (e.g. the DVD) at $repodir or $isodir.
@@ -17,5 +18,5 @@
 for mnt in $repodir $isodir; do
     # systemd-shutdown puts old root at /oldroot
     oldmnt=/oldroot$mnt
-    grep -qw $oldmnt /proc/mounts && mount --move $oldmnt $mnt
+    grep -qw "$oldmnt" /proc/mounts && mount --move "$oldmnt" "$mnt"
 done

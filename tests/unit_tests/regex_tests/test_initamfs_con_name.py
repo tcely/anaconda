@@ -17,6 +17,7 @@
 import unittest
 
 from regexcheck import regex_match
+
 from pyanaconda.core.regexes import NM_MAC_INITRAMFS_CONNECTION
 
 
@@ -42,4 +43,4 @@ class NMMacInitramfsConnectionTestCase(unittest.TestCase):
             '80:00:02:00:fe:80:00:00:00:00:00:00:f4:52:14:03:00:7b:cb:a3',
         ]
 
-        self.assertTrue(regex_match(NM_MAC_INITRAMFS_CONNECTION, good_tests, bad_tests))
+        assert regex_match(NM_MAC_INITRAMFS_CONNECTION, good_tests, bad_tests)

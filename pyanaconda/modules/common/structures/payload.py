@@ -21,8 +21,12 @@
 from dasbus.structure import DBusData
 from dasbus.typing import *  # pylint: disable=wildcard-import
 
-from pyanaconda.core.util import join_paths
-from pyanaconda.core.constants import URL_TYPE_BASEURL, DNF_DEFAULT_REPO_COST
+from pyanaconda.core.constants import (
+    DNF_DEFAULT_REPO_COST,
+    REPO_ORIGIN_USER,
+    URL_TYPE_BASEURL,
+)
+from pyanaconda.core.path import join_paths
 
 __all__ = ["RepoConfigurationData", "SSLConfigurationData"]
 
@@ -67,7 +71,19 @@ class SSLConfigurationData(DBusData):
 
         :rtype: bool
         """
-        return not any([self._ca_cert_path, self._client_cert_path, self._client_key_path])
+        return not any([
+            self._ca_cert_path,
+            self._client_cert_path,
+            self._client_key_path]
+        )
+
+    def __repr__(self):
+        """Convert this data object to a string."""
+        if not self.is_empty():
+            return super().__repr__()
+
+        # Don't list attributes if none of them are set.
+        return "{}()".format(self.__class__.__name__)
 
 
 class RepoConfigurationData(DBusData):
@@ -75,6 +91,8 @@ class RepoConfigurationData(DBusData):
 
     def __init__(self):
         self._name = ""
+        self._origin = REPO_ORIGIN_USER
+        self._enabled = True
         self._url = ""
         self._type = URL_TYPE_BASEURL
         self._ssl_verification_enabled = True
@@ -83,6 +101,7 @@ class RepoConfigurationData(DBusData):
         self._cost = DNF_DEFAULT_REPO_COST
         self._exclude_packages = []
         self._included_packages = []
+        self._installation_enabled = False
 
     @classmethod
     def from_directory(cls, directory_path):
@@ -99,6 +118,17 @@ class RepoConfigurationData(DBusData):
 
         return data
 
+    @classmethod
+    def from_url(cls, url):
+        """Create a new configuration for the specified URL.
+
+        :param str url: a URL of the installation source
+        :return RepoConfigurationData: a new configuration
+        """
+        data = RepoConfigurationData()
+        data.url = url
+        return data
+
     @property
     def name(self) -> Str:
         """Get name of this repository.
@@ -110,6 +140,35 @@ class RepoConfigurationData(DBusData):
     @name.setter
     def name(self, name: Str):
         self._name = name
+
+    @property
+    def origin(self) -> Str:
+        """The origin of the repository.
+
+        Supported values:
+            SYSTEM    Provided by the system.
+            USER      Specified by a user.
+            TREEINFO  Generated from a .treeinfo file.
+
+        :return: a type of the origin
+        """
+        return self._origin
+
+    @origin.setter
+    def origin(self, value: Str):
+        self._origin = value
+
+    @property
+    def enabled(self) -> Bool:
+        """Is the repository enabled?
+
+        :return: True or False
+        """
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value):
+        self._enabled = value
 
     @property
     def url(self) -> Str:
@@ -215,3 +274,18 @@ class RepoConfigurationData(DBusData):
     @included_packages.setter
     def included_packages(self, included_packages: List[Str]):
         self._included_packages = included_packages
+
+    @property
+    def installation_enabled(self) -> Bool:
+        """Should the repository be installed to the target system?
+
+        The installer will generate a repo file with a configuration
+        of this repository and write it to the target system.
+
+        :return: True or False
+        """
+        return self._installation_enabled
+
+    @installation_enabled.setter
+    def installation_enabled(self, value: Bool):
+        self._installation_enabled = value

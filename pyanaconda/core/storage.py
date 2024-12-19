@@ -16,17 +16,20 @@
 # Red Hat, Inc.
 #
 import os
-
 from decimal import Decimal
 
 from blivet import udev
 from blivet.size import Size
 from blivet.util import total_memory
-from blivet import __version__ as blivet_version
+from pykickstart.constants import (
+    AUTOPART_TYPE_BTRFS,
+    AUTOPART_TYPE_LVM,
+    AUTOPART_TYPE_LVM_THINP,
+    AUTOPART_TYPE_PLAIN,
+)
+
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.i18n import N_
-from pykickstart.constants import AUTOPART_TYPE_PLAIN, AUTOPART_TYPE_BTRFS, AUTOPART_TYPE_LVM, \
-    AUTOPART_TYPE_LVM_THINP
 
 log = get_module_logger(__name__)
 
@@ -243,7 +246,7 @@ def _is_device_name_disk(device_name, devicetree=None, refresh_udev_cache=False)
                 # so we cache it in this non-elegant way.
                 # An unfortunate side effect of this is that udev devices that show up after
                 # this function is called for the first time will not be taken into account.
-                _udev_device_dict_cache = dict()
+                _udev_device_dict_cache = {}
 
                 for d in udev.get_devices():
                     # Add the device name to the cache.
@@ -261,19 +264,16 @@ def _is_device_name_disk(device_name, devicetree=None, refresh_udev_cache=False)
         return device and device.is_disk
 
 
-def suggest_swap_size(quiet=False, hibernation=False, disk_space=None):
+def suggest_swap_size(hibernation=False, disk_space=None):
     """Suggest the size of the swap partition that will be created.
 
-    :param bool quiet: whether to log size information or not
     :param bool hibernation: calculate swap size big enough for hibernation
     :param disk_space: how much disk space is available
     :return: calculated swap size
     """
     mem = total_memory()
     mem = ((mem / 16) + 1) * 16
-
-    if not quiet:
-        log.info("Detected %s of memory", mem)
+    log.info("Detected %s of memory", mem)
 
     sixty_four_gib = Size("64 GiB")
 
@@ -283,7 +283,7 @@ def suggest_swap_size(quiet=False, hibernation=False, disk_space=None):
     # swap(mem) = 2 * mem, if mem < 2 GiB
     #           = mem,     if 2 GiB <= mem < 8 GiB
     #           = mem / 2, if 8 GIB <= mem < 64 GiB
-    #           = 4 GiB,   if mem >= 64 GiB
+    #           = 32 GiB,  if mem >= 64 GiB
     if mem < Size("2 GiB"):
         swap = 2 * mem
 
@@ -294,17 +294,18 @@ def suggest_swap_size(quiet=False, hibernation=False, disk_space=None):
         swap = mem / 2
 
     else:
-        swap = Size("4 GiB")
+        swap = Size("32 GiB")
 
     if hibernation:
         if mem <= sixty_four_gib:
             swap = mem + swap
         else:
-            log.info("Ignoring --hibernation option on systems with %s of RAM or more",
+            log.info("Ignoring --hibernation option on systems with greater than %s of RAM",
                      sixty_four_gib)
 
-    if disk_space is not None and not hibernation:
+    elif disk_space is not None:
         max_swap = disk_space * MAX_SWAP_DISK_RATIO
+
         if swap > max_swap:
             log.info("Suggested swap size (%(swap)s) exceeds %(percent)d %% of "
                      "disk space, using %(percent)d %% of disk space (%(size)s) "
@@ -313,7 +314,5 @@ def suggest_swap_size(quiet=False, hibernation=False, disk_space=None):
                                   "size": max_swap})
             swap = max_swap
 
-    if not quiet:
-        log.info("Swap attempt of %s", swap)
-
+    log.info("Swap attempt of %s", swap)
     return swap

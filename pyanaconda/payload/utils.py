@@ -16,71 +16,50 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import os
 import blivet.util
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.modules.common.constants.objects import DEVICE_TREE
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.structures.storage import DeviceData
-from pyanaconda.payload.errors import PayloadSetupError
 
 log = get_module_logger(__name__)
 
 
-def resolve_device(dev_spec):
-    """Get the device matching the provided device specification.
-
-    :param str dev_spec: a string describing a block device
-    :return: a device name or None
-    """
-    device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    return device_tree.ResolveDevice(dev_spec) or None
-
-
-def get_device_path(device_name):
+def get_device_path(device_id):
     """Return a device path.
 
-    :param device_name: a device name
+    :param device_id: device ID
     :return: a device path
     """
-    if device_name is None:
+    if device_id is None:
         return None
 
     device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    device_data = DeviceData.from_structure(device_tree.GetDeviceData(device_name))
+    device_data = DeviceData.from_structure(device_tree.GetDeviceData(device_id))
     return device_data.path
 
 
-def setup_device(device_name):
-    """Open, or set up, a device.
-
-    :param device_name: a device name
-    """
-    device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    device_tree.SetupDevice(device_name)
-
-
-def mount_device(device_name, mount_point):
+def mount_device(device_id, mount_point):
     """Mount a filesystem on the device.
 
-    :param device_name: a device name
+    :param device_id: device ID
     :param str mount_point: a path to the mount point
     """
     device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    device_tree.MountDevice(device_name, mount_point, "ro")
+    device_tree.MountDevice(device_id, mount_point, "ro")
 
 
-def unmount_device(device_name, mount_point):
+def unmount_device(device_id, mount_point):
     """Unmount a filesystem on the device.
 
     FIXME: Always specify the mount point.
 
-    :param device_name: a device name
+    :param device_id: device ID
     :param str mount_point: a path to the mount point or None
     """
     if not mount_point:
-        device_path = get_device_path(device_name)
+        device_path = get_device_path(device_id)
         mount_paths = get_mount_paths(device_path)
 
         if not mount_paths:
@@ -89,37 +68,7 @@ def unmount_device(device_name, mount_point):
         mount_point = mount_paths[-1]
 
     device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    device_tree.UnmountDevice(device_name, mount_point)
-
-
-def teardown_device(device_name):
-    """Close, or tear down, a device.
-
-    :param device_name: a device name
-    """
-    device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    device_tree.TeardownDevice(device_name)
-
-
-def get_mount_points():
-    """Get mount points in the device tree.
-
-    :return: a dictionary of mount points and device names
-    """
-    device_tree = STORAGE.get_proxy(DEVICE_TREE)
-    return device_tree.GetMountPoints()
-
-
-def get_mount_device_path(mount_point):
-    """Given a mount point, return the device node path mounted there.
-
-    :param str mount_point: a mount point
-    :return: a device path or None
-    """
-    if os.path.ismount(mount_point):
-        return blivet.util.get_mount_device(mount_point)
-
-    return None
+    device_tree.UnmountDevice(device_id, mount_point)
 
 
 def get_mount_paths(device_path):
@@ -153,8 +102,6 @@ def mount(device_path, mount_point, fstype, options):
     :param str mount_point: a mount point
     :param str fstype: a filesystem type
     :param str options: mount options
+    :raise: OSError on failure
     """
-    try:
-        return blivet.util.mount(device_path, mount_point, fstype=fstype, options=options)
-    except OSError as e:
-        raise PayloadSetupError(str(e)) from e
+    return blivet.util.mount(device_path, mount_point, fstype=fstype, options=options)

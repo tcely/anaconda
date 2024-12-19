@@ -18,12 +18,14 @@
 # Red Hat, Inc.
 #
 
-from pyanaconda.modules.common.constants.services import LOCALIZATION
+from dasbus.server.interface import dbus_interface, dbus_signal
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base import KickstartModuleInterface
+from pyanaconda.modules.common.constants.services import LOCALIZATION
 from pyanaconda.modules.common.containers import TaskContainer
-from dasbus.server.interface import dbus_interface
+from pyanaconda.modules.common.structures.language import LanguageData, LocaleData
 
 
 @dbus_interface(LOCALIZATION.interface_name)
@@ -39,14 +41,64 @@ class LocalizationInterface(KickstartModuleInterface):
         self.watch_property("XLayouts", self.implementation.x_layouts_changed)
         self.watch_property("LayoutSwitchOptions", self.implementation.switch_options_changed)
         self.watch_property("KeyboardKickstarted", self.implementation.keyboard_seen_changed)
+        self.implementation.compositor_selected_layout_changed.connect(
+            self.CompositorSelectedLayoutChanged
+        )
+        self.implementation.compositor_layouts_changed.connect(self.CompositorLayoutsChanged)
+
+    def GetLanguages(self) -> List[Str]:
+        """Get languages with available translations.
+
+        For example: ["en", "cs"]
+
+        :return: a list of language ids
+        """
+        return self.implementation.get_languages()
+
+    def GetLanguageData(self, language_id: Str) -> Structure:
+        """Get data about the specified language.
+
+        :param: a language id (for example, "en")
+        :return: a language data
+        """
+        language_data = self.implementation.get_language_data(language_id)
+        return LanguageData.to_structure(language_data)
+
+    def GetLocales(self, language_id: Str) -> List[Str]:
+        """Get locales available for the specified language.
+
+        For example: ["de_DE.UTF-8", "de_AT.UTF-8", ... ]
+
+        :return: a list of locale ids
+        """
+        return self.implementation.get_locales(language_id)
+
+    def GetCommonLocales(self) -> List[Str]:
+        """Get a list of the most commonly used locales.
+
+        For example: ["ar_EG.UTF-8", "en_US.UTF-8", "en_GB.UTF-8", ...]
+
+        :return: a list of common locale IDs
+        """
+        return self.implementation.get_common_locales()
+
+    def GetLocaleData(self, locale_id: Str) -> Structure:
+        """Get data about the specified locale.
+
+        :param: a locale id (for example, "en_US.UTF-8")
+        :return: a locale data
+        """
+        locale_data = self.implementation.get_locale_data(locale_id)
+        return LocaleData.to_structure(locale_data)
 
     @property
     def Language(self) -> Str:
         """The language the system will use."""
         return self.implementation.language
 
+    @Language.setter
     @emits_properties_changed
-    def SetLanguage(self, language: Str):
+    def Language(self, language: Str):
         """Set the language.
 
         Sets the language to use during installation and the default language
@@ -65,8 +117,9 @@ class LocalizationInterface(KickstartModuleInterface):
         """Supported languages on the system."""
         return self.implementation.language_support
 
+    @LanguageSupport.setter
     @emits_properties_changed
-    def SetLanguageSupport(self, language_support: List[Str]):
+    def LanguageSupport(self, language_support: List[Str]):
         """Set the languages for which the support should be installed.
 
         Language support packages for specified languages will be installed.
@@ -83,8 +136,9 @@ class LocalizationInterface(KickstartModuleInterface):
         """
         return self.implementation.language_seen
 
+    @LanguageKickstarted.setter
     @emits_properties_changed
-    def SetLanguageKickstarted(self, language_seen: Bool):
+    def LanguageKickstarted(self, language_seen: Bool):
         """Set if language should be considered as coming from kickstart
 
         :param bool language_seen: if language should be considered as coming from kickstart
@@ -107,8 +161,9 @@ class LocalizationInterface(KickstartModuleInterface):
         """Virtual Console keyboard mapping."""
         return self.implementation.vc_keymap
 
+    @VirtualConsoleKeymap.setter
     @emits_properties_changed
-    def SetVirtualConsoleKeymap(self, vc_keymap: Str):
+    def VirtualConsoleKeymap(self, vc_keymap: Str):
         """Set Virtual console keyboard mapping.
 
         The mapping name corresponds to filenames in /usr/lib/kbd/keymaps
@@ -123,12 +178,13 @@ class LocalizationInterface(KickstartModuleInterface):
         """X Layouts that should be used on the system."""
         return self.implementation.x_layouts
 
+    @XLayouts.setter
     @emits_properties_changed
-    def SetXLayouts(self, x_layouts: List[Str]):
+    def XLayouts(self, x_layouts: List[Str]):
         """Set the X layouts for the system.
 
         The layout is specified by values used by setxkbmap(1).  Accepts either
-        layout format (eg "cz") or the layout(variant) format (eg "cz (qerty)")
+        layout format (eg "cz") or the layout(variant) format (eg "cz (qwerty)")
 
         :param x_layouts: List of x layout specifications.
         """
@@ -139,8 +195,9 @@ class LocalizationInterface(KickstartModuleInterface):
         """List of options for layout switching"""
         return self.implementation.switch_options
 
+    @LayoutSwitchOptions.setter
     @emits_properties_changed
-    def SetLayoutSwitchOptions(self, switch_options: List[Str]):
+    def LayoutSwitchOptions(self, switch_options: List[Str]):
         """Set the layout switchin options.
 
         Accepts the same values as setxkbmap(1) for switching.
@@ -157,8 +214,9 @@ class LocalizationInterface(KickstartModuleInterface):
         """
         return self.implementation.keyboard_seen
 
+    @KeyboardKickstarted.setter
     @emits_properties_changed
-    def SetKeyboardKickstarted(self, keyboard_seen: Bool):
+    def KeyboardKickstarted(self, keyboard_seen: Bool):
         """Set if keyboard should be considered as coming from kickstart
 
         :param bool keyboard_seen: if keyboard should be considered as coming from kickstart
@@ -184,3 +242,55 @@ class LocalizationInterface(KickstartModuleInterface):
         return TaskContainer.to_object_path(
             self.implementation.apply_keyboard_with_task()
         )
+
+    def GetCompositorSelectedLayout(self) -> Str:
+        """Get the activated keyboard layout.
+
+        :return: Current keyboard layout (e.g. "cz (qwerty)")
+        :rtype: str
+        """
+        return self.implementation.get_compositor_selected_layout()
+
+    def SetCompositorSelectedLayout(self, layout_variant: Str) -> Bool:
+        """Set the activated keyboard layout.
+
+        :param layout_variant: The layout to set, with format "layout (variant)"
+            (e.g. "cz (qwerty)")
+        :type layout_variant: str
+        :return: If the keyboard layout was activated
+        :rtype: bool
+        """
+        return self.implementation.set_compositor_selected_layout(layout_variant)
+
+    def SelectNextCompositorLayout(self):
+        """Set the next available layout as active."""
+        return self.implementation.select_next_compositor_layout()
+
+    @dbus_signal
+    def CompositorSelectedLayoutChanged(self, layout: Str):
+        """Signal emitted when the selected keyboard layout changes."""
+        pass
+
+    def GetCompositorLayouts(self) -> List[Str]:
+        """Get all available keyboard layouts.
+
+        :return: A list of keyboard layouts (e.g. ["cz (qwerty)", cn (mon_todo_galik)])
+        :rtype: list of strings
+        """
+        return self.implementation.get_compositor_layouts()
+
+    def SetCompositorLayouts(self, layout_variants: List[Str], options: List[Str]):
+        """Set the available keyboard layouts.
+
+        :param layout_variants: A list of keyboard layouts (e.g. ["cz (qwerty)",
+            cn (mon_todo_galik)])
+        :type layout_variants: list of strings
+        :param options: A list of switching options
+        :type options: list of strings
+        """
+        self.implementation.set_compositor_layouts(layout_variants, options)
+
+    @dbus_signal
+    def CompositorLayoutsChanged(self, layouts: List[Str]):
+        """Signal emitted when available layouts change."""
+        pass

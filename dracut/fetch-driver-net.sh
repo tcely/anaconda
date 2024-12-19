@@ -1,9 +1,9 @@
 #!/bin/bash
 # fetch-driver-net - fetch driver from the network.
 # runs from the "initqueue/online" hook whenever a net interface comes online
-
 # initqueue/online hook passes interface name as $1
-netif="$1"
+
+command -v warn_critical >/dev/null || . /lib/anaconda-lib.sh
 
 # No dd_net was requested - exit
 [ -f /tmp/dd_net ] || return 0
@@ -24,7 +24,7 @@ for dd in $DD_NET; do
             echo "$dd" >> /tmp/dd_net.done # mark it done so we don't fetch it again
             driver-updates --net "$dd" "$driver"
         else
-            warn "Failed to fetch driver from $dd"
+            warn_critical "Failed to fetch driver from $dd"
         fi
 
     else
@@ -36,6 +36,7 @@ for dd in $DD_NET; do
             info "Fetching RPM driverdisks from $dd directory"
 
             # Following variables are set by nfs_to_var:
+            # shellcheck disable=SC2168  # dracut sources hooks instead of running them
             local nfs="" server="" path="" options="" mntdir=""
             nfs_to_var "$dd"
 
@@ -44,11 +45,11 @@ for dd in $DD_NET; do
             mntdir=$(nfs_already_mounted "$server" "$path")
             if [ -z "$mntdir" ]; then
                 mntdir="$(mkuniqdir /run nfs_mnt)"
-                mount_nfs "$nfs:$server:$path$(options:+:$options)" "$mntdir"
+                mount_nfs "$nfs:$server:$path$(options:+:"$options")" "$mntdir"
             fi
 
             # Get and process all rpm files in the mounted directory
-            for rpm_file in $mntdir/*.rpm; do
+            for rpm_file in "$mntdir"/*.rpm; do
                 # If no file is found bash still loops once
                 # Hence to prevent this:
                 if [[ ! -e "$rpm_file" ]]; then

@@ -16,26 +16,31 @@
 # Red Hat, Inc.
 #
 import os
-import blivet.util
-
 from subprocess import CalledProcessError
+
+import blivet.util
+import gi
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.glib import format_size_full, create_new_context, Variant, GError
+from pyanaconda.core.glib import GError, Variant, create_new_context, format_size_full
 from pyanaconda.core.i18n import _
-from pyanaconda.core.util import execWithRedirect, mkdirChain, set_system_root
-from pyanaconda.modules.common.errors.installation import PayloadInstallationError
-from pyanaconda.modules.common.task import Task
-from pyanaconda.modules.common.constants.objects import DEVICE_TREE, BOOTLOADER
-from pyanaconda.modules.common.constants.services import STORAGE
+from pyanaconda.core.path import make_directories, set_system_root
+from pyanaconda.core.util import execWithRedirect
+from pyanaconda.modules.common.constants.objects import BOOTLOADER, DEVICE_TREE
+from pyanaconda.modules.common.constants.services import LOCALIZATION, STORAGE
+from pyanaconda.modules.common.errors.installation import (
+    BootloaderInstallationError,
+    PayloadInstallationError,
+)
 from pyanaconda.modules.common.structures.storage import DeviceData
+from pyanaconda.modules.common.task import Task
+from pyanaconda.modules.payloads.payload.rpm_ostree.util import have_bootupd
 
-import gi
 gi.require_version("OSTree", "1.0")
 gi.require_version("Gio", "2.0")
 gi.require_version("RpmOstree", "1.0")
-from gi.repository import RpmOstree, OSTree, Gio
+from gi.repository import Gio, OSTree, RpmOstree
 
 log = get_module_logger(__name__)
 
@@ -51,6 +56,60 @@ def safe_exec_with_redirect(cmd, argv, successful_return_codes=(0,), **kwargs):
         raise PayloadInstallationError(
             "The command '{}' exited with the code {}.".format(" ".join([cmd] + argv), rc)
         )
+
+
+def _get_ref(data):
+    """Get ref or name based on source.
+
+    OSTree container don't have ref because it's specified by the container. In that case let's
+    return just url for reporting.
+
+    :param data: OSTree source structure
+    :return str: ref or name based on source
+    """
+    # Variable substitute the ref: https://pagure.io/atomic-wg/issue/299
+    if data.is_container():
+        # we don't have ref with container; there are not multiple references in one container
+        return data.url
+    else:
+        return RpmOstree.varsubst_basearch(data.ref)
+
+
+def _get_stateroot(data):
+    """Get stateroot.
+
+    The OSTree renamed old osname to stateroot for containers.
+
+    :param data: OSTree source structure
+    :return str: stateroot or osname value based on source
+    """
+    if data.is_container():
+        # osname was renamed to stateroot so let's use the new name
+        if data.stateroot:
+            return data.stateroot
+        else:
+            # The stateroot doesn't have to be defined
+            # https://github.com/ostreedev/ostree-rs-ext/pull/462/files
+            # However, it's working just for a subset of calls now.
+            # TODO: Remove this when all ostree commands undestarstands this
+            return "default"
+    else:
+        return data.osname
+
+
+def _get_verification_enabled(data):
+    """Find out if source has enabled verification.
+
+    OSTree sources has different names for enabled verification. This helper function
+    will make the access consistent.
+
+    :param data: OSTree source structure
+    :return bool: True if verification is enabled
+    """
+    if data.is_container():
+        return data.signature_verification_enabled
+    else:
+        return data.gpg_verification_enabled
 
 
 class PrepareOSTreeMountTargetsTask(Task):
@@ -103,6 +162,10 @@ class PrepareOSTreeMountTargetsTask(Task):
 
         # Canonicalize dest to the full path
         dest = self._sysroot + dest
+        # Resolve symlinks as bind mounting over symlinks does not
+        # seem to work on btrfs:
+        # https://bugzilla.redhat.com/show_bug.cgi?id=2262892
+        dest = os.path.realpath(dest)
 
         if bind_ro:
             safe_exec_with_redirect("mount", ["--bind", src, src])
@@ -110,7 +173,7 @@ class PrepareOSTreeMountTargetsTask(Task):
         else:
             # Create missing directories for user defined mount points
             if not os.path.exists(dest):
-                mkdirChain(dest)
+                make_directories(dest)
 
             # Recurse for non-ro binds so we pick up sub-mounts
             # like /sys/firmware/efi/efivars.
@@ -131,7 +194,10 @@ class PrepareOSTreeMountTargetsTask(Task):
 
         :param [] existing_mount_points: a list of existing mount points
         """
-        var_root = '/ostree/deploy/' + self._data.osname + '/var'
+        # osname was used for ostreesetup but ostreecontainer renamed it to stateroot
+        stateroot = _get_stateroot(self._data)
+
+        var_root = '/ostree/deploy/' + stateroot + '/var'
         if existing_mount_points.get("/var") is None:
             self._setup_internal_bindmount(var_root, dest='/var', recurse=False)
         else:
@@ -146,15 +212,13 @@ class PrepareOSTreeMountTargetsTask(Task):
 
         Next, run tmpfiles to make subdirectories of /var. We need this for both mounts like
         /home (really /var/home) and %post scripts might want to write to e.g. `/srv`, `/root`,
-        `/usr/local`, etc. The /var/lib/rpm symlink is also critical for having e.g. `rpm -qa`
-        work in %post. We don't iterate *all* tmpfiles because we don't have the matching NSS
+        `/usr/local`, etc. We don't iterate *all* tmpfiles because we don't have the matching NSS
         configuration inside Anaconda, and we can't "chroot" to get it because that would require
         mounting the API filesystems in the target.
         """
-        mkdirChain(self._sysroot + '/var/lib')
+        make_directories(self._sysroot + '/var/lib')
         self._create_tmpfiles('/var/home')
         self._create_tmpfiles('/var/roothome')
-        self._create_tmpfiles('/var/lib/rpm')
         self._create_tmpfiles('/var/opt')
         self._create_tmpfiles('/var/srv')
         self._create_tmpfiles('/var/usrlocal')
@@ -309,7 +373,7 @@ class CopyBootloaderDataTask(Task):
             # actually EFI (simulating grub2-efi being installed).  Second, as it's a mount point
             # that's expected to already exist (so if we used copytree, we'd traceback). If it
             # doesn't, we're not on a UEFI system, so we don't want to copy the data.
-            if not fname == 'efi' or is_efi and os.path.isdir(os.path.join(physboot, fname)):
+            if not fname == 'efi' or (is_efi and os.path.isdir(os.path.join(physboot, fname))):
                 log.info("Copying bootloader data: %s", fname)
                 safe_exec_with_redirect('cp', ['-r', '-p', srcpath, physboot])
 
@@ -398,11 +462,14 @@ class ChangeOSTreeRemoteTask(Task):
         # We don't support resuming from interrupted installs.
         repo.set_disable_fsync(True)
 
+        # Remote is set or it should be named as stateroot is
+        remote = self._data.remote or _get_stateroot(self._data)
+
         # Add a remote if it doesn't exist.
         repo.remote_change(
             sysroot_file if self._sysroot else None,
             OSTree.RepoRemoteChange.ADD_IF_NOT_EXISTS,
-            self._data.remote,
+            remote,
             self._data.url,
             self._get_remote_options(),
             cancellable=None
@@ -412,7 +479,7 @@ class ChangeOSTreeRemoteTask(Task):
         """Get the remote options."""
         remote_options = {}
 
-        if not self._data.gpg_verification_enabled:
+        if not _get_verification_enabled(self._data):
             remote_options['gpg-verify'] = Variant('b', False)
 
         if not conf.payload.verify_ssl:
@@ -437,8 +504,43 @@ class ConfigureBootloader(Task):
         return "Configure OSTree bootloader"
 
     def run(self):
-        self._move_grub_config()
+        if have_bootupd(self._sysroot):
+            self._install_bootupd()
+        else:
+            self._move_grub_config()
         self._set_kargs()
+
+    def _install_bootupd(self):
+        bootloader = STORAGE.get_proxy(BOOTLOADER)
+        device_tree = STORAGE.get_proxy(DEVICE_TREE)
+        dev_data = DeviceData.from_structure(device_tree.GetDeviceData(bootloader.Drive))
+
+        bootupdctl_args = [
+                "--auto",
+                "--write-uuid",
+        ]
+
+        # do not insert UEFI entry if leavebootorder was requested
+        if not bootloader.KeepBootOrder:
+            log.debug("Adding --update-firmware to bootupdctl call")
+            bootupdctl_args.append("--update-firmware")
+
+        rc = execWithRedirect(
+            "bootupctl",
+            [
+                "backend",
+                "install",
+                *bootupdctl_args,
+                "--device",
+                dev_data.path,
+                "/",
+            ],
+            root=self._sysroot
+        )
+
+        if rc:
+            raise BootloaderInstallationError(
+                "failed to write boot loader configuration")
 
     def _move_grub_config(self):
         """If using GRUB2, move its config file, also with a compatibility symlink."""
@@ -463,18 +565,22 @@ class ConfigureBootloader(Task):
 
         bootloader = STORAGE.get_proxy(BOOTLOADER)
         device_tree = STORAGE.get_proxy(DEVICE_TREE)
+        localization = LOCALIZATION.get_proxy()
 
-        root_name = device_tree.GetRootDevice()
+        root_id = device_tree.GetRootDevice()
         root_data = DeviceData.from_structure(
-            device_tree.GetDeviceData(root_name)
+            device_tree.GetDeviceData(root_id)
         )
 
         set_kargs_args = ["admin", "instutil", "set-kargs"]
         set_kargs_args.extend(bootloader.GetArguments())
-        set_kargs_args.append("root=" + device_tree.GetFstabSpec(root_name))
+        set_kargs_args.append("root=" + device_tree.GetFstabSpec(root_id))
+        set_kargs_args.append("vconsole.keymap=" + localization.VirtualConsoleKeymap)
 
         if root_data.type == "btrfs subvolume":
-            set_kargs_args.append("rootflags=subvol=" + root_name)
+            set_kargs_args.append("rootflags=subvol=" + root_data.name)
+
+        set_kargs_args.append("rw")
 
         safe_exec_with_redirect("ostree", set_kargs_args, root=self._sysroot)
 
@@ -485,8 +591,8 @@ class DeployOSTreeTask(Task):
     def __init__(self, data, physroot):
         """Create a new task.
 
-        :param str physroot: a path to the physical root
         :param data: an RPM OSTree configuration
+        :param str physroot: a path to the physical root
         """
         super().__init__()
         self._data = data
@@ -497,8 +603,8 @@ class DeployOSTreeTask(Task):
         return "Deploy OSTree"
 
     def run(self):
-        # Variable substitute the ref: https://pagure.io/atomic-wg/issue/299
-        ref = RpmOstree.varsubst_basearch(self._data.ref)
+        ref = _get_ref(self._data)
+        stateroot = _get_stateroot(self._data)
 
         self.report_progress(_("Deployment starting: {}").format(ref))
 
@@ -507,18 +613,47 @@ class DeployOSTreeTask(Task):
             ["admin",
              "--sysroot=" + self._physroot,
              "os-init",
-             self._data.osname]
+             stateroot]
         )
 
-        log.info("ostree admin deploy starting")
+        if self._data.is_container():
+            log.info("ostree image deploy starting")
+
+            args = ["container", "image", "deploy",
+                    "--sysroot=" + self._physroot,
+                    "--image=" + ref]
+
+            if self._data.transport:
+                args.append("--transport=" + self._data.transport)
+            if self._data.stateroot:
+                args.append("--stateroot=" + self._data.stateroot)
+            if not self._data.signature_verification_enabled:
+                args.append("--no-signature-verification")
+
+            safe_exec_with_redirect(
+                "ostree",
+                args
+            )
+        else:
+            log.info("ostree admin deploy starting")
+            safe_exec_with_redirect(
+                "ostree",
+                ["admin",
+                 "--sysroot=" + self._physroot,
+                 "deploy",
+                 "--os=" + stateroot,
+                 self._data.remote + ':' + ref]
+            )
+
+        log.info("ostree config set sysroot.readonly true")
 
         safe_exec_with_redirect(
             "ostree",
-            ["admin",
-             "--sysroot=" + self._physroot,
-             "deploy",
-             "--os=" + self._data.osname,
-             self._data.remote + ':' + ref]
+            ["config",
+             "--repo=" + self._physroot + "/ostree/repo",
+             "set",
+             "sysroot.readonly",
+             "true"]
         )
 
         log.info("ostree admin deploy complete")
@@ -565,7 +700,10 @@ class PullRemoteAndDeleteTask(Task):
         progress = OSTree.AsyncProgress.new()
         progress.connect('changed', self._pull_progress_cb)
 
-        pull_opts = {'refs': Variant('as', [ref])}
+        # We use the UNTRUSTED flag as a way to help verification for potentially
+        # corrupted ISOs - this way ostree will validate the checksum of objects as
+        # it writes data.
+        pull_opts = {'refs': Variant('as', [ref]), 'flags': Variant('i', OSTree.RepoPullFlags.UNTRUSTED)}
         # If we're doing a kickstart, we can at least use the content as a reference:
         # See <https://github.com/rhinstaller/anaconda/issues/1117>
         # The first path here is used by <https://pagure.io/fedora-lorax-templates>

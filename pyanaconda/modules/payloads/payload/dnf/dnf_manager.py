@@ -25,28 +25,47 @@ import traceback
 import dnf
 import dnf.exceptions
 import dnf.module.module_base
+import dnf.repo
 import dnf.subject
 import libdnf.conf
-
 from blivet.size import Size
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import DNF_DEFAULT_TIMEOUT, DNF_DEFAULT_RETRIES
+from pyanaconda.core.constants import (
+    DNF_DEFAULT_REPO_COST,
+    DNF_DEFAULT_RETRIES,
+    DNF_DEFAULT_TIMEOUT,
+    URL_TYPE_BASEURL,
+    URL_TYPE_METALINK,
+    URL_TYPE_MIRRORLIST,
+)
 from pyanaconda.core.i18n import _
 from pyanaconda.core.payload import ProxyString, ProxyStringError
 from pyanaconda.core.util import get_os_release_value
 from pyanaconda.modules.common.errors.installation import PayloadInstallationError
-from pyanaconda.modules.common.errors.payload import UnknownCompsEnvironmentError, \
-    UnknownCompsGroupError, UnknownRepositoryError
-from pyanaconda.modules.common.structures.comps import CompsEnvironmentData, CompsGroupData
+from pyanaconda.modules.common.errors.payload import (
+    UnknownCompsEnvironmentError,
+    UnknownCompsGroupError,
+    UnknownRepositoryError,
+)
+from pyanaconda.modules.common.structures.comps import (
+    CompsEnvironmentData,
+    CompsGroupData,
+)
 from pyanaconda.modules.common.structures.packages import PackagesConfigurationData
+from pyanaconda.modules.common.structures.payload import RepoConfigurationData
 from pyanaconda.modules.payloads.constants import DNF_REPO_DIRS
 from pyanaconda.modules.payloads.payload.dnf.download_progress import DownloadProgress
-from pyanaconda.modules.payloads.payload.dnf.transaction_progress import TransactionProgress, \
-    process_transaction_progress
-from pyanaconda.modules.payloads.payload.dnf.utils import get_product_release_version, \
-    calculate_hash
+from pyanaconda.modules.payloads.payload.dnf.transaction_progress import (
+    TransactionProgress,
+    process_transaction_progress,
+)
+from pyanaconda.modules.payloads.payload.dnf.utils import (
+    calculate_hash,
+    get_product_release_version,
+    transaction_has_errors,
+)
 
 log = get_module_logger(__name__)
 
@@ -85,7 +104,7 @@ class InvalidSelectionError(DNFManagerError):
     """The software selection couldn't be resolved."""
 
 
-class DNFManager(object):
+class DNFManager:
     """The abstraction of the DNF base."""
 
     def __init__(self):
@@ -99,6 +118,7 @@ class DNFManager(object):
         self._ignore_broken_packages = False
         self._download_location = None
         self._md_hashes = {}
+        self._enabled_system_repositories = []
 
     @property
     def _base(self):
@@ -112,12 +132,20 @@ class DNFManager(object):
     def _create_base(cls):
         """Create a new DNF base."""
         base = dnf.Base()
+        base.conf.read()
         base.conf.cachedir = DNF_CACHE_DIR
         base.conf.pluginconfpath = DNF_PLUGINCONF_DIR
         base.conf.logdir = '/tmp/'
 
-        # Set the substitution variables.
-        cls._reset_substitution(base)
+        # Set installer defaults
+        base.conf.gpgcheck = False
+        base.conf.skip_if_unavailable = False
+
+        # Set the default release version.
+        base.conf.releasever = get_product_release_version()
+
+        # Load variables from the host (rhbz#1920735).
+        base.conf.substitutions.update_from_etc("/")
 
         # Set the installation root.
         base.conf.installroot = conf.target.system_root
@@ -140,22 +168,25 @@ class DNFManager(object):
         log.debug("The DNF base has been created.")
         return base
 
-    @classmethod
-    def _reset_substitution(cls, base):
-        """Reset substitution variables of the given DNF base."""
-        # Set the default release version.
-        base.conf.releasever = get_product_release_version()
-
-        # Load variables from the host (rhbz#1920735).
-        base.conf.substitutions.update_from_etc("/")
-
     def reset_base(self):
-        """Reset the DNF base."""
+        """Reset the DNF base.
+
+        * Close the current DNF base if any.
+        * Reset all attributes of the DNF manager.
+        * The new DNF base will be created on demand.
+        """
+        base = self.__base
         self.__base = None
+
+        if base is not None:
+            base.close()
+
         self._ignore_missing_packages = False
         self._ignore_broken_packages = False
         self._download_location = None
         self._md_hashes = {}
+        self._enabled_system_repositories = []
+
         log.debug("The DNF base has been reset.")
 
     def configure_base(self, data: PackagesConfigurationData):
@@ -235,17 +266,6 @@ class DNFManager(object):
             return None
 
         return env.id
-
-    def is_environment_valid(self, environment_name):
-        """Is the given environment valid?
-
-        FIXME: Could we use the resolve_environment method instead?
-
-        :param environment_name: an identifier of an environment
-        :return: True or False
-        """
-        environment_id = self.resolve_environment(environment_name)
-        return environment_id in self.environments
 
     def get_environment_data(self, environment_name) -> CompsEnvironmentData:
         """Get the data of the specified environment.
@@ -356,15 +376,10 @@ class DNFManager(object):
         base.conf.proxy_username = ""
         base.conf.proxy_password = ""
 
-        # No URL is provided.
-        if not url:
-            return
-
         # Parse the given URL.
-        try:
-            proxy = ProxyString(url)
-        except ProxyStringError as e:
-            log.error("Failed to parse the proxy '%s': %s", url, e)
+        proxy = self._parse_proxy(url)
+
+        if not proxy:
             return
 
         # Set the proxy configuration.
@@ -372,6 +387,22 @@ class DNFManager(object):
         base.conf.proxy = proxy.noauth_url
         base.conf.proxy_username = proxy.username or ""
         base.conf.proxy_password = proxy.password or ""
+
+    def _parse_proxy(self, url):
+        """Parse the given proxy URL.
+
+        :param url: a string with the proxy URL
+        :return: an instance of ProxyString or None
+        """
+        if not url:
+            return None
+
+        try:
+            return ProxyString(url)
+        except ProxyStringError as e:
+            log.error("Failed to parse the proxy '%s': %s", url, e)
+
+        return None
 
     def dump_configuration(self):
         """Log the state of the DNF configuration."""
@@ -403,13 +434,11 @@ class DNFManager(object):
 
         :param release_version: a string for $releasever
         """
+        if not release_version:
+            return
+
         self._base.conf.releasever = release_version
         log.debug("The $releasever variable is set to '%s'.", release_version)
-
-    def reset_substitution(self):
-        """Reset the substitution variables."""
-        self._reset_substitution(self._base)
-        log.debug("The substitution variables have been reset.")
 
     def get_installation_size(self):
         """Calculate the installation size.
@@ -461,9 +490,10 @@ class DNFManager(object):
 
     def clear_cache(self):
         """Clear the DNF cache."""
+        self._enabled_system_repositories = []
         shutil.rmtree(DNF_CACHE_DIR, ignore_errors=True)
         shutil.rmtree(DNF_PLUGINCONF_DIR, ignore_errors=True)
-        self._base.reset(sack=True, repos=True)
+        self._base.reset(sack=True, repos=True, goal=True)
         log.debug("The DNF cache has been cleared.")
 
     def is_package_available(self, package_spec):
@@ -491,44 +521,6 @@ class DNFManager(object):
 
         packages = self._base.sack.query().available().filter(name__glob=pattern)
         return [p.name for p in packages]
-
-    def enable_modules(self, module_specs):
-        """Mark module streams for enabling.
-
-        Mark module streams matching the module_specs list and also
-        all required modular dependencies for enabling. For specs
-        that do not specify the stream, the default stream is used.
-
-        :param module_specs: a list of specs
-        :raise MissingSpecsError: if there are missing specs
-        :raise BrokenSpecsError: if there are broken specs
-        """
-        log.debug("Enabling modules: %s", module_specs)
-
-        try:
-            module_base = dnf.module.module_base.ModuleBase(self._base)
-            module_base.enable(module_specs)
-        except dnf.exceptions.MarkingErrors as e:
-            log.error("Failed to enable modules!\n%s", str(e))
-            self._handle_marking_errors(e)
-
-    def disable_modules(self, module_specs):
-        """Mark modules for disabling.
-
-        Mark modules matching the module_specs list for disabling.
-        Only the name part of the module specification is relevant.
-
-        :param module_specs: a list of specs to disable
-        :raise MissingSpecsError: if there are missing specs
-        :raise BrokenSpecsError: if there are broken specs
-        """
-        log.debug("Disabling modules: %s", module_specs)
-        try:
-            module_base = dnf.module.module_base.ModuleBase(self._base)
-            module_base.disable(module_specs)
-        except dnf.exceptions.MarkingErrors as e:
-            log.error("Failed to disable modules!\n%s", str(e))
-            self._handle_marking_errors(e)
 
     def apply_specs(self, include_list, exclude_list):
         """Mark packages, groups and modules for installation.
@@ -646,6 +638,9 @@ class DNFManager(object):
     def install_packages(self, callback, timeout=20):
         """Install the packages.
 
+        Run the DNF transaction in a separate sub-process to isolate
+        DNF and RPM from the installation process. See the bug 1614511.
+
         :param callback: a callback for progress reporting
         :param timeout: a time out of a failed process in seconds
         :raise PayloadInstallationError: if the installation fails
@@ -677,26 +672,24 @@ class DNFManager(object):
     def _run_transaction(base, display):
         """Run the DNF transaction.
 
-        Execute the DNF transaction and catch any errors. An error
-        doesn't always raise a BaseException, so presence of 'quit'
-        without a preceding 'done' message also indicates a problem.
+        Execute the DNF transaction and catch any errors.
 
         :param base: the DNF base
         :param display: the DNF progress-reporting object
         """
         log.debug("Running the transaction...")
-        exit_reason = None
 
         try:
             base.do_transaction(display)
-            exit_reason = "DNF done"
+            if transaction_has_errors(base.transaction):
+                display.error("The transaction process has ended with errors.")
         except BaseException as e:  # pylint: disable=broad-except
-            log.error("The transaction has ended abruptly: %s", str(e))
-            exit_reason = str(e) + traceback.format_exc()
+            display.error("The transaction process has ended abruptly: {}\n{}".format(
+                str(e), traceback.format_exc()))
         finally:
             log.debug("The transaction has ended.")
             base.close()  # Always close this base.
-            display.quit(exit_reason or "DNF quit")
+            display.quit("DNF quit")
 
     @property
     def repositories(self):
@@ -706,6 +699,27 @@ class DNFManager(object):
         """
         with self._lock:
             return [r.id for r in self._base.repos.values()]
+
+    @property
+    def enabled_repositories(self):
+        """Enabled repositories.
+
+        :return: a list of IDs
+        """
+        with self._lock:
+            return [r.id for r in self._base.repos.iter_enabled()]
+
+    def get_matching_repositories(self, pattern):
+        """Get a list of repositories that match the specified pattern.
+
+        The pattern can contain Unix shell-style wildcards.
+        See: https://docs.python.org/3/library/fnmatch.html
+
+        :param pattern: a pattern for matching the repo IDs
+        :return: a list of matching IDs
+        """
+        with self._lock:
+            return [r.id for r in self._base.repos.get_matching(pattern)]
 
     def _get_repository(self, repo_id):
         """Translate the given repository name to a DNF object.
@@ -721,11 +735,204 @@ class DNFManager(object):
 
         return repo
 
+    def add_repository(self, data: RepoConfigurationData):
+        """Add a repository.
+
+        If the repository already exists, replace it with a new one.
+
+        :param RepoConfigurationData data: a repo configuration
+        """
+        # Create a new repository.
+        repo = self._create_repository(data)
+
+        with self._lock:
+            # Remove an existing repository.
+            if repo.id in self._base.repos:
+                self._base.repos.pop(repo.id)
+
+            # Add the new repository.
+            self._base.repos.add(repo)
+
+        log.info("Added the '%s' repository: %s", repo.id, repo)
+
+    def _create_repository(self, data: RepoConfigurationData):
+        """Create a DNF repository.
+
+        :param RepoConfigurationData data: a repo configuration
+        return dnf.repo.Repo: a DNF repository
+        """
+        repo = dnf.repo.Repo(data.name, self._base.conf)
+
+        # Disable the repo if requested.
+        if not data.enabled:
+            repo.disable()
+
+        # Set up the repo location.
+        url = self.substitute(data.url)
+
+        if data.type == URL_TYPE_BASEURL:
+            repo.baseurl = [url]
+
+        if data.type == URL_TYPE_MIRRORLIST:
+            repo.mirrorlist = url
+
+        if data.type == URL_TYPE_METALINK:
+            repo.metalink = url
+
+        # Set the proxy configuration.
+        proxy = self._parse_proxy(data.proxy)
+
+        if proxy:
+            repo.proxy = proxy.noauth_url
+            repo.proxy_username = proxy.username or ""
+            repo.proxy_password = proxy.password or ""
+
+        # Set the repo configuration.
+        if data.cost != DNF_DEFAULT_REPO_COST:
+            repo.cost = data.cost
+
+        if data.included_packages:
+            repo.includepkgs = data.included_packages
+
+        if data.excluded_packages:
+            repo.excludepkgs = data.excluded_packages
+
+        # Set up the SSL configuration.
+        repo.sslverify = conf.payload.verify_ssl and data.ssl_verification_enabled
+
+        if data.ssl_configuration.ca_cert_path:
+            repo.sslcacert = data.ssl_configuration.ca_cert_path
+
+        if data.ssl_configuration.client_cert_path:
+            repo.sslclientcert = data.ssl_configuration.client_cert_path
+
+        if data.ssl_configuration.client_key_path:
+            repo.sslclientkey = data.ssl_configuration.client_key_path
+
+        return repo
+
+    def generate_repo_file(self, data: RepoConfigurationData):
+        """Generate a content of the .repo file.
+
+        The content is generated only from the provided data.
+        We don't check the configuration of the DNF objects.
+
+        :param RepoConfigurationData data: a repo configuration
+        return str: a content of a .repo file
+        """
+        lines = [
+            "[{}]".format(data.name),
+            "name = {}".format(data.name),
+        ]
+
+        if data.enabled:
+            lines.append("enabled = 1")
+        else:
+            lines.append("enabled = 0")
+
+        # Set up the repo location.
+        if data.type == URL_TYPE_BASEURL:
+            lines.append("baseurl = {}".format(data.url))
+
+        if data.type == URL_TYPE_MIRRORLIST:
+            lines.append("mirrorlist = {}".format(data.url))
+
+        if data.type == URL_TYPE_METALINK:
+            lines.append("metalink = {}".format(data.url))
+
+        if not data.ssl_verification_enabled:
+            lines.append("sslverify = 0")
+
+        # Set the proxy configuration.
+        proxy = self._parse_proxy(data.proxy)
+
+        if proxy:
+            lines.append("proxy = {}".format(proxy.noauth_url))
+
+        if proxy and proxy.username:
+            lines.append("proxy_username = {}".format(proxy.username))
+
+        if proxy and proxy.password:
+            lines.append("proxy_password = {}".format(proxy.password))
+
+        # Set the repo configuration.
+        if data.cost != DNF_DEFAULT_REPO_COST:
+            lines.append("cost = {}".format(data.cost))
+
+        if data.included_packages:
+            lines.append("includepkgs = {}".format(", ".join(data.included_packages)))
+
+        if data.excluded_packages:
+            lines.append("excludepkgs = {}".format(", ".join(data.excluded_packages)))
+
+        return "\n".join(lines)
+
+    def set_repository_enabled(self, repo_id, enabled):
+        """Enable or disable the specified repository.
+
+        :param repo_id: an identifier of a repository
+        :param enabled: True to enable, False to disable
+        :raise: UnknownRepositoryError if no repo is found
+        """
+        repo = self._get_repository(repo_id)
+
+        # Skip if the repository is already set to the right value.
+        if repo.enabled == enabled:
+            return
+
+        if enabled:
+            repo.enable()
+            log.info("The '%s' repository is enabled.", repo_id)
+        else:
+            repo.disable()
+            log.info("The '%s' repository is disabled.", repo_id)
+
+    def read_system_repositories(self):
+        """Read the system repositories.
+
+        Read all repositories from the installation environment.
+        Make a note of which are enabled, and then disable them all.
+
+        Disabled system repositories can be restored later with
+        restore_system_repositories.
+        """
+        with self._lock:
+            # Make sure that there are no repositories yet. Otherwise,
+            # the code bellow will produce unexpected results.
+            if self.repositories:
+                raise RuntimeError("The DNF repo cache is not cleared.")
+
+            log.debug("Read system repositories.")
+            self._base.read_all_repos()
+
+            # Remember enabled system repositories.
+            self._enabled_system_repositories = list(self.enabled_repositories)
+
+            log.debug("Disable system repositories.")
+            self._base.repos.all().disable()
+
+    def restore_system_repositories(self):
+        """Restore the system repositories.
+
+        Enable repositories from the installation environment that
+        were disabled in read_system_repositories.
+        """
+        log.debug("Restore system repositories.")
+
+        for repo_id in self._enabled_system_repositories:
+            try:
+                self.set_repository_enabled(repo_id, True)
+            except UnknownRepositoryError:
+                log.debug("There is no '%s' repository to enable.", repo_id)
+
     def load_repository(self, repo_id):
         """Download repo metadata.
 
-        Enable the repo and load its metadata to verify that
+        If the repo is enabled, load its metadata to verify that
         the repo is valid. An invalid repo will be disabled.
+
+        This method will by default not try to refresh already
+        loaded data if called repeatedly.
 
         :param str repo_id: an identifier of a repository
         :raise: MetadataError if the metadata cannot be loaded
@@ -735,8 +942,11 @@ class DNFManager(object):
         repo = self._get_repository(repo_id)
         url = repo.baseurl or repo.mirrorlist or repo.metalink
 
+        if not repo.enabled:
+            log.debug("Don't load metadata from a disabled repository.")
+            return
+
         try:
-            repo.enable()
             repo.load()
         except dnf.exceptions.RepoError as e:
             log.debug("Failed to load metadata from '%s': %s", url, str(e))
@@ -744,6 +954,26 @@ class DNFManager(object):
             raise MetadataError(str(e)) from None
 
         log.info("Loaded metadata from '%s'.", url)
+
+    def load_packages_metadata(self):
+        """Load metadata about packages in available repositories.
+
+        Load all enabled repositories and process their metadata.
+        It will update the cache that provides information about
+        available packages, modules, groups and environments.
+        """
+        # Load all enabled repositories.
+        # Set up the package sack.
+        self._base.fill_sack(
+            load_system_repo=False,
+            load_available_repos=True,
+        )
+        # Load the comps metadata.
+        self._base.read_comps(
+            arch_filter=True
+        )
+
+        log.info("Loaded packages and group metadata.")
 
     def load_repomd_hashes(self):
         """Load a hash of the repomd.xml file for each enabled repository."""
@@ -753,7 +983,7 @@ class DNFManager(object):
         """Verify a hash of the repomd.xml file for each enabled repository.
 
         This method tests if URL links from active repositories can be reached.
-        It is useful when network settings is changed so that we can verify if
+        It is useful when network settings are changed so that we can verify if
         repositories are still reachable.
 
         :return: True if files haven't changed, otherwise False

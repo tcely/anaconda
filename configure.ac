@@ -18,11 +18,11 @@
 m4_define(python_required_version, 3.4)
 
 AC_PREREQ([2.63])
-AC_INIT([anaconda], [35.20], [anaconda-devel-list@redhat.com])
+AC_INIT([anaconda], [42.20], [anaconda-devel@lists.fedoraproject.org])
 
 # make it possible to set build info at build time
 # (patch only builds, modular builds, mass-rebuilds, etc.)
-AC_ARG_VAR(ANACONDA_RELEASE, [1])
+AC_ARG_VAR(ANACONDA_RELEASE, [])
 
 # default release to 1 if not set by option
 AS_IF([test $ANACONDA_RELEASE],
@@ -76,12 +76,9 @@ AC_TYPE_INT64_T
 
 # Checks for library functions.
 AC_FUNC_FORK
-AC_CHECK_FUNCS([getcwd memset mkdir strchr strdup],
+AC_CHECK_FUNCS([getcwd mkdir strchr strdup],
                [],
                [ANACONDA_SOFT_FAILURE([Function $ac_func not found.])])
-
-AC_CHECK_LIB([audit], [audit_open], [:],
-             [ANACONDA_SOFT_FAILURE([libaudit not found])])
 
 AM_PATH_PYTHON(python_required_version)
 
@@ -92,12 +89,13 @@ PKG_CHECK_MODULES([PYTHON3], [python3], [], ANACONDA_SOFT_FAILURE([Unable to fin
 ANACONDA_PKG_CHECK_MODULES([RPM], [rpm >= 4.10.0])
 ANACONDA_PKG_CHECK_MODULES([LIBARCHIVE], [libarchive >= 3.0.4])
 
-# GCC likes to bomb out on some ridiculous warnings.  Add your favorites
-# here.
-SHUT_UP_GCC="-Wno-unused-result"
-
 # Add remaining compiler flags we want to use
-CFLAGS="$CFLAGS -Wall -Werror $SHUT_UP_GCC -fanalyzer"
+# only append -fanalyzer when building with gcc
+CFLAGS="$CFLAGS -Wall -Werror"
+
+if [[ "$CC" == "gcc" ]]; then
+  CFLAGS="$CFLAGS -fanalyzer"
+fi
 
 
 # Perform arch related tests
@@ -112,14 +110,15 @@ AC_CONFIG_FILES([Makefile
                  data/command-stubs/Makefile
                  docs/Makefile
                  dracut/Makefile
+                 dracut/dd/Makefile
                  data/conf.d/Makefile
                  data/profile.d/Makefile
                  data/liveinst/Makefile
-                 data/liveinst/console.apps/Makefile
                  data/liveinst/gnome/Makefile
-                 data/liveinst/pam.d/Makefile
                  data/systemd/Makefile
                  data/dbus/Makefile
+                 data/gtk-4.0/Makefile
+                 data/pam/Makefile
                  data/window-manager/Makefile
                  data/window-manager/config/Makefile
                  po/Makefile
@@ -130,11 +129,9 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/core/kickstart/Makefile
                  pyanaconda/core/configuration/Makefile
                  pyanaconda/core/startup/Makefile
-                 pyanaconda/isys/Makefile
                  pyanaconda/payload/Makefile
                  pyanaconda/payload/dnf/Makefile
                  pyanaconda/payload/live/Makefile
-                 pyanaconda/payload/source/Makefile
                  pyanaconda/ui/Makefile
                  pyanaconda/ui/categories/Makefile
                  pyanaconda/ui/lib/Makefile
@@ -146,6 +143,7 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/ui/tui/hubs/Makefile
                  pyanaconda/ui/tui/spokes/Makefile
                  pyanaconda/ui/tui/Makefile
+                 pyanaconda/ui/webui/Makefile
                  pyanaconda/modules/Makefile
                  pyanaconda/modules/common/Makefile
                  pyanaconda/modules/common/base/Makefile
@@ -157,7 +155,6 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/modules/boss/install_manager/Makefile
                  pyanaconda/modules/boss/kickstart_manager/Makefile
                  pyanaconda/modules/boss/module_manager/Makefile
-                 pyanaconda/modules/boss/user_interface/Makefile
                  pyanaconda/modules/security/Makefile
                  pyanaconda/modules/timezone/Makefile
                  pyanaconda/modules/network/Makefile
@@ -180,10 +177,17 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/modules/payloads/source/hmc/Makefile
                  pyanaconda/modules/payloads/source/live_image/Makefile
                  pyanaconda/modules/payloads/source/live_os/Makefile
+                 pyanaconda/modules/payloads/source/live_tar/Makefile
                  pyanaconda/modules/payloads/source/nfs/Makefile
                  pyanaconda/modules/payloads/source/repo_files/Makefile
+                 pyanaconda/modules/payloads/source/repo_path/Makefile
                  pyanaconda/modules/payloads/source/rpm_ostree/Makefile
+                 pyanaconda/modules/payloads/source/rpm_ostree_container/Makefile
                  pyanaconda/modules/payloads/source/url/Makefile
+                 pyanaconda/modules/runtime/Makefile
+                 pyanaconda/modules/runtime/dracut_commands/Makefile
+                 pyanaconda/modules/runtime/scripts/Makefile
+                 pyanaconda/modules/runtime/user_interface/Makefile
                  pyanaconda/modules/storage/Makefile
                  pyanaconda/modules/storage/bootloader/Makefile
                  pyanaconda/modules/storage/checker/Makefile
@@ -193,7 +197,7 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/modules/storage/disk_selection/Makefile
                  pyanaconda/modules/storage/fcoe/Makefile
                  pyanaconda/modules/storage/iscsi/Makefile
-                 pyanaconda/modules/storage/nvdimm/Makefile
+                 pyanaconda/modules/storage/nvme/Makefile
                  pyanaconda/modules/storage/partitioning/Makefile
                  pyanaconda/modules/storage/partitioning/automatic/Makefile
                  pyanaconda/modules/storage/partitioning/blivet/Makefile
@@ -204,11 +208,9 @@ AC_CONFIG_FILES([Makefile
                  pyanaconda/modules/storage/zfcp/Makefile
                  pyanaconda/modules/services/Makefile
                  pyanaconda/modules/subscription/Makefile
-                 data/post-scripts/Makefile
                  data/pixmaps/Makefile
-                 tests/Makefile
-                 utils/Makefile
-                 utils/dd/Makefile])
+                 tests/Makefile])
+
 AC_OUTPUT
 
 # Gently advise the user about the build failures they are about to encounter

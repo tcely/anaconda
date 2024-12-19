@@ -21,12 +21,12 @@ from dasbus.client.proxy import get_object_handler
 from dasbus.server.interface import dbus_interface
 from dasbus.typing import *  # pylint: disable=wildcard-import
 
-from pyanaconda.modules.common.constants.services import BOSS
 from pyanaconda.modules.common.base.base_template import InterfaceTemplate
+from pyanaconda.modules.common.constants.services import BOSS
 from pyanaconda.modules.common.containers import TaskContainer
+from pyanaconda.modules.common.custom_typing import BusName
 from pyanaconda.modules.common.structures.kickstart import KickstartReport
 from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.common.custom_typing import BusName
 
 __all__ = ["BossInterface"]
 
@@ -97,10 +97,21 @@ class BossInterface(InterfaceTemplate):
             self.implementation.collect_requirements()
         )
 
+    def InstallWithTasks(self) -> List[ObjPath]:
+        """Returns installation tasks of this module.
+
+        FIXME: This is a temporary workaround for the Web UI.
+
+        :returns: list of object paths of installation tasks
+        """
+        return TaskContainer.to_object_path_list(
+            self.implementation.install_with_tasks()
+        )
+
     def CollectConfigureRuntimeTasks(self) -> List[Tuple[BusName, ObjPath]]:
         """Collect tasks for configuration of the runtime environment.
 
-        FIXME: This method temporarily uses only addons.
+        FIXME: This is a temporary workaround for add-ons.
 
         :return: a list of service names and object paths of tasks
         """
@@ -111,8 +122,7 @@ class BossInterface(InterfaceTemplate):
             -> List[Tuple[BusName, ObjPath]]:
         """Collect tasks for configuration of the bootloader.
 
-        FIXME: This method temporarily uses only addons.
-        FIXME: This is a temporary workaround. The method might change.
+        FIXME: This is a temporary workaround for add-ons.
 
         :param kernel_versions: a list of kernel versions
         :return: a list of service names and object paths of tasks
@@ -123,12 +133,22 @@ class BossInterface(InterfaceTemplate):
     def CollectInstallSystemTasks(self) -> List[Tuple[BusName, ObjPath]]:
         """Collect tasks for installation of the system.
 
-        FIXME: This method temporarily uses only addons.
+        FIXME: This is a temporary workaround for add-ons.
 
         :return: a list of service names and object paths of tasks
         """
         proxies = self.implementation.collect_install_system_tasks()
         return list(map(get_proxy_identification, proxies))
+
+    def FinishInstallationWithTasks(self) -> List[ObjPath]:
+        """Finish installation with tasks.
+
+        FIXME: This is a temporary workaround for the Boss module.
+
+        :return: a list of D-Bus paths of tasks
+        """
+        tasks = self.implementation.finish_installation_with_tasks()
+        return TaskContainer.to_object_path_list(tasks)
 
     def Quit(self):
         """Stop all modules and then stop the boss."""

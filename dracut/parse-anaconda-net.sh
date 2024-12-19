@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # parse-anaconda-net.sh - parse old deprecated anaconda network setup args
 
 net_conf=/etc/cmdline.d/75-anaconda-network-options.conf
@@ -8,17 +8,15 @@ check_depr_arg "dns" "nameserver=%s"
 mac_to_bootif() {
     local bootif=${1}
     local IFS=':'
-    bootif=$(for i in ${bootif} ; do echo -n $i-; done)
+    bootif=$(for i in ${bootif} ; do echo -n "$i-"; done)
     bootif=${bootif%-}
     bootif="01-$bootif"
-    echo $bootif
+    echo "$bootif"
 }
 
 # handle ksdevice (tell us which device to use for ip= stuff later)
 export ksdevice=""
-# TODO: Remove support for ksdevice. It's deprecated a long time already
-# this should be inst.ksdevice however, this is deprecated a long time so we don't have
-# any inst.ksdevice. Let's just ignore this for now.
+# TODO: Remove support for ksdevice.
 ksdev_val=$(getarg ksdevice=)
 if [ -n "$ksdev_val" ]; then
     case "$ksdev_val" in

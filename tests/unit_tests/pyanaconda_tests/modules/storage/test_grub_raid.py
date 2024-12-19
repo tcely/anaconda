@@ -17,15 +17,21 @@
 # Test that grub installs involving raid work correctly
 # These tests do not write anything to the disk and do not require root
 
-from blivet.devices import DiskDevice, PartitionDevice, MDRaidArrayDevice
-from blivet.devices import BTRFSVolumeDevice, BTRFSSubVolumeDevice
+import unittest
+
 from blivet.devicelibs.raid import RAID1
+from blivet.devices import (
+    BTRFSSubVolumeDevice,
+    BTRFSVolumeDevice,
+    DiskDevice,
+    MDRaidArrayDevice,
+    PartitionDevice,
+)
 from blivet.formats import get_format
 from blivet.size import Size
 
 from pyanaconda.modules.storage.bootloader.grub2 import GRUB2
 
-import unittest
 
 class GRUBRaidSimpleTest(unittest.TestCase):
     def setUp(self):
@@ -38,7 +44,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
             sda additionally contains a third partition formatted as ext4.
         """
 
-        super(GRUBRaidSimpleTest, self).setUp()
+        super().setUp()
 
         # Make some disks
         self.sda = DiskDevice(name="sda", size=Size("100 GiB"))
@@ -101,7 +107,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda, self.sda3)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets
 
     def test_grub_partition_partition(self):
         """Test installing GRUB to a partition stage1 and partition stage2"""
@@ -114,7 +120,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda1, self.sda3)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets
 
     def test_grub_mbr_raid1(self):
         """Test installing GRUB to a MBR stage1 and RAID1 stage2"""
@@ -128,7 +134,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda, self.boot_md), (self.sdb, self.boot_md)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets
 
     def test_grub_partition_raid1(self):
         """Test installing GRUB to a partition stage1 and MBR stage2"""
@@ -142,7 +148,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda1, self.boot_md)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets
 
     def test_grub_btrfs(self):
         """Test installing GRUB to a MBR stage1 and btrfs RAID stage2"""
@@ -157,7 +163,7 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda, self.boot_btrfs), (self.sdb, self.boot_btrfs)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets
 
     def test_grub_partition_btrfs(self):
         """Test installing GRUB to a partition stage1 and MBR stage2"""
@@ -171,4 +177,4 @@ class GRUBRaidSimpleTest(unittest.TestCase):
         install_targets = set(self.grub.install_targets)
         expected_targets = set([(self.sda1, self.boot_btrfs)])
 
-        self.assertEqual(install_targets, expected_targets)
+        assert install_targets == expected_targets

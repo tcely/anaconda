@@ -16,24 +16,25 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.core.constants import PASSWORD_POLICY_ROOT
-from pyanaconda.flags import flags
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.i18n import _, CN_
-from pyanaconda.core.users import crypt_password
 from pyanaconda import input_checking
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core import constants
-from pyanaconda.modules.common.util import is_module_available
+from pyanaconda.core.constants import PASSWORD_POLICY_ROOT
+from pyanaconda.core.i18n import CN_, _
+from pyanaconda.core.users import crypt_password
 from pyanaconda.modules.common.constants.services import USERS
-from pyanaconda.ui.gui.spokes import NormalSpoke
+from pyanaconda.modules.common.util import is_module_available
 from pyanaconda.ui.categories.user_settings import UserSettingsCategory
-from pyanaconda.ui.gui.helpers import GUISpokeInputCheckHandler
-from pyanaconda.ui.gui.utils import set_password_visibility
 from pyanaconda.ui.common import FirstbootSpokeMixIn
 from pyanaconda.ui.communication import hubQ
-from pyanaconda.ui.lib.services import is_reconfiguration_mode
+from pyanaconda.ui.gui.helpers import GUISpokeInputCheckHandler
+from pyanaconda.ui.gui.spokes import NormalSpoke
+from pyanaconda.ui.gui.utils import set_password_visibility
+from pyanaconda.ui.lib.users import (
+    can_modify_root_configuration,
+    get_root_configuration_status,
+)
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ["PasswordSpoke"]
@@ -47,14 +48,16 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
     builderObjects = ["passwordWindow"]
 
     mainWidgetName = "passwordWindow"
-    focusWidgetName = "password_entry"
+    focusWidgetName = "disable_root_radio"
     uiFile = "spokes/root_password.glade"
-    helpFile = "PasswordSpoke.xml"
-
     category = UserSettingsCategory
-
     icon = "dialog-password-symbolic"
-    title = CN_("GUI|Spoke", "_Root Password")
+    title = CN_("GUI|Spoke", "_Root Account")
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "root-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -68,8 +71,6 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         NormalSpoke.__init__(self, *args)
         GUISpokeInputCheckHandler.__init__(self)
         self._users_module = USERS.get_proxy()
-        self._refresh_running = False
-        self._manually_locked = False
 
     def initialize(self):
         NormalSpoke.initialize(self)
@@ -79,8 +80,10 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         self._password_confirmation_entry = self.builder.get_object("password_confirmation_entry")
         self._password_bar = self.builder.get_object("password_bar")
         self._password_label = self.builder.get_object("password_label")
-        self._lock = self.builder.get_object("lock")
+        self._enable_root_radio = self.builder.get_object("enable_root_radio")
+        self._disable_root_radio = self.builder.get_object("disable_root_radio")
         self._root_password_ssh_login_override = self.builder.get_object("root_password_ssh_login_override")
+        self._revealer = self.builder.get_object("password_revealer")
 
         # Install the password checks:
         # - Has a password been specified?
@@ -94,6 +97,8 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
                 initial_password_confirmation_content=self.password_confirmation,
                 policy_name=PASSWORD_POLICY_ROOT
         )
+        # configure root username for checking
+        self.checker.username = "root"
         # configure the checker for password checking
         self.checker.secret_type = constants.SecretType.PASSWORD
         # remove any placeholder texts if either password or confirmation field changes content from initial state
@@ -124,10 +129,6 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         self.checker.add_check(self._validity_check)
         self.checker.add_check(self._ascii_check)
 
-        # the password entries should be sensitive on first entry to the spoke
-        self.password_entry.set_sensitive(True)
-        self.password_confirmation_entry.set_sensitive(True)
-
         # Set placeholders if the password has been set outside of the Anaconda
         # GUI we either don't really know anything about it if it's crypted
         # and still would not really want to expose it if its set in plaintext,
@@ -142,12 +143,6 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         self._password_bar.add_offset_value("medium", 3)
         self._password_bar.add_offset_value("high", 4)
 
-        # set visibility of the password entries
-        # - without this the password visibility toggle icon will
-        #   not be shown
-        set_password_visibility(self.password_entry, False)
-        set_password_visibility(self.password_confirmation_entry, False)
-
         # Send ready signal to main event loop
         hubQ.send_ready(self.__class__.__name__)
 
@@ -155,39 +150,27 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         self.initialize_done()
 
     def refresh(self):
-        # report refresh is running
-        self._refresh_running = True
-        # set the state of the lock checkbox based on DBus data
-        # - set_active() apparently also triggers on_clicked() so
-        #   we use the _refresh_running atribute to differentiate
-        #   it from "real" clicks
-        self._lock.set_active(self._users_module.IsRootAccountLocked)
+        # set the locked/unlocked state based on DBus data
+        if self._users_module.IsRootAccountLocked:
+            control = self._disable_root_radio
+        else:
+            control = self._enable_root_radio
+        control.set_active(True)
+        self.on_root_enabled_changed(control)
+
         self._root_password_ssh_login_override.set_active(
             self._users_module.RootPasswordSSHLoginAllowed
         )
-        if not self._lock.get_active():
+        if self.root_enabled:
             # rerun checks so that we have a correct status message, if any
             self.checker.run_checks()
         # focus on the password field if it is sensitive
         if self.password_entry.get_sensitive():
             self.password_entry.grab_focus()
-        # report refresh finished running
-        self._refresh_running = False
 
     @property
     def status(self):
-        if self._users_module.IsRootAccountLocked:
-            # reconfig mode currently allows re-enabling a locked root account if
-            # user sets a new root password
-            if is_reconfiguration_mode() and not self._lock.get_active():
-                return _("Disabled, set password to enable.")
-            else:
-                return _("Root account is disabled.")
-
-        elif self._users_module.IsRootPasswordSet:
-            return _("Root password is set")
-        else:
-            return _("Root password is not set")
+        return get_root_configuration_status(self._users_module)
 
     @property
     def mandatory(self):
@@ -195,22 +178,24 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         return not self._users_module.CheckAdminUserExists()
 
     def apply(self):
-        pw = self.password
+        if self.root_enabled and self.password:
+            # Set the root password.
+            self._users_module.SetCryptedRootPassword(crypt_password(self.password))
 
-        self._users_module.SetRootAccountLocked(self._lock.get_active())
-
-        # the checkbox makes it possible to override the default Open SSH
-        # policy of not allowing root to login with password
-        ssh_login_override = self._root_password_ssh_login_override.get_active()
-        self._users_module.SetRootPasswordSSHLoginAllowed(ssh_login_override)
-
-        if not pw:
+            # Unlock the root account.
+            self._users_module.IsRootAccountLocked = False
+        else:
+            # Reset the root password.
             self._users_module.ClearRootPassword()
-            return
 
-        # we have a password - set it to kickstart data
+            # Lock the root account.
+            self._users_module.IsRootAccountLocked = True
 
-        self._users_module.SetCryptedRootPassword(crypt_password(pw))
+        if self.root_enabled:
+            # the checkbox makes it possible to override the default Open SSH
+            # policy of not allowing root to login with password
+            ssh_login_override = self._root_password_ssh_login_override.get_active()
+            self._users_module.RootPasswordSSHLoginAllowed = ssh_login_override
 
         # clear any placeholders
         self.remove_placeholder_texts()
@@ -224,13 +209,11 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
 
     @property
     def sensitive(self):
-        # A password set in kickstart can be changed in the GUI
-        # if the changesok password policy is set for the root password.
-        kickstarted_password_can_be_changed = conf.ui.can_change_root or \
-            self._users_module.CanChangeRootPassword
+        return can_modify_root_configuration(self._users_module)
 
-        return not (self.completed and flags.automatedInstall
-                    and not kickstarted_password_can_be_changed)
+    @property
+    def root_enabled(self):
+        return self._enable_root_radio.get_active()
 
     def _checks_done(self, error_message):
         """Update the warning with the input validation error from the first
@@ -243,7 +226,7 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
         unwaivable_check_failed = not self._confirm_check.result.success
 
         # set appropriate status bar message
-        if not error_message or self._lock.get_active():
+        if not error_message or not self.root_enabled:
             # all is fine, just clear the message
             self.clear_info()
         elif not self.password and not self.password_confirmation:
@@ -259,8 +242,11 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
                 self.show_warning_message(error_message)
             else:
                 # add suffix for the click twice logic
-                self.show_warning_message("{} {}".format(error_message,
-                                                         _(constants.PASSWORD_DONE_TWICE)))
+                self.show_warning_message(
+                    _(constants.PASSWORD_ERROR_CONCATENATION).format(
+                        error_message,
+                        _(constants.PASSWORD_DONE_TWICE))
+                )
 
         # check if the spoke can be exited after the latest round of checks
         self._check_spoke_exit_conditions(unwaivable_check_failed)
@@ -316,36 +302,42 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler)
     def on_password_changed(self, editable, data=None):
         """Tell checker that the content of the password field changed."""
         self.checker.password.content = self.password
-        # unlock the password if user starts typing
-        self._lock.set_active(False)
 
     def on_password_confirmation_changed(self, editable, data=None):
         """Tell checker that the content of the password confirmation field changed."""
         self.checker.password_confirmation.content = self.password_confirmation
-        # unlock the password if user starts typing
-        self._lock.set_active(False)
 
     def on_password_icon_clicked(self, entry, icon_pos, event):
         """Called by Gtk callback when the icon of a password entry is clicked."""
         set_password_visibility(entry, not entry.get_visibility())
 
+    def on_password_entry_map(self, entry):
+        """Called when a password entry widget is going to be displayed.
+
+        - Without this the password visibility toggle icon would not be shown.
+        - The password should be hidden every time the entry widget is displayed
+          to avoid showing the password in plain text in case the user previously
+          displayed the password and then left the spoke, for example.
+        """
+        set_password_visibility(entry, False)
+
     def on_back_clicked(self, button):
-        # the GUI spoke input check handler handles the spoke exit logic for us
-        if self.try_to_go_back() or self._lock.get_active():
+        # disable root if no password is entered
+        if not self.password and not self.password_confirmation and \
+                not self._users_module.IsRootPasswordSet:
+            control = self._disable_root_radio
+            control.set_active(True)
+            self.on_root_enabled_changed(control)
+
+        # the GUI spoke input check handler handles the rest of the spoke exit logic for us
+        if self.try_to_go_back() or not self.root_enabled:
             NormalSpoke.on_back_clicked(self, button)
         else:
             log.info("Return to hub prevented by password checking rules.")
 
-    def on_lock_clicked(self, lock):
-        if self._refresh_running:
-            # this is not a "real" click, just refresh() setting the lock check
-            # box state based on data from the DBus module
-            if not self._manually_locked:
-                # if the checkbox has not yet been manipulated by the user
-                # we can ignore this run and not adjust the fields
-                return True
-        self.password_entry.set_sensitive(not lock.get_active())
-        self.password_confirmation_entry.set_sensitive(not lock.get_active())
-        if not lock.get_active():
+    def on_root_enabled_changed(self, control):
+        """Click event handler for root account enable and disable radio buttons."""
+        unlocked = (control == self._enable_root_radio)
+        self._revealer.set_reveal_child(unlocked)
+        if unlocked:
             self.password_entry.grab_focus()
-            self._manually_locked = True

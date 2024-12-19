@@ -17,31 +17,35 @@
 # Red Hat, Inc.
 #
 
-import gi
-gi.require_version("Gkbd", "3.0")
-gi.require_version("Gtk", "3.0")
-
-from gi.repository import Gkbd, Gtk
 import locale as locale_mod
 
-from pyanaconda.ui.gui import GUIObject
-from pyanaconda.ui.gui.spokes import NormalSpoke
-from pyanaconda.ui.categories.localization import LocalizationCategory
-from pyanaconda.ui.gui.utils import gtk_call_once, escape_markup, gtk_batch_map, timed_action
-from pyanaconda.ui.gui.utils import override_cell_property
-from pyanaconda.ui.gui.xkl_wrapper import XklWrapper, XklWrapperError
-from pyanaconda import keyboard
-from pyanaconda import flags
-from pyanaconda.core.i18n import _, N_, CN_
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import DEFAULT_KEYBOARD, THREAD_KEYBOARD_INIT, THREAD_ADD_LAYOUTS_INIT
-from pyanaconda.ui.communication import hubQ
-from pyanaconda.core.util import strip_accents, have_word_match
+from pyanaconda import flags, keyboard
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import (
+    DEFAULT_KEYBOARD,
+    THREAD_ADD_LAYOUTS_INIT,
+    THREAD_KEYBOARD_INIT,
+)
+from pyanaconda.core.i18n import CN_, N_, _
+from pyanaconda.core.process_watchers import PidWatcher
+from pyanaconda.core.string import have_word_match, strip_accents
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.core.util import startProgram
 from pyanaconda.modules.common.constants.services import LOCALIZATION
 from pyanaconda.modules.common.util import is_module_available
-from pyanaconda.threading import threadMgr, AnacondaThread
+from pyanaconda.ui.categories.localization import LocalizationCategory
+from pyanaconda.ui.communication import hubQ
+from pyanaconda.ui.gui import GUIObject
+from pyanaconda.ui.gui.spokes import NormalSpoke
+from pyanaconda.ui.gui.utils import (
+    escape_markup,
+    gtk_batch_map,
+    gtk_call_once,
+    override_cell_property,
+    timed_action,
+)
+from pyanaconda.ui.gui.xkl_wrapper import XklWrapper
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ["KeyboardSpoke"]
@@ -53,7 +57,12 @@ ADD_LAYOUTS_INITIALIZE_THREAD = "AnaAddLayoutsInitializeThread"
 
 
 def _show_layout(column, renderer, model, itr, wrapper):
-    return wrapper.get_layout_variant_description(model[itr][0])
+    value = model[itr][0]
+
+    if not value:
+        return ""
+
+    return wrapper.get_layout_variant_description(value)
 
 
 def _show_description(column, renderer, model, itr, wrapper):
@@ -81,6 +90,10 @@ class AddLayoutDialog(GUIObject):
             return True
 
         value = model[itr][0]
+        if not value:
+            # nothing matches a separator
+            return False
+
         eng_value = self._xkl_wrapper.get_layout_variant_description(value, xlated=False)
         xlated_value = self._xkl_wrapper.get_layout_variant_description(value)
         translit_value = strip_accents(xlated_value).lower()
@@ -128,25 +141,32 @@ class AddLayoutDialog(GUIObject):
         self._newLayoutSelection = self.builder.get_object("newLayoutSelection")
 
         self._store = self.builder.get_object("newLayoutStore")
-        threadMgr.add(AnacondaThread(name=THREAD_ADD_LAYOUTS_INIT,
-                                     target=self._initialize))
+        thread_manager.add_thread(
+            name=THREAD_ADD_LAYOUTS_INIT,
+            target=self._initialize
+        )
 
     def _initialize(self):
         common_layouts = self._xkl_wrapper.get_common_layouts()
         available_layouts = self._xkl_wrapper.get_available_layouts()
+        common_layouts.remove(DEFAULT_KEYBOARD)
 
-        arranged_layouts = sorted(common_layouts, key=self._sort_layout) + \
+        arranged_layouts = [DEFAULT_KEYBOARD] + sorted(common_layouts, key=self._sort_layout) + \
             sorted(list(set(available_layouts) - set(common_layouts)), key=self._sort_layout)
 
         # we add arranged layouts in the treeview store
         gtk_batch_map(self._addLayout, arranged_layouts, args=(self._store,), batch_size=20)
 
+        # add a separator after the default keyboard layout
+        sep_itr = self._store.insert(1)
+        self._store.set(sep_itr, 0, "", 1, True)
+
         # then, we add a separator after common keyboard layouts
         sep_itr = self._store.insert(len(common_layouts))
-        self._store.set(sep_itr, 0, DEFAULT_KEYBOARD, 1, True)
+        self._store.set(sep_itr, 0, "", 1, True)
 
     def wait_initialize(self):
-        threadMgr.wait(THREAD_ADD_LAYOUTS_INIT)
+        thread_manager.wait(THREAD_ADD_LAYOUTS_INIT)
 
     def run(self):
         self.window.show()
@@ -284,12 +304,14 @@ class KeyboardSpoke(NormalSpoke):
                       "layoutTestBuffer"]
     mainWidgetName = "keyboardWindow"
     uiFile = "spokes/keyboard.glade"
-    helpFile = "KeyboardSpoke.xml"
-
     category = LocalizationCategory
-
     icon = "input-keyboard-symbolic"
     title = CN_("GUI|Spoke", "_Keyboard")
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "keyboard-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -306,6 +328,8 @@ class KeyboardSpoke(NormalSpoke):
         self._xkl_wrapper = XklWrapper.get_instance()
         self._add_dialog = None
         self._ready = False
+        self._running_tecla = None
+        self._focus_in_signal_id = None
 
         self._upButton = self.builder.get_object("upButton")
         self._downButton = self.builder.get_object("downButton")
@@ -315,6 +339,12 @@ class KeyboardSpoke(NormalSpoke):
         self._l12_module = LOCALIZATION.get_proxy()
         self._seen = self._l12_module.KeyboardKickstarted
 
+        self._compositor_initial_layout = self._xkl_wrapper.get_current_layout()
+        self._xkl_wrapper.compositor_selected_layout_changed.connect(
+            self._on_compositor_selected_layout_changed
+        )
+        self._xkl_wrapper.compositor_layouts_changed.connect(self._on_compositor_layouts_changed)
+
     def apply(self):
         # the user has confirmed (seen) the configuration
         self._confirmed = True
@@ -322,21 +352,32 @@ class KeyboardSpoke(NormalSpoke):
 
         # Update module with actual values
         layouts = [row[0] for row in self._store]
-        self._l12_module.SetXLayouts(layouts)
+        self._l12_module.XLayouts = layouts
 
     @property
     def completed(self):
         if flags.flags.automatedInstall and not self._seen:
             return False
 
-        # The currently activated layout is a different from the
-        # selected ones. Ignore VNC, since VNC keymaps are weird
-        # and more on the client side.
-        if not self._confirmed and not flags.flags.usevnc \
-                and self._xkl_wrapper.get_current_layout() not in self._l12_module.XLayouts:
-            return False
+        # Confirmed by a user nothing else is required
+        if self._confirmed:
+            return True
 
-        return True
+        # Below are checks if we want users attention when the spoke wasn't confirmed (visited)
+
+        # Not an issue for RDP, since RDP keymaps are weird and more on the client side.
+        if flags.flags.use_rd:
+            return True
+
+        # Not an issue where system keyboard configuration is not allowed
+        # This have to be before the `_xkl_wrapper.get_current_layout()` because on Wayland
+        # that call can fail in case when system has multiple layouts set.
+        if not keyboard.can_configure_keyboard():
+            return True
+
+        # Request user attention if the current activated layout is a different from the
+        # selected ones
+        return self._compositor_initial_layout in self._l12_module.XLayouts
 
     @property
     def status(self):
@@ -347,7 +388,7 @@ class KeyboardSpoke(NormalSpoke):
 
     @property
     def ready(self):
-        return self._ready and threadMgr.get(ADD_LAYOUTS_INITIALIZE_THREAD) is None
+        return self._ready and thread_manager.get(ADD_LAYOUTS_INITIALIZE_THREAD) is None
 
     def initialize(self):
         super().initialize()
@@ -360,12 +401,12 @@ class KeyboardSpoke(NormalSpoke):
 
         # make sure the x_layouts list has at least one keyboard layout
         if not self._l12_module.XLayouts:
-            self._l12_module.SetXLayouts([DEFAULT_KEYBOARD])
+            self._l12_module.XLayouts = [DEFAULT_KEYBOARD]
 
         self._add_dialog = AddLayoutDialog(self.data)
         self._add_dialog.initialize()
 
-        if conf.system.can_configure_keyboard:
+        if keyboard.can_configure_keyboard():
             self.builder.get_object("warningBox").hide()
 
         # We want to store layouts' names but show layouts as
@@ -385,7 +426,7 @@ class KeyboardSpoke(NormalSpoke):
 
         self._layoutSwitchLabel = self.builder.get_object("layoutSwitchLabel")
 
-        if not conf.system.can_configure_keyboard:
+        if not keyboard.can_configure_keyboard():
             # Disable area for testing layouts as we cannot make
             # it work without modifying runtime system
 
@@ -404,8 +445,10 @@ class KeyboardSpoke(NormalSpoke):
         hubQ.send_not_ready(self.__class__.__name__)
         hubQ.send_message(self.__class__.__name__,
                           _("Getting list of layouts..."))
-        threadMgr.add(AnacondaThread(name=THREAD_KEYBOARD_INIT,
-                                     target=self._wait_ready))
+        thread_manager.add_thread(
+            name=THREAD_KEYBOARD_INIT,
+            target=self._wait_ready
+        )
 
     def _wait_ready(self):
         self._add_dialog.wait_initialize()
@@ -436,29 +479,27 @@ class KeyboardSpoke(NormalSpoke):
         self._refresh_switching_info()
 
     def _addLayout(self, store, name):
-        # first try to add the layout
-        if conf.system.can_configure_keyboard:
-            self._xkl_wrapper.add_layout(name)
+        if not self._xkl_wrapper.is_valid_layout(name):
+            return False
 
         # valid layout, append it to the store
         store.append([name])
+        return True
 
     def _removeLayout(self, store, itr):
         """
         Remove the layout specified by store iterator from the store and
-        X runtime configuration.
+        Wayland runtime configuration.
 
         """
 
-        if conf.system.can_configure_keyboard:
-            self._xkl_wrapper.remove_layout(store[itr][0])
         store.remove(itr)
 
     def _refresh_switching_info(self):
         switch_options = self._l12_module.LayoutSwitchOptions
-        if flags.flags.usevnc:
+        if flags.flags.use_rd:
             self._layoutSwitchLabel.set_text(_("Keyboard layouts are not "
-                                               "supported when using VNC.\n"
+                                               "supported when using RDP.\n"
                                                "However the settings will be used "
                                                "after the installation."))
         elif switch_options:
@@ -490,12 +531,15 @@ class KeyboardSpoke(NormalSpoke):
 
             if self._remove_last_attempt:
                 itr = self._store.get_iter_first()
-                if not self._store[itr][0] in self._add_dialog.chosen_layouts:
+                if self._store[itr][0] not in self._add_dialog.chosen_layouts:
                     self._removeLayout(self._store, itr)
                 self._remove_last_attempt = False
 
             # Update the selection information
             self._selection.emit("changed")
+
+            if keyboard.can_configure_keyboard():
+                self._flush_layouts_to_X()
 
     def on_remove_clicked(self, button):
         if not self._selection.count_selected_rows():
@@ -512,6 +556,10 @@ class KeyboardSpoke(NormalSpoke):
                 # Re-emit the selection changed signal now that the backing store is updated
                 # in order to update the first/last/only-based button sensitivities
                 self._selection.emit("changed")
+
+                if keyboard.can_configure_keyboard():
+                    self._flush_layouts_to_X()
+
                 return
 
             #nothing left, run AddLayout dialog to replace the current layout
@@ -532,6 +580,9 @@ class KeyboardSpoke(NormalSpoke):
         self._removeLayout(store, itr)
         self._selection.select_iter(itr2)
 
+        if keyboard.can_configure_keyboard():
+            self._flush_layouts_to_X()
+
     def on_up_clicked(self, button):
         if not self._selection.count_selected_rows():
             return
@@ -542,12 +593,8 @@ class KeyboardSpoke(NormalSpoke):
             return
 
         store.swap(cur, prev)
-        if conf.system.can_configure_keyboard:
+        if keyboard.can_configure_keyboard():
             self._flush_layouts_to_X()
-
-        if not store.iter_previous(cur):
-            #layout is first in the list (set as default), activate it
-            self._xkl_wrapper.activate_default_layout()
 
         self._selection.emit("changed")
 
@@ -557,19 +604,13 @@ class KeyboardSpoke(NormalSpoke):
 
         (store, cur) = self._selection.get_selected()
 
-        #if default layout (first in the list) changes we need to activate it
-        activate_default = not store.iter_previous(cur)
-
         nxt = store.iter_next(cur)
         if not nxt:
             return
 
         store.swap(cur, nxt)
-        if conf.system.can_configure_keyboard:
+        if keyboard.can_configure_keyboard():
             self._flush_layouts_to_X()
-
-        if activate_default:
-            self._xkl_wrapper.activate_default_layout()
 
         self._selection.emit("changed")
 
@@ -582,19 +623,33 @@ class KeyboardSpoke(NormalSpoke):
         layout, variant = keyboard.parse_layout_variant(layout_row[0])
 
         if variant:
-            lay_var_spec = "%s\t%s" % (layout, variant)
+            lay_var_spec = "%s+%s" % (layout, variant)
         else:
             lay_var_spec = layout
 
-        dialog = Gkbd.KeyboardDrawing.dialog_new()
-        Gkbd.KeyboardDrawing.dialog_set_layout(dialog, self._xkl_wrapper.configreg,
-                                               lay_var_spec)
-        dialog.set_size_request(750, 350)
-        dialog.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
-        with self.main_window.enlightbox(dialog):
-            dialog.show_all()
-            dialog.run()
-            dialog.destroy()
+        self.kill_tecla(msg="keyboard preview button clicked")
+        self.main_window.lightbox_on()
+        self._focus_in_signal_id = self.main_window.connect("focus-in-event", self._on_focus_in)
+        self._running_tecla = startProgram(["tecla", lay_var_spec], reset_lang=False)
+        PidWatcher().watch_process(self._running_tecla.pid, self.on_tecla_exited)
+
+    def kill_tecla(self, msg=""):
+        if not self._running_tecla:
+            return False
+
+        log.debug("killing running tecla %s: %s", self._running_tecla.pid, msg)
+        self._running_tecla.kill()
+        self._running_tecla = None
+        return True
+
+    def on_tecla_exited(self, pid, condition):
+        self.main_window.disconnect(self._focus_in_signal_id)
+        self._focus_in_signal_id = None
+        self._running_tecla = None
+        self.main_window.lightbox_off()
+
+    def _on_focus_in(self, widget, event):
+        self.kill_tecla(msg="keyboard spoke on focus in event")
 
     def on_selection_changed(self, selection, *args):
         # We don't have to worry about multiple rows being selected in this
@@ -642,7 +697,7 @@ class KeyboardSpoke(NormalSpoke):
         # OK clicked, set and save switching options.
         new_options = self._switching_dialog.checked_options
         self._xkl_wrapper.set_switching_options(new_options)
-        self._l12_module.SetLayoutSwitchOptions(new_options)
+        self._l12_module.LayoutSwitchOptions = new_options
 
         # Refresh switching info label.
         self._refresh_switching_info()
@@ -655,21 +710,28 @@ class KeyboardSpoke(NormalSpoke):
 
         valid_layouts = []
         for layout in self._l12_module.XLayouts:
-            try:
-                self._addLayout(self._store, layout)
+            if self._addLayout(self._store, layout):
                 valid_layouts += layout
-            except XklWrapperError:
+            else:
                 log.error("Failed to add layout '%s'", layout)
 
         if not valid_layouts:
             log.error("No valid layout given, falling back to default %s", DEFAULT_KEYBOARD)
             self._addLayout(self._store, DEFAULT_KEYBOARD)
-            self._l12_module.SetXLayouts([DEFAULT_KEYBOARD])
+            self._l12_module.XLayouts = [DEFAULT_KEYBOARD]
 
     def _flush_layouts_to_X(self):
-        layouts_list = list()
+        layouts_list = []
 
         for row in self._store:
             layouts_list.append(row[0])
 
         self._xkl_wrapper.replace_layouts(layouts_list)
+
+    def _on_compositor_selected_layout_changed(self, layout):
+        if not self._compositor_initial_layout:
+            self._compositor_initial_layout = layout
+
+    @timed_action(busy_cursor=False)
+    def _on_compositor_layouts_changed(self, layouts):
+        self._xkl_wrapper.activate_default_layout()

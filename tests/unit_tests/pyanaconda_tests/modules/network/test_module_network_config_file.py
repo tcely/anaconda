@@ -21,11 +21,16 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
 from textwrap import dedent
+from unittest.mock import patch
 
-from pyanaconda.modules.network.config_file import IFCFG_DIR, KEYFILE_DIR, \
-    get_config_files_content, is_config_file_for_system, get_config_files_paths
+from pyanaconda.modules.network.config_file import (
+    IFCFG_DIR,
+    KEYFILE_DIR,
+    get_config_files_content,
+    get_config_files_paths,
+    is_config_file_for_system,
+)
 
 
 class ConfigFileTestCase(unittest.TestCase):
@@ -88,16 +93,13 @@ class ConfigFileTestCase(unittest.TestCase):
              """),
         ]
         self._dump_files(all_files, root_path=self._root_dir)
-        self.assertSetEqual(
-            set(get_config_files_paths(root_path=self._root_dir)),
+        assert set(get_config_files_paths(root_path=self._root_dir)) == \
             set([
                 os.path.normpath(self._root_dir + IFCFG_FILE_1),
                 os.path.normpath(self._root_dir + IFCFG_FILE_2),
                 os.path.normpath(self._root_dir + KEYFILE_1),
                 os.path.normpath(self._root_dir + KEYFILE_2),
             ])
-
-        )
 
     @patch("pyanaconda.modules.network.config_file.get_config_files_paths")
     def test_get_config_files_content(self, get_config_files_paths_mock):
@@ -125,25 +127,13 @@ class ConfigFileTestCase(unittest.TestCase):
             "{}/dir/file2".format(self._root_dir),
         ]
         content = get_config_files_content(self._root_dir)
-        self.assertEqual(dedent(content).strip(), dedent(expected_content).strip())
+        assert dedent(content).strip() == dedent(expected_content).strip()
 
     def test_is_config_file_for_system(self):
         """Test is_config_file_for_system function."""
-        self.assertTrue(
-            is_config_file_for_system(os.path.join(KEYFILE_DIR, "ens3.nmconnection"))
-        )
-        self.assertTrue(
-            is_config_file_for_system(os.path.join(IFCFG_DIR, "ifcfg-ens5"))
-        )
-        self.assertFalse(
-            is_config_file_for_system("foo/bar")
-        )
-        self.assertFalse(
-            is_config_file_for_system("/run/NetworkManager/system-connections/ens3.nmconnection")
-        )
-        self.assertFalse(
-            is_config_file_for_system(os.path.join(IFCFG_DIR, "ifcfg-lo"))
-        )
-        self.assertFalse(
-            is_config_file_for_system(os.path.join(KEYFILE_DIR, "ens3"))
-        )
+        assert is_config_file_for_system(os.path.join(KEYFILE_DIR, "ens3.nmconnection"))
+        assert is_config_file_for_system(os.path.join(IFCFG_DIR, "ifcfg-ens5"))
+        assert not is_config_file_for_system("foo/bar")
+        assert not is_config_file_for_system("/run/NetworkManager/system-connections/ens3.nmconnection")
+        assert not is_config_file_for_system(os.path.join(IFCFG_DIR, "ifcfg-lo"))
+        assert not is_config_file_for_system(os.path.join(KEYFILE_DIR, "ens3"))

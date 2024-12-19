@@ -16,13 +16,18 @@
 # Red Hat, Inc.
 #
 import unittest
-
 from unittest.mock import Mock, patch
 
 from pyanaconda.modules.common.structures.packages import PackagesSelectionData
-from pyanaconda.modules.payloads.payload.dnf.dnf_manager import InvalidSelectionError, \
-    MissingSpecsError, BrokenSpecsError
-from pyanaconda.modules.payloads.payload.dnf.validation import CheckPackagesSelectionTask
+from pyanaconda.modules.payloads.payload.dnf.dnf_manager import (
+    DNFManager,
+    InvalidSelectionError,
+    MissingSpecsError,
+)
+from pyanaconda.modules.payloads.payload.dnf.validation import (
+    CheckPackagesSelectionTask,
+    VerifyRepomdHashesTask,
+)
 
 
 class CheckPackagesSelectionTaskTestCase(unittest.TestCase):
@@ -43,11 +48,9 @@ class CheckPackagesSelectionTaskTestCase(unittest.TestCase):
         report = task.run()
 
         dnf_manager.clear_selection.assert_called_once_with()
-        dnf_manager.disable_modules.assert_called_once_with([])
-        dnf_manager.enable_modules.assert_called_once_with([])
         dnf_manager.apply_specs.assert_called_once_with([], ["@core"])
         dnf_manager.resolve_selection.assert_called_once_with()
-        self.assertEqual(report.get_messages(), [])
+        assert report.get_messages() == []
 
     @patch("pyanaconda.modules.payloads.payload.dnf.validation.get_kernel_package")
     def test_check_default_selection(self, kernel_getter):
@@ -64,13 +67,11 @@ class CheckPackagesSelectionTaskTestCase(unittest.TestCase):
         report = task.run()
 
         dnf_manager.clear_selection.assert_called_once_with()
-        dnf_manager.disable_modules.assert_called_once_with([])
-        dnf_manager.enable_modules.assert_called_once_with([])
         dnf_manager.apply_specs.assert_called_once_with(
             ["@environment", "@core", "kernel"], []
         )
         dnf_manager.resolve_selection.assert_called_once_with()
-        self.assertEqual(report.get_messages(), [])
+        assert report.get_messages() == []
 
     @patch("pyanaconda.modules.payloads.payload.dnf.validation.get_kernel_package")
     def test_check_selection(self, kernel_getter):
@@ -94,18 +95,12 @@ class CheckPackagesSelectionTaskTestCase(unittest.TestCase):
         report = task.run()
 
         dnf_manager.clear_selection.assert_called_once_with()
-        dnf_manager.disable_modules.assert_called_once_with(
-            ["m3", "m4"]
-        )
-        dnf_manager.enable_modules.assert_called_once_with(
-            ["m1", "m2"]
-        )
         dnf_manager.apply_specs.assert_called_once_with(
             ["@e1", "@g1", "@g2", "p1", "p2"],
             ["@core", "@g3", "@g4", "p3", "p4"]
         )
         dnf_manager.resolve_selection.assert_called_once_with()
-        self.assertEqual(report.get_messages(), [])
+        assert report.get_messages() == []
 
     @patch("pyanaconda.modules.payloads.payload.dnf.validation.get_kernel_package")
     def test_check_invalid_selection(self, kernel_getter):
@@ -113,13 +108,41 @@ class CheckPackagesSelectionTaskTestCase(unittest.TestCase):
         selection = PackagesSelectionData()
 
         dnf_manager = Mock()
-        dnf_manager.disable_modules.side_effect = MissingSpecsError("e1")
-        dnf_manager.enable_modules.side_effect = BrokenSpecsError("e2")
         dnf_manager.apply_specs.side_effect = MissingSpecsError("e3")
         dnf_manager.resolve_selection.side_effect = InvalidSelectionError("e4")
 
         task = CheckPackagesSelectionTask(dnf_manager, selection)
         report = task.run()
 
-        self.assertEqual(report.error_messages, ["e2", "e4"])
-        self.assertEqual(report.warning_messages, ["e1", "e3"])
+        assert report.error_messages == ["e4"]
+        assert report.warning_messages == ["e3"]
+
+
+class VerifyRepomdHashesTaskTestCase(unittest.TestCase):
+    """Test the VerifyRepomdHashesTask task."""
+
+    def test_success(self):
+        """Run a task with the same repomd.xml files."""
+        dnf_manager = Mock(spec=DNFManager)
+        dnf_manager.verify_repomd_hashes.return_value = True
+
+        task = VerifyRepomdHashesTask(dnf_manager)
+        report = task.run()
+
+        assert report.is_valid() is True
+        assert report.error_messages == []
+        assert report.warning_messages == []
+
+    def test_failure(self):
+        """Run a task with the changed repomd.xml files."""
+        dnf_manager = Mock(spec=DNFManager)
+        dnf_manager.verify_repomd_hashes.return_value = False
+
+        task = VerifyRepomdHashesTask(dnf_manager)
+        report = task.run()
+
+        assert report.is_valid() is False
+        assert report.error_messages == [
+            "Some of the repomd.xml files have changed or are unreachable."
+        ]
+        assert report.warning_messages == []

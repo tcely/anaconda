@@ -18,19 +18,26 @@
 import os
 import shutil
 
-from pyanaconda.core import util
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.path import join_paths, make_directories
 from pyanaconda.modules.common.errors.installation import NetworkInstallationError
 from pyanaconda.modules.common.task import Task
-from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.modules.network.nm_client import update_connection_values, \
-    commit_changes_with_autoconnection_blocked
-from pyanaconda.modules.network.utils import guard_by_system_configuration
-from pyanaconda.modules.network.nm_client import get_config_file_connection_of_device
 from pyanaconda.modules.network.config_file import IFCFG_DIR, KEYFILE_DIR
+from pyanaconda.modules.network.nm_client import (
+    commit_changes_with_autoconnection_blocked,
+    get_config_file_connection_of_device,
+    nm_client_in_thread,
+    update_connection_values,
+)
+from pyanaconda.modules.network.utils import (
+    guard_by_system_configuration,
+    is_nbft_device,
+)
 
 log = get_module_logger(__name__)
 
 import gi
+
 gi.require_version("NM", "1.0")
 from gi.repository import NM
 
@@ -84,6 +91,7 @@ def _write_config_file(root, path, content, error_msg, overwrite):
     """
     fpath = os.path.normpath(root + path)
     if os.path.isfile(fpath) and not overwrite:
+        log.debug("Not overwriting existing configuration file %s", fpath)
         return
     try:
         with open(fpath, "w") as fobj:
@@ -98,7 +106,6 @@ class NetworkInstallationTask(Task):
 
     SYSCONF_NETWORK_FILE_PATH = "/etc/sysconfig/network"
     ANACONDA_SYSCTL_FILE_PATH = "/etc/sysctl.d/anaconda.conf"
-    RESOLV_CONF_FILE_PATH = "/etc/resolv.conf"
     NETWORK_SCRIPTS_DIR_PATH = IFCFG_DIR
     PREFIXDEVNAME_CONFIG_FILE_PREFIX = "71-net-ifnames-prefix-"
     NETWORK_SCRIPTS_CONFIG_FILE_PREFIXES = ("ifcfg-", "keys-", "route-")
@@ -154,7 +161,6 @@ Name={}
             self._disable_ipv6_on_system(self._sysroot)
         self._copy_device_config_files(self._sysroot)
         self._copy_dhclient_config_files(self._sysroot, self._network_ifaces)
-        self._copy_resolv_conf(self._sysroot, self._overwrite)
         if self._configure_persistent_device_names:
             self._copy_prefixdevname_files(self._sysroot)
 
@@ -182,15 +188,19 @@ Name={}
         :type overwrite: bool
         """
 
+        # Avoid link files for 'nbft' interfaces as it breaks Boot from NVM over TCP
+        ifname_option_values = [value for value in ifname_option_values
+                                if not is_nbft_device(value.split(':')[0])]
+
         if ifname_option_values:
-            target_system_dir = util.join_paths(root, self.SYSTEMD_NETWORK_CONFIG_DIR)
-            util.mkdirChain(target_system_dir)
+            target_system_dir = join_paths(root, self.SYSTEMD_NETWORK_CONFIG_DIR)
+            make_directories(target_system_dir)
 
         for ifname_value in ifname_option_values:
             iface, mac = ifname_value.split(":", 1)
             content = self.INTERFACE_RENAME_FILE_CONTENT_TEMPLATE.format(mac, iface)
             config_file = self.INTERFACE_RENAME_FILE_TEMPLATE.format(iface)
-            config_file_path = util.join_paths(self.SYSTEMD_NETWORK_CONFIG_DIR, config_file)
+            config_file_path = join_paths(self.SYSTEMD_NETWORK_CONFIG_DIR, config_file)
             _write_config_file(
                 root,
                 config_file_path,
@@ -217,16 +227,6 @@ Name={}
             msg = "Cannot disable ipv6 on the system: {}".format(e.strerror)
             raise NetworkInstallationError(msg) from e
 
-    def _copy_resolv_conf(self, root, overwrite):
-        """Copy resolf.conf file to target system.
-
-        :param root: path to the root of the target system
-        :type root: str
-        :param overwrite: overwrite existing configuration file
-        :type overwrite: bool
-        """
-        self._copy_file_to_root(root, self.RESOLV_CONF_FILE_PATH, follow_symlinks=False)
-
     def _copy_file_to_root(self, root, config_file, overwrite=False, follow_symlinks=True):
         """Copy the file to target system.
 
@@ -240,10 +240,10 @@ Name={}
         if not os.path.isfile(config_file):
             return
         fpath = os.path.normpath(root + config_file)
-        if os.path.isfile(fpath) and not overwrite:
+        if (os.path.isfile(fpath) or os.path.islink(fpath)) and not overwrite:
             return
         if not os.path.isdir(os.path.dirname(fpath)):
-            util.mkdirChain(os.path.dirname(fpath))
+            make_directories(os.path.dirname(fpath))
         shutil.copy(config_file, fpath, follow_symlinks=follow_symlinks)
 
     def _copy_device_config_files(self, root):
@@ -252,15 +252,17 @@ Name={}
         :param root: path to the root of the target system
         :type root: str
         """
-        for config_file in os.listdir(self.NETWORK_SCRIPTS_DIR_PATH):
-            if config_file.startswith(self.NETWORK_SCRIPTS_CONFIG_FILE_PREFIXES):
-                config_file_path = os.path.join(self.NETWORK_SCRIPTS_DIR_PATH,
+        if os.path.exists(self.NETWORK_SCRIPTS_DIR_PATH):
+            for config_file in os.listdir(self.NETWORK_SCRIPTS_DIR_PATH):
+                if config_file.startswith(self.NETWORK_SCRIPTS_CONFIG_FILE_PREFIXES):
+                    config_file_path = os.path.join(self.NETWORK_SCRIPTS_DIR_PATH,
+                                                    config_file)
+                    self._copy_file_to_root(root, config_file_path)
+        if os.path.exists(self.NM_SYSTEM_CONNECTIONS_DIR_PATH):
+            for config_file in os.listdir(self.NM_SYSTEM_CONNECTIONS_DIR_PATH):
+                config_file_path = os.path.join(self.NM_SYSTEM_CONNECTIONS_DIR_PATH,
                                                 config_file)
                 self._copy_file_to_root(root, config_file_path)
-        for config_file in os.listdir(self.NM_SYSTEM_CONNECTIONS_DIR_PATH):
-            config_file_path = os.path.join(self.NM_SYSTEM_CONNECTIONS_DIR_PATH,
-                                            config_file)
-            self._copy_file_to_root(root, config_file_path)
 
     def _copy_dhclient_config_files(self, root, network_ifaces):
         """Copy dhclient configuration files to target system.
@@ -291,16 +293,13 @@ Name={}
 class ConfigureActivationOnBootTask(Task):
     """Task for configuration of automatic activation of devices on boot"""
 
-    def __init__(self, nm_client, onboot_ifaces):
+    def __init__(self, onboot_ifaces):
         """Create a new task.
 
-        :param nm_client: NetworkManager client used as configuration backend
-        :type nm_client: NM.Client
         :param onboot_ifaces: interfaces that should be autoactivated on boot
         :type onboot_ifaces: list(str)
         """
         super().__init__()
-        self._nm_client = nm_client
         self._onboot_ifaces = onboot_ifaces
 
     @property
@@ -309,18 +308,22 @@ class ConfigureActivationOnBootTask(Task):
 
     @guard_by_system_configuration(return_value=None)
     def run(self):
-        if not self._nm_client:
+        with nm_client_in_thread() as nm_client:
+            return self._run(nm_client)
+
+    def _run(self, nm_client):
+        if not nm_client:
             log.debug("%s: No NetworkManager available.", self.name)
             return None
 
         for iface in self._onboot_ifaces:
-            con_uuid = get_config_file_connection_of_device(self._nm_client, iface)
+            con_uuid = get_config_file_connection_of_device(nm_client, iface)
             if con_uuid:
-                con = self._nm_client.get_connection_by_uuid(con_uuid)
+                con = nm_client.get_connection_by_uuid(con_uuid)
                 update_connection_values(
                     con,
                     [("connection", NM.SETTING_CONNECTION_AUTOCONNECT, True)]
                 )
-                commit_changes_with_autoconnection_blocked(con)
+                commit_changes_with_autoconnection_blocked(con, nm_client)
             else:
                 log.warning("Configure ONBOOT: can't find config for %s", iface)

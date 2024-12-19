@@ -16,16 +16,12 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda import ui
-from pyanaconda.core.constants import IPMI_ABORTED, QUIT_MESSAGE
-from pyanaconda.flags import flags
-from pyanaconda.threading import threadMgr
-from pyanaconda.core.util import ipmi_report
-from pyanaconda.ui.tui.hubs.summary import SummaryHub
-from pyanaconda.ui.tui.signals import SendMessageSignal
-from pyanaconda.ui.tui.spokes import StandaloneSpoke
-from pyanaconda.ui.tui.tuiobject import IpmiErrorDialog
+import os
+import queue
+import site
+import sys
 
+import meh.ui.text
 from simpleline import App
 from simpleline.event_loop.glib_event_loop import GLibEventLoop
 from simpleline.event_loop.signals import ExceptionSignal
@@ -33,12 +29,17 @@ from simpleline.input.input_handler import InputHandler
 from simpleline.render.adv_widgets import YesNoDialog
 from simpleline.render.screen_handler import ScreenHandler
 
-import os
-import sys
-import site
-import queue
-import meh.ui.text
+from pyanaconda import ui
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import IPMI_ABORTED, QUIT_MESSAGE
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.core.util import ipmi_report
+from pyanaconda.flags import flags
+from pyanaconda.ui.tui.hubs.summary import SummaryHub
+from pyanaconda.ui.tui.signals import SendMessageSignal
+from pyanaconda.ui.tui.spokes import StandaloneSpoke
+from pyanaconda.ui.tui.tuiobject import IpmiErrorDialog
+
 log = get_module_logger(__name__)
 
 exception_processed = False
@@ -85,7 +86,7 @@ class TextUserInterface(ui.UserInterface):
     ENVIRONMENT = "anaconda"
 
     def __init__(self, storage, payload,
-                 productTitle=u"Anaconda", isFinal=True,
+                 productTitle="Anaconda", isFinal=True,
                  quitMessage=QUIT_MESSAGE):
         """
         For detailed description of the arguments see
@@ -266,7 +267,7 @@ class TextUserInterface(ui.UserInterface):
         :type args: any
         """
 
-        if threadMgr.in_main_thread():
+        if thread_manager.in_main_thread():
             # call the function directly
             return msg_fn(*args)
         else:

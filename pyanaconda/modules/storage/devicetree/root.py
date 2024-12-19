@@ -15,6 +15,7 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import copy
 import os
 import shlex
 
@@ -22,15 +23,15 @@ from blivet import util as blivet_util
 from blivet.errors import StorageError
 from blivet.storage_log import log_exception_info
 
-from pyanaconda.core import util
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.i18n import _
+from pyanaconda.core.path import set_system_root
 from pyanaconda.modules.storage.devicetree.fsset import BlkidTab, CryptTab
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
-__all__ = ["mount_existing_system", "find_existing_installations", "Root"]
+__all__ = ["Root", "find_existing_installations", "mount_existing_system"]
 
 
 def mount_existing_system(storage, root_device, read_only=None):
@@ -51,7 +52,7 @@ def mount_existing_system(storage, root_device, read_only=None):
                                  options="%s,%s" % (root_device.format.options, read_only))
 
     # Set up the sysroot.
-    util.set_system_root(root_path)
+    set_system_root(root_path)
 
     # Mount the filesystems.
     storage.fsset.parse_fstab(chroot=root_path)
@@ -69,11 +70,10 @@ def mount_existing_system(storage, root_device, read_only=None):
         storage.make_mtab(chroot=root_path)
 
 
-def find_existing_installations(devicetree, teardown_all=True):
+def find_existing_installations(devicetree):
     """Find existing GNU/Linux installations on devices from the device tree.
 
     :param devicetree: a device tree to find existing installations in
-    :param bool teardown_all: whether to tear down all devices in the end
     :return: roots of all found installations
     """
     try:
@@ -82,8 +82,7 @@ def find_existing_installations(devicetree, teardown_all=True):
     except Exception:  # pylint: disable=broad-except
         log_exception_info(log.info, "failure detecting existing installations")
     finally:
-        if teardown_all:
-            devicetree.teardown_all()
+        devicetree.teardown_all()
 
     return []
 
@@ -125,10 +124,10 @@ def _find_existing_installations(devicetree):
             continue
 
         architecture, product, version = get_release_string(chroot=sysroot)
-        (mounts, swaps) = _parse_fstab(devicetree, chroot=sysroot)
+        (mounts, devices, mountopts) = _parse_fstab(devicetree, chroot=sysroot)
         blivet_util.umount(mountpoint=sysroot)
 
-        if not mounts and not swaps:
+        if not mounts and not devices:
             # empty /etc/fstab. weird, but I've seen it happen.
             continue
 
@@ -136,8 +135,9 @@ def _find_existing_installations(devicetree):
             product=product,
             version=version,
             arch=architecture,
+            devices=devices,
             mounts=mounts,
-            swaps=swaps
+            mountopts=mountopts,
         ))
 
     return roots
@@ -250,15 +250,17 @@ def _parse_fstab(devicetree, chroot):
 
     :param devicetree: a device tree
     :param chroot: a path to the target OS installation
-    :return: a tuple of a mount dict and swap list
+    :return: a tuple of a mount dict, device list, mount options
     """
     mounts = {}
-    swaps = []
+    devices = []
+    mountopts = {}
+
     path = "%s/etc/fstab" % chroot
     if not os.access(path, os.R_OK):
         # XXX should we raise an exception instead?
         log.info("cannot open %s for read", path)
-        return mounts, swaps
+        return mounts, devices, mountopts
 
     blkid_tab = BlkidTab(chroot=chroot)
     try:
@@ -289,43 +291,52 @@ def _parse_fstab(devicetree, chroot):
             (devspec, mountpoint, fstype, options, _rest) = fields
 
             # find device in the tree
-            device = devicetree.resolve_device(devspec,
-                                               crypt_tab=crypt_tab,
-                                               blkid_tab=blkid_tab,
-                                               options=options)
+            device = devicetree.resolve_device(
+                devspec,
+                crypt_tab=crypt_tab,
+                blkid_tab=blkid_tab,
+                options=options
+            )
 
             if device is None:
                 continue
 
+            # If a btrfs volume is found but a subvolume is expected, ignore the volume.
+            if device.type == "btrfs volume" and "subvol=" in options:
+                log.debug("subvolume from %s for %s not found", options, devspec)
+                continue
+
             if fstype != "swap":
                 mounts[mountpoint] = device
-            else:
-                swaps.append(device)
+                mountopts[mountpoint] = options
 
-    return mounts, swaps
+            devices.append(device)
+
+    return mounts, devices, mountopts
 
 
-class Root(object):
+class Root:
     """A root represents an existing OS installation."""
 
-    def __init__(self, name=None, product=None, version=None, arch=None, mounts=None, swaps=None):
+    def __init__(self, name=None, product=None, version=None, arch=None, devices=None,
+                 mounts=None, mountopts=None):
         """Create a new OS representation.
 
         :param name: a name of the OS or None
         :param product: a distribution name or None
         :param version: a distribution version or None
         :param arch: a machine's architecture or None
+        :param devices: a list of all devices
         :param mounts: a dictionary of mount points and devices
-        :param swaps: a list of swap devices
+        :param mountopts: a dictionary of mount points and its mount options
         """
         self._name = name
         self._product = product
         self._version = version
         self._arch = arch
-
-        # Blivet needs to be able to set these attributes.
-        self.mounts = mounts or {}
-        self.swaps = swaps or []
+        self._devices = devices or []
+        self._mounts = mounts or {}
+        self._mountopts = mountopts or {}
 
     @property
     def name(self):
@@ -350,6 +361,56 @@ class Root(object):
         )
 
     @property
-    def device(self):
-        """The root device or None."""
-        return self.mounts.get("/")
+    def devices(self):
+        """Devices used by the OS.
+
+        For example:
+
+        * bootloader devices
+        * mount point sources
+        * swap devices
+
+        :return: a list of all devices
+        """
+        return self._devices
+
+    @property
+    def mounts(self):
+        """Mount points defined by the OS.
+
+        :return: a dictionary of mount points and devices
+        """
+        return self._mounts
+
+    @property
+    def mountopts(self):
+        """Mount point options of mount points defined by the OS.
+
+        :return: a dictionary of mount points and their mount options
+        """
+        return self._mountopts
+
+    def copy(self, storage):
+        """Create a copy with devices of the given storage model.
+
+        :param InstallerStorage storage: a storage model
+        :return Root: a copy of this root object
+        """
+        new_root = copy.deepcopy(self)
+
+        def _get_device(d):
+            return storage.devicetree.get_device_by_id(d.id, hidden=True)
+
+        def _get_mount(i):
+            m, d = i[0], _get_device(i[1])
+            return (m, d) if m and d else None
+
+        def _get_mount_opt(i):
+            m, d = i[0], _get_device(i[1])
+            return (m, self._mountopts[m]) if m and d and m in self._mountopts else None
+
+        new_root._devices = list(filter(None, map(_get_device, new_root._devices)))
+        new_root._mounts = dict(filter(None, map(_get_mount, new_root._mounts.items())))
+        new_root._mountopts = dict(filter(None, map(_get_mount_opt,
+                                                    new_root._mounts.items())))
+        return new_root

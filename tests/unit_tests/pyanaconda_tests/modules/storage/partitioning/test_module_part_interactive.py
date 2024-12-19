@@ -20,32 +20,50 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
 from blivet import devicefactory
 from blivet.devicelibs import raid
-from blivet.devices import StorageDevice, DiskDevice, PartitionDevice, LVMVolumeGroupDevice, \
-    LVMLogicalVolumeDevice, MDRaidArrayDevice, BTRFSVolumeDevice, BTRFSSubVolumeDevice
+from blivet.devices import (
+    BTRFSSubVolumeDevice,
+    BTRFSVolumeDevice,
+    DiskDevice,
+    LVMLogicalVolumeDevice,
+    LVMVolumeGroupDevice,
+    MDRaidArrayDevice,
+    PartitionDevice,
+    StorageDevice,
+)
 from blivet.formats import get_format
 from blivet.size import Size
+from dasbus.typing import *  # pylint: disable=wildcard-import
 
 from pyanaconda.core.constants import PARTITIONING_METHOD_INTERACTIVE
-from dasbus.typing import *  # pylint: disable=wildcard-import
 from pyanaconda.modules.common.containers import DeviceTreeContainer
 from pyanaconda.modules.common.errors.storage import UnsupportedDeviceError
 from pyanaconda.modules.common.structures.device_factory import DeviceFactoryRequest
-from pyanaconda.modules.storage.devicetree.devicetree_interface import DeviceTreeInterface
-from pyanaconda.modules.storage.partitioning.interactive.interactive_module import \
-    InteractivePartitioningModule
-from pyanaconda.modules.storage.partitioning.interactive import utils
-from pyanaconda.modules.storage.partitioning.interactive.interactive_interface import \
-    InteractivePartitioningInterface
-from pyanaconda.modules.storage.partitioning.interactive.interactive_partitioning import \
-    InteractivePartitioningTask
-from pyanaconda.modules.storage.partitioning.interactive.scheduler_module import \
-    DeviceTreeSchedulerModule
 from pyanaconda.modules.storage.devicetree import create_storage
-
-from tests.unit_tests.pyanaconda_tests import patch_dbus_publish_object, check_task_creation, \
-    check_dbus_object_creation
+from pyanaconda.modules.storage.devicetree.devicetree_interface import (
+    DeviceTreeInterface,
+)
+from pyanaconda.modules.storage.partitioning.interactive import utils
+from pyanaconda.modules.storage.partitioning.interactive.interactive_interface import (
+    InteractivePartitioningInterface,
+)
+from pyanaconda.modules.storage.partitioning.interactive.interactive_module import (
+    InteractivePartitioningModule,
+)
+from pyanaconda.modules.storage.partitioning.interactive.interactive_partitioning import (
+    InteractivePartitioningTask,
+)
+from pyanaconda.modules.storage.partitioning.interactive.scheduler_module import (
+    DeviceTreeSchedulerModule,
+)
+from tests.unit_tests.pyanaconda_tests import (
+    check_dbus_object_creation,
+    check_task_creation,
+    patch_dbus_publish_object,
+    reset_dbus_container,
+)
 
 
 class InteractivePartitioningInterfaceTestCase(unittest.TestCase):
@@ -58,18 +76,18 @@ class InteractivePartitioningInterfaceTestCase(unittest.TestCase):
 
     def test_publication(self):
         """Test the DBus representation."""
-        self.assertIsInstance(self.module.for_publication(), InteractivePartitioningInterface)
+        assert isinstance(self.module.for_publication(), InteractivePartitioningInterface)
 
     @patch_dbus_publish_object
     def test_device_tree(self, publisher):
         """Test the device tree."""
         self.module.on_storage_changed(create_storage())
         path = self.interface.GetDeviceTree()
-        check_dbus_object_creation(self, path, publisher, DeviceTreeSchedulerModule)
+        check_dbus_object_creation(path, publisher, DeviceTreeSchedulerModule)
 
     def test_method_property(self):
         """Test Method property."""
-        self.assertEqual(self.interface.PartitioningMethod, PARTITIONING_METHOD_INTERACTIVE)
+        assert self.interface.PartitioningMethod == PARTITIONING_METHOD_INTERACTIVE
 
     @patch_dbus_publish_object
     def test_lazy_storage(self, publisher):
@@ -77,22 +95,22 @@ class InteractivePartitioningInterfaceTestCase(unittest.TestCase):
         self.module.on_storage_changed(create_storage())
 
         device_tree_module = self.module.get_device_tree()
-        self.assertIsNone(self.module._storage_playground)
+        assert self.module._storage_playground is None
 
         device_tree_module.get_disks()
-        self.assertIsNotNone(self.module._storage_playground)
+        assert self.module._storage_playground is not None
 
         self.module.on_partitioning_reset()
         self.module.on_storage_changed(create_storage())
-        self.assertIsNone(self.module._storage_playground)
+        assert self.module._storage_playground is None
 
         device_tree_module.get_actions()
-        self.assertIsNotNone(self.module._storage_playground)
+        assert self.module._storage_playground is not None
 
     @patch_dbus_publish_object
     def test_get_device_tree(self, publisher):
         """Test GetDeviceTree."""
-        DeviceTreeContainer._counter = 0
+        reset_dbus_container(DeviceTreeContainer)
         self.module.on_storage_changed(create_storage())
 
         tree_path = self.interface.GetDeviceTree()
@@ -100,18 +118,18 @@ class InteractivePartitioningInterfaceTestCase(unittest.TestCase):
         publisher.assert_called_once()
         object_path, obj = publisher.call_args[0]
 
-        self.assertEqual(tree_path, object_path)
-        self.assertIsInstance(obj, DeviceTreeInterface)
+        assert tree_path == object_path
+        assert isinstance(obj, DeviceTreeInterface)
 
-        self.assertEqual(obj.implementation, self.module._device_tree_module)
-        self.assertEqual(obj.implementation.storage, self.module.storage)
-        self.assertTrue(tree_path.endswith("/DeviceTree/1"))
+        assert obj.implementation == self.module._device_tree_module
+        assert obj.implementation.storage == self.module.storage
+        assert tree_path.endswith("/DeviceTree/1")
 
         publisher.reset_mock()
 
-        self.assertEqual(tree_path, self.interface.GetDeviceTree())
-        self.assertEqual(tree_path, self.interface.GetDeviceTree())
-        self.assertEqual(tree_path, self.interface.GetDeviceTree())
+        assert tree_path == self.interface.GetDeviceTree()
+        assert tree_path == self.interface.GetDeviceTree()
+        assert tree_path == self.interface.GetDeviceTree()
 
         publisher.assert_not_called()
 
@@ -121,9 +139,9 @@ class InteractivePartitioningInterfaceTestCase(unittest.TestCase):
         self.module.on_storage_changed(create_storage())
         task_path = self.interface.ConfigureWithTask()
 
-        obj = check_task_creation(self, task_path, publisher, InteractivePartitioningTask)
+        obj = check_task_creation(task_path, publisher, InteractivePartitioningTask)
 
-        self.assertEqual(obj.implementation._storage, self.module.storage)
+        assert obj.implementation._storage == self.module.storage
 
 
 class InteractiveUtilsTestCase(unittest.TestCase):
@@ -140,7 +158,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
     def test_generate_device_factory_request_unsupported(self):
         device = StorageDevice("dev1")
 
-        with self.assertRaises(UnsupportedDeviceError):
+        with pytest.raises(UnsupportedDeviceError):
             utils.generate_device_factory_request(self.storage, device)
 
     @patch("blivet.devices.dm.blockdev")
@@ -148,7 +166,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         disk = DiskDevice("dev2")
 
         request = utils.generate_device_factory_request(self.storage, disk)
-        self.assertEqual(DeviceFactoryRequest.to_structure(request), {
+        assert DeviceFactoryRequest.to_structure(request) == {
             "device-spec": get_variant(Str, "dev2"),
             "disks": get_variant(List[Str], ["dev2"]),
             "mount-point": get_variant(Str, ""),
@@ -166,7 +184,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "container-size-policy": get_variant(Int64, devicefactory.SIZE_POLICY_AUTO),
             "container-encrypted": get_variant(Bool, False),
             "container-raid-level": get_variant(Str, ""),
-        })
+        }
 
         partition = PartitionDevice(
             "dev3",
@@ -176,7 +194,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         )
 
         request = utils.generate_device_factory_request(self.storage, partition)
-        self.assertEqual(DeviceFactoryRequest.to_structure(request), {
+        assert DeviceFactoryRequest.to_structure(request) == {
             "device-spec": get_variant(Str, "dev3"),
             "disks": get_variant(List[Str], ["dev2"]),
             "mount-point": get_variant(Str, "/"),
@@ -194,7 +212,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "container-size-policy": get_variant(Int64, devicefactory.SIZE_POLICY_AUTO),
             "container-encrypted": get_variant(Bool, False),
             "container-raid-level": get_variant(Str, ""),
-        })
+        }
 
     @patch("blivet.devices.dm.blockdev")
     def test_generate_device_factory_request_lvm(self, blockdev):
@@ -223,8 +241,8 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         )
 
         request = utils.generate_device_factory_request(self.storage, lv)
-        self.assertEqual(DeviceFactoryRequest.to_structure(request), {
-            "device-spec": get_variant(Str, "testvg-testlv"),
+        assert DeviceFactoryRequest.to_structure(request) == {
+            "device-spec": get_variant(Str, lv.device_id),
             "disks": get_variant(List[Str], []),
             "mount-point": get_variant(Str, ""),
             "reformat": get_variant(Bool, True),
@@ -236,12 +254,12 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "device-size": get_variant(UInt64, Size("508 MiB").get_bytes()),
             "device-encrypted": get_variant(Bool, False),
             "device-raid-level": get_variant(Str, ""),
-            "container-spec": get_variant(Str, "testvg"),
+            "container-spec": get_variant(Str, vg.device_id),
             "container-name": get_variant(Str, "testvg"),
             "container-size-policy": get_variant(Int64, Size("1.5 GiB")),
             "container-encrypted": get_variant(Bool, False),
             "container-raid-level": get_variant(Str, ""),
-        })
+        }
 
     @patch("blivet.devices.dm.blockdev")
     def test_generate_device_factory_request_raid(self, blockdev):
@@ -260,9 +278,9 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         )
 
         request = utils.generate_device_factory_request(self.storage, device)
-        self.assertEqual(DeviceFactoryRequest.to_structure(request), {
-            "device-spec": get_variant(Str, "dev3"),
-            "disks": get_variant(List[Str], ["dev1", "dev2"]),
+        assert DeviceFactoryRequest.to_structure(request) == {
+            "device-spec": get_variant(Str, device.device_id),
+            "disks": get_variant(List[Str], [disk1.device_id, disk2.device_id]),
             "mount-point": get_variant(Str, ""),
             "reformat": get_variant(Bool, True),
             "format-type": get_variant(Str, ""),
@@ -278,7 +296,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "container-size-policy": get_variant(Int64, 0),
             "container-encrypted": get_variant(Bool, False),
             "container-raid-level": get_variant(Str, ""),
-        })
+        }
 
     @patch("blivet.devices.dm.blockdev")
     def test_generate_device_factory_request_btrfs(self, blockdev):
@@ -300,8 +318,8 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         )
 
         request = utils.generate_device_factory_request(self.storage, dev3)
-        self.assertEqual(DeviceFactoryRequest.to_structure(request), {
-            "device-spec": get_variant(Str, dev3.name),
+        assert DeviceFactoryRequest.to_structure(request) == {
+            "device-spec": get_variant(Str, dev3.device_id),
             "disks": get_variant(List[Str], []),
             "mount-point": get_variant(Str, "/boot"),
             "reformat": get_variant(Bool, True),
@@ -313,12 +331,12 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "device-size": get_variant(UInt64, Size("10 GiB").get_bytes()),
             "device-encrypted": get_variant(Bool, False),
             "device-raid-level": get_variant(Str, ""),
-            "container-spec": get_variant(Str, dev2.name),
+            "container-spec": get_variant(Str, dev2.device_id),
             "container-name": get_variant(Str, dev2.name),
             "container-size-policy": get_variant(Int64, Size("10 GiB").get_bytes()),
             "container-encrypted": get_variant(Bool, False),
             "container-raid-level": get_variant(Str, "single"),
-        })
+        }
 
     def test_get_device_factory_arguments(self):
         """Test get_device_factory_arguments."""
@@ -344,7 +362,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         request.luks_version = "luks1"
         request.device_raid_level = "raid1"
 
-        self.assertEqual(utils.get_device_factory_arguments(self.storage, request), {
+        assert utils.get_device_factory_arguments(self.storage, request) == {
             "device": dev3,
             "disks": [dev1, dev2],
             "device_type": devicefactory.DEVICE_TYPE_LVM_THINP,
@@ -360,7 +378,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "container_size": devicefactory.SIZE_POLICY_AUTO,
             "container_raid_level": None,
             "container_encrypted": False
-        })
+        }
 
         request = DeviceFactoryRequest()
         request.device_spec = "dev3"
@@ -371,7 +389,7 @@ class InteractiveUtilsTestCase(unittest.TestCase):
         request.container_encrypted = True
         request.container_raid_level = "raid1"
 
-        self.assertEqual(utils.get_device_factory_arguments(self.storage, request), {
+        assert utils.get_device_factory_arguments(self.storage, request) == {
             "device": dev3,
             "disks": [dev1, dev2],
             "device_type": devicefactory.DEVICE_TYPE_LVM,
@@ -381,10 +399,10 @@ class InteractiveUtilsTestCase(unittest.TestCase):
             "fstype": None,
             "label": None,
             "encrypted": False,
-            "luks_version": None,
+            "luks_version": "luks2",
             "raid_level": None,
             "container_name": "container1",
             "container_size": Size("10 GiB"),
             "container_raid_level": raid.RAID1,
             "container_encrypted": True
-        })
+        }

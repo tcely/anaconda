@@ -17,40 +17,55 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from pykickstart.constants import (
+    SECURE_BOOT_AUTO,
+    SECURE_BOOT_DISABLED,
+    SECURE_BOOT_ENABLED,
+)
 from pykickstart.errors import KickstartParseError
-from pykickstart.constants import SECURE_BOOT_AUTO, SECURE_BOOT_ENABLED, SECURE_BOOT_DISABLED
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.modules.storage.bootloader import BootLoaderFactory
-from pyanaconda.modules.storage.bootloader.efi import EFIBase
-from pyanaconda.modules.storage.bootloader.grub2 import GRUB2
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.configuration.bootloader import BootloaderType
-from pyanaconda.core.constants import BOOTLOADER_LOCATION_DEFAULT, BOOTLOADER_TIMEOUT_UNSET, \
-    BOOTLOADER_LOCATION_MBR, BOOTLOADER_LOCATION_PARTITION
-from pyanaconda.core.i18n import _
+from pyanaconda.core.constants import (
+    BOOTLOADER_LOCATION_DEFAULT,
+    BOOTLOADER_LOCATION_MBR,
+    BOOTLOADER_LOCATION_PARTITION,
+    BOOTLOADER_TIMEOUT_UNSET,
+)
 from pyanaconda.core.dbus import DBus
+from pyanaconda.core.i18n import _
 from pyanaconda.core.signal import Signal
-from pyanaconda.modules.common.base import KickstartBaseModule
 from pyanaconda.modules.common.constants.objects import BOOTLOADER
-from pyanaconda.modules.common.errors.storage import UnavailableStorageError
 from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.storage.bootloader.bootloader_interface import BootloaderInterface
-from pyanaconda.modules.storage.bootloader.installation import ConfigureBootloaderTask, \
-    InstallBootloaderTask, FixZIPLBootloaderTask, FixBTRFSBootloaderTask, RecreateInitrdsTask, \
-    CreateRescueImagesTask, CreateBLSEntriesTask
+from pyanaconda.modules.storage.bootloader.bootloader_interface import (
+    BootloaderInterface,
+)
+from pyanaconda.modules.storage.bootloader.efi import EFIBase
+from pyanaconda.modules.storage.bootloader.factory import BootLoaderFactory
+from pyanaconda.modules.storage.bootloader.grub2 import GRUB2
+from pyanaconda.modules.storage.bootloader.installation import (
+    CollectKernelArgumentsTask,
+    ConfigureBootloaderTask,
+    CreateBLSEntriesTask,
+    CreateRescueImagesTask,
+    FixBTRFSBootloaderTask,
+    FixZIPLBootloaderTask,
+    InstallBootloaderTask,
+    RecreateInitrdsTask,
+)
 from pyanaconda.modules.storage.constants import BootloaderMode, ZIPLSecureBoot
+from pyanaconda.modules.storage.storage_subscriber import StorageSubscriberModule
 
 log = get_module_logger(__name__)
 
 
-class BootloaderModule(KickstartBaseModule):
+class BootloaderModule(StorageSubscriberModule):
     """The bootloader module."""
 
     def __init__(self):
         """Initialize the module."""
         super().__init__()
-        self._current_storage = None
 
         self.bootloader_mode_changed = Signal()
         self._bootloader_mode = BootloaderMode.ENABLED
@@ -86,21 +101,6 @@ class BootloaderModule(KickstartBaseModule):
         self._password = ""
         self._password_is_encrypted = False
 
-    @property
-    def storage(self):
-        """The storage model.
-
-        :return: an instance of Blivet
-        """
-        if self._current_storage is None:
-            raise UnavailableStorageError()
-
-        return self._current_storage
-
-    def on_storage_changed(self, storage):
-        """Keep the instance of the current storage."""
-        self._current_storage = storage
-
     def publish(self):
         """Publish the module."""
         DBus.publish_object(BOOTLOADER.object_path, BootloaderInterface(self))
@@ -128,6 +128,9 @@ class BootloaderModule(KickstartBaseModule):
 
         if data.bootloader.extlinux:
             self.set_default_type(BootloaderType.EXTLINUX)
+
+        if data.bootloader.sdboot:
+            self.set_default_type(BootloaderType.SDBOOT)
 
         if data.bootloader.bootDrive:
             self.set_drive(data.bootloader.bootDrive)
@@ -183,6 +186,9 @@ class BootloaderModule(KickstartBaseModule):
         """Setup the kickstart data."""
         if self.get_default_type() == BootloaderType.EXTLINUX:
             data.bootloader.extlinux = True
+
+        if self.get_default_type() == BootloaderType.SDBOOT:
+            data.bootloader.sdboot = True
 
         if self.bootloader_mode == BootloaderMode.DISABLED:
             data.bootloader.disabled = True
@@ -480,9 +486,15 @@ class BootloaderModule(KickstartBaseModule):
                 kernel_versions=kernel_versions,
                 sysroot=conf.target.system_root
             ),
-            InstallBootloaderTask(
+            CollectKernelArgumentsTask(
                 storage=self.storage,
                 mode=self.bootloader_mode
+            ),
+            InstallBootloaderTask(
+                storage=self.storage,
+                mode=self.bootloader_mode,
+                payload_type=payload_type,
+                sysroot=conf.target.system_root
             ),
             CreateBLSEntriesTask(
                 storage=self.storage,
@@ -503,6 +515,7 @@ class BootloaderModule(KickstartBaseModule):
         """
         return [
             RecreateInitrdsTask(
+                storage=self.storage,
                 payload_type=payload_type,
                 kernel_versions=kernel_versions,
                 sysroot=conf.target.system_root
@@ -514,7 +527,13 @@ class BootloaderModule(KickstartBaseModule):
                 kernel_versions=kernel_versions,
                 sysroot=conf.target.system_root
             ),
-            FixZIPLBootloaderTask(
-                mode=self.bootloader_mode
-            )
         ]
+
+    def fix_zipl_bootloader_with_task(self):
+        """Fix ZIPL bootloader with a task.
+
+        :return: an installation task
+        """
+        return FixZIPLBootloaderTask(
+            mode=self.bootloader_mode
+        )

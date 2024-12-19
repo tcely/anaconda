@@ -17,10 +17,14 @@
 #
 from unittest.case import TestCase
 
+import pytest
+
 from pyanaconda.modules.payloads.constants import SourceType
 from pyanaconda.modules.payloads.source.factory import SourceFactory
 from pyanaconda.modules.payloads.source.source_base import PayloadSourceBase
-from pyanaconda.modules.payloads.source.source_base_interface import PayloadSourceBaseInterface
+from pyanaconda.modules.payloads.source.source_base_interface import (
+    PayloadSourceBaseInterface,
+)
 
 
 class SourceFactoryTestCase(TestCase):
@@ -30,11 +34,11 @@ class SourceFactoryTestCase(TestCase):
         """Test SourceFactory create method."""
         for source_type in SourceType:
             module = SourceFactory.create_source(source_type)
-            self.assertIsInstance(module, PayloadSourceBase)
-            self.assertIsInstance(module.for_publication(), PayloadSourceBaseInterface)
-            self.assertEqual(module.type, source_type)
+            assert isinstance(module, PayloadSourceBase)
+            assert isinstance(module.for_publication(), PayloadSourceBaseInterface)
+            assert module.type == source_type
 
     def test_failed_create_source(self):
         """Test failed create method of the source factory."""
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             SourceFactory.create_source("INVALID")

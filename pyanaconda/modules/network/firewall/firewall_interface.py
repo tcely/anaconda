@@ -20,6 +20,7 @@
 from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base import KickstartModuleInterfaceTemplate
 from pyanaconda.modules.common.constants.objects import FIREWALL
 from pyanaconda.modules.common.containers import TaskContainer
@@ -53,8 +54,9 @@ class FirewallInterface(KickstartModuleInterfaceTemplate):
         """
         return self.implementation.firewall_mode.value
 
+    @FirewallMode.setter
     @emits_properties_changed
-    def SetFirewallMode(self, firewall_mode: Bool):
+    def FirewallMode(self, firewall_mode: Bool):
         """Set firewall configuration mode for the target system."""
         self.implementation.set_firewall_mode(FirewallMode(firewall_mode))
 
@@ -63,8 +65,9 @@ class FirewallInterface(KickstartModuleInterfaceTemplate):
         """List of ports to be allowed through the firewall."""
         return self.implementation.enabled_ports
 
+    @EnabledPorts.setter
     @emits_properties_changed
-    def SetEnabledPorts(self, enabled_ports: List[Str]):
+    def EnabledPorts(self, enabled_ports: List[Str]):
         """Set the list of ports to be allowed thorough the firewall.
 
         :param enabled_ports: a list of ports to be enabled
@@ -76,8 +79,9 @@ class FirewallInterface(KickstartModuleInterfaceTemplate):
         """List of trusted devices to be allowed through the firewall."""
         return self.implementation.trusts
 
+    @Trusts.setter
     @emits_properties_changed
-    def SetTrusts(self, trusts: List[Str]):
+    def Trusts(self, trusts: List[Str]):
         """Set the list of trusted devices to be allowed through the firewall.
 
         :param trusts: a list of trusted devices
@@ -89,8 +93,9 @@ class FirewallInterface(KickstartModuleInterfaceTemplate):
         """List of services to be allowed through the firewall."""
         return self.implementation.enabled_services
 
+    @EnabledServices.setter
     @emits_properties_changed
-    def SetEnabledServices(self, enabled_services: List[Str]):
+    def EnabledServices(self, enabled_services: List[Str]):
         """Set the list of services to be allowed through the firewall.
 
         :param enabled_services: a list of services to be enabled
@@ -102,8 +107,9 @@ class FirewallInterface(KickstartModuleInterfaceTemplate):
         """List of services to be explicitly disabled on the firewall."""
         return self.implementation.disabled_services
 
+    @DisabledServices.setter
     @emits_properties_changed
-    def SetDisabledServices(self, disabled_services: List[Str]):
+    def DisabledServices(self, disabled_services: List[Str]):
         """Set the list of services to be explicitly disabled on the firewall.
 
         :param disabled_services: a list of services to be enabled

@@ -16,19 +16,20 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.modules.common.util import is_module_available
-from pyanaconda.ui.categories.user_settings import UserSettingsCategory
-from pyanaconda.ui.lib.services import is_reconfiguration_mode
-from pyanaconda.ui.tui.tuiobject import PasswordDialog
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda.flags import flags
+from simpleline.render.widgets import TextWidget
+
+from pyanaconda.core.constants import PASSWORD_POLICY_ROOT
 from pyanaconda.core.i18n import N_, _
 from pyanaconda.modules.common.constants.services import USERS
-from pyanaconda.core.constants import PASSWORD_POLICY_ROOT
-from pyanaconda.core.configuration.anaconda import conf
-
-from simpleline.render.widgets import TextWidget
+from pyanaconda.modules.common.util import is_module_available
+from pyanaconda.ui.categories.user_settings import UserSettingsCategory
+from pyanaconda.ui.common import FirstbootSpokeMixIn
+from pyanaconda.ui.lib.users import (
+    can_modify_root_configuration,
+    get_root_configuration_status,
+)
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
+from pyanaconda.ui.tui.tuiobject import PasswordDialog
 
 
 class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
@@ -36,8 +37,12 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
        .. inheritance-diagram:: PasswordSpoke
           :parts: 3
     """
-    helpFile = "PasswordSpoke.txt"
     category = UserSettingsCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "root-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -60,11 +65,11 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
     @property
     def completed(self):
-        return bool(self._users_module.IsRootPasswordSet or self._users_module.IsRootAccountLocked)
+        return self._users_module.IsRootPasswordSet
 
     @property
     def showable(self):
-        return not (self.completed and flags.automatedInstall and not conf.ui.can_change_root)
+        return can_modify_root_configuration(self._users_module)
 
     @property
     def mandatory(self):
@@ -73,18 +78,7 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
     @property
     def status(self):
-        if self._users_module.IsRootAccountLocked:
-            # reconfig mode currently allows re-enabling a locked root account if
-            # user sets a new root password
-            if is_reconfiguration_mode():
-                return _("Disabled. Set password to enable root account.")
-            else:
-                return _("Root account is disabled.")
-
-        elif self._users_module.IsRootPasswordSet:
-            return _("Password is set.")
-        else:
-            return _("Password is not set.")
+        return get_root_configuration_status(self._users_module)
 
     def refresh(self, args=None):
         NormalTUISpoke.refresh(self, args)
@@ -100,6 +94,7 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
             policy_name=PASSWORD_POLICY_ROOT
         )
         password_dialog.no_separator = True
+        password_dialog.username = "root"
         self._password = password_dialog.run()
 
         if self._password is None:
@@ -112,4 +107,4 @@ class PasswordSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
     def apply(self):
         self._users_module.SetCryptedRootPassword(self._password)
         if self._password:
-            self._users_module.SetRootAccountLocked(False)
+            self._users_module.IsRootAccountLocked = False

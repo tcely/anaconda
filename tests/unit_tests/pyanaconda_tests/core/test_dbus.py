@@ -21,11 +21,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pyanaconda.core.dbus import AnacondaMessageBus, DefaultMessageBus
-from dasbus.constants import DBUS_STARTER_ADDRESS
-from pyanaconda.core.constants import DBUS_ANACONDA_SESSION_ADDRESS
-
 import gi
+import pytest
+from dasbus.constants import DBUS_STARTER_ADDRESS
+
+from pyanaconda.core.constants import DBUS_ANACONDA_SESSION_ADDRESS
+from pyanaconda.core.dbus import AnacondaMessageBus, DefaultMessageBus
+
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio
 
@@ -34,8 +36,8 @@ class AnacondaDBusConnectionTestCase(unittest.TestCase):
     """Test Anaconda DBus connection."""
 
     def _check_addressed_connection(self, message_bus, getter, address):
-        self.assertIsNotNone(message_bus.connection)
-        self.assertEqual(message_bus.address, address)
+        assert message_bus.connection is not None
+        assert message_bus.address == address
         getter.assert_called_once_with(
             address,
             (
@@ -47,7 +49,7 @@ class AnacondaDBusConnectionTestCase(unittest.TestCase):
         )
 
     def _check_anaconda_connection(self, message_bus, getter):
-        with self.assertRaises(ConnectionError):
+        with pytest.raises(ConnectionError):
             self._check_addressed_connection(message_bus, getter, "ADDRESS")
 
         with tempfile.NamedTemporaryFile("w") as f:

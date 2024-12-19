@@ -18,39 +18,38 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import glob
+import functools
+import importlib.machinery
+import importlib.util
+import inspect
 import os
 import os.path
-import subprocess
-import unicodedata
-# Used for ascii_lowercase, ascii_uppercase constants
-import string  # pylint: disable=deprecated-module
-import tempfile
 import re
-import gettext
 import signal
+import subprocess
 import sys
+
+# Used for ascii_lowercase, ascii_uppercase constants
+import tempfile
 import types
-import inspect
-import functools
-import importlib.util
-import importlib.machinery
-import blivet.arch
 
 import requests
 from requests_file import FileAdapter
 from requests_ftp import FTPAdapter
 
+from pyanaconda.anaconda_loggers import get_module_logger, get_program_logger
+from pyanaconda.anaconda_logging import program_log_lock
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.flags import flags
-from pyanaconda.core.process_watchers import WatchProcesses
-from pyanaconda.core.constants import DRACUT_SHUTDOWN_EJECT, \
-    IPMI_ABORTED, X_TIMEOUT, TAINT_HARDWARE_UNSUPPORTED, TAINT_SUPPORT_REMOVED, \
-    WARNING_HARDWARE_UNSUPPORTED, WARNING_SUPPORT_REMOVED
+from pyanaconda.core.constants import (
+    DRACUT_REPO_DIR,
+    DRACUT_SHUTDOWN_EJECT,
+    IPMI_ABORTED,
+    PACKAGES_LIST_FILE,
+)
+from pyanaconda.core.live_user import get_live_user
+from pyanaconda.core.path import join_paths, make_directories, open_with_perm
 from pyanaconda.errors import RemovedModuleError
 
-from pyanaconda.anaconda_logging import program_log_lock
-from pyanaconda.anaconda_loggers import get_module_logger, get_program_logger
 log = get_module_logger(__name__)
 program_log = get_program_logger()
 
@@ -75,55 +74,15 @@ def setenv(name, value):
 
 def augmentEnv():
     env = os.environ.copy()
+    # FIXME: Remove the support for the ANA_INSTALL_PATH variable.
     env.update({"ANA_INSTALL_PATH": conf.target.system_root})
     env.update(_child_env)
     return env
 
 
-def set_system_root(path):
-    """Change the OS root path.
-
-    The path defined by conf.target.system_root will be bind mounted at the given
-    path, so conf.target.system_root can be used to access the root of the new OS.
-
-    We always call it after the root device is mounted at conf.target.physical_root
-    to set the physical root as the current system root.
-
-    Then, it can be used by Payload subclasses which install operating systems to
-    non-default roots.
-
-    If the given path is None, then conf.target.system_root is only unmounted.
-
-    :param path: the new OS root path or None
-    """
-    sysroot = conf.target.system_root
-
-    if sysroot == path:
-        return
-
-    # Unmount the mount point if necessary.
-    rc = execWithRedirect("findmnt", ["-rn", sysroot])
-
-    if rc == 0:
-        execWithRedirect("mount", ["--make-rprivate", sysroot])
-        execWithRedirect("umount", ["--recursive", sysroot])
-
-    if not path:
-        return
-
-    # Create a directory for the mount point.
-    if not os.path.exists(sysroot):
-        mkdirChain(sysroot)
-
-    # Mount the mount point.
-    rc = execWithRedirect("mount", ["--rbind", path, sysroot])
-
-    if rc != 0:
-        raise OSError("Failed to mount sysroot to {}.".format(path))
-
-
 def startProgram(argv, root='/', stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                 env_prune=None, env_add=None, reset_handlers=True, reset_lang=True, **kwargs):
+                 env_prune=None, env_add=None, reset_handlers=True, reset_lang=True,
+                 do_preexec=True, **kwargs):
     """ Start an external program and return the Popen object.
 
         The root and reset_handlers arguments are handled by passing a
@@ -140,6 +99,7 @@ def startProgram(argv, root='/', stdin=None, stdout=subprocess.PIPE, stderr=subp
         :param env_add: environment variables to add before execution
         :param reset_handlers: whether to reset to SIG_DFL any signal handlers set to SIG_IGN
         :param reset_lang: whether to set the locale of the child process to C
+        :param do_preexec: whether to use the preexec function
         :param kwargs: Additional parameters to pass to subprocess.Popen
         :return: A Popen object for the running command.
     """
@@ -152,13 +112,41 @@ def startProgram(argv, root='/', stdin=None, stdout=subprocess.PIPE, stderr=subp
     if target_root == conf.target.physical_root:
         target_root = conf.target.system_root
 
-    # Check for and save a preexec_fn argument
-    preexec_fn = kwargs.pop("preexec_fn", None)
-
     # Map reset_handlers to the restore_signals Popen argument.
     # restore_signals handles SIGPIPE, and preexec below handles any additional
     # signals ignored by anaconda.
     restore_signals = reset_handlers
+
+    with program_log_lock:
+        if target_root != '/':
+            program_log.info("Running in chroot '%s'... %s", target_root, " ".join(argv))
+        else:
+            program_log.info("Running... %s", " ".join(argv))
+
+    env = augmentEnv()
+    for var in env_prune:
+        env.pop(var, None)
+
+    if reset_lang:
+        env.update({"LC_ALL": "C"})
+
+    if env_add:
+        env.update(env_add)
+
+    # pylint: disable=subprocess-popen-preexec-fn
+    partsubp = functools.partial(subprocess.Popen,
+                                 argv,
+                                 stdin=stdin,
+                                 stdout=stdout,
+                                 stderr=stderr,
+                                 close_fds=True,
+                                 restore_signals=restore_signals,
+                                 cwd=root, env=env, **kwargs)
+    if not do_preexec:
+        return partsubp()
+
+    # Check for and save a preexec_fn argument
+    preexec_fn = kwargs.pop("preexec_fn", None)
 
     def preexec():
         # If a target root was specificed, chroot into it
@@ -178,126 +166,12 @@ def startProgram(argv, root='/', stdin=None, stdout=subprocess.PIPE, stderr=subp
         if preexec_fn is not None:
             preexec_fn()
 
-    with program_log_lock:
-        if target_root != '/':
-            program_log.info("Running in chroot '%s'... %s", target_root, " ".join(argv))
-        else:
-            program_log.info("Running... %s", " ".join(argv))
-
-    env = augmentEnv()
-    for var in env_prune:
-        env.pop(var, None)
-
-    if reset_lang:
-        env.update({"LC_ALL": "C"})
-
-    if env_add:
-        env.update(env_add)
-
-    # pylint: disable=subprocess-popen-preexec-fn
-    return subprocess.Popen(argv,
-                            stdin=stdin,
-                            stdout=stdout,
-                            stderr=stderr,
-                            close_fds=True,
-                            restore_signals=restore_signals,
-                            preexec_fn=preexec, cwd=root, env=env, **kwargs)
+    return partsubp(preexec_fn=preexec)
 
 
-class X11Status:
-    """Status of Xorg launch.
-
-    Values of an instance can be modified from the handler functions.
-    """
-    def __init__(self):
-        self.started = False
-        self.timed_out = False
-
-    def needs_waiting(self):
-        return not (self.started or self.timed_out)
-
-
-def startX(argv, output_redirect=None, timeout=X_TIMEOUT):
-    """ Start X and return once X is ready to accept connections.
-
-        X11, if SIGUSR1 is set to SIG_IGN, will send SIGUSR1 to the parent
-        process once it is ready to accept client connections. This method
-        sets that up and waits for the signal or bombs out if nothing happens
-        for a minute. The process will also be added to the list of watched
-        processes.
-
-        :param argv: The command line to run, as a list
-        :param output_redirect: file or file descriptor to redirect stdout and stderr to
-        :param timeout: Number of seconds to timing out.
-    """
-    x11_status = X11Status()
-
-    # Handle successful start before timeout
-    def sigusr1_success_handler(num, frame):
-        log.debug("X server has signalled a successful start.")
-        x11_status.started = True
-
-    # Fail after, let's say a minute, in case something weird happens
-    # and we don't receive SIGUSR1
-    def sigalrm_handler(num, frame):
-        # Check that it didn't make it under the wire
-        if x11_status.started:
-            return
-        x11_status.timed_out = True
-        log.error("Timeout trying to start %s", argv[0])
-
-    # Handle delayed start after timeout
-    def sigusr1_too_late_handler(num, frame):
-        if x11_status.timed_out:
-            log.debug("SIGUSR1 received after X server timeout. Switching back to tty1. "
-                      "SIGUSR1 now again initiates test of exception reporting.")
-            signal.signal(signal.SIGUSR1, old_sigusr1_handler)
-
-    # preexec_fn to add the SIGUSR1 handler in the child we are starting
-    # see man page XServer(1), section "signals"
-    def sigusr1_preexec():
-        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
-
-    try:
-        old_sigusr1_handler = signal.signal(signal.SIGUSR1, sigusr1_success_handler)
-        old_sigalrm_handler = signal.signal(signal.SIGALRM, sigalrm_handler)
-
-        # Start the timer
-        log.debug("Setting timeout %s seconds for starting X.", timeout)
-        signal.alarm(timeout)
-
-        childproc = startProgram(argv, stdout=output_redirect, stderr=output_redirect,
-                                 preexec_fn=sigusr1_preexec)
-        WatchProcesses.watch_process(childproc, argv[0])
-
-        # Wait for SIGUSR1 or SIGALRM
-        while x11_status.needs_waiting():
-            signal.pause()
-
-    finally:
-        # Stop the timer
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_sigalrm_handler)
-
-        # Handle outcome of X start attempt
-        if x11_status.started:
-            signal.signal(signal.SIGUSR1, old_sigusr1_handler)
-        elif x11_status.timed_out:
-            signal.signal(signal.SIGUSR1, sigusr1_too_late_handler)
-            # Kill Xorg because from now on we will not use it. It will exit only after sending
-            # the signal, but at least we don't have to track that.
-            WatchProcesses.unwatch_process(childproc)
-            childproc.terminate()
-            log.debug("Exception handler test suspended to prevent accidental activation by "
-                      "delayed Xorg start. Next SIGUSR1 will be handled as delayed Xorg start.")
-            # Raise an exception to notify the caller that things went wrong. This affects
-            # particularly pyanaconda.display.do_startup_x11_actions(), where the window manager
-            # is started immediately after this. The WM would just wait forever.
-            raise TimeoutError("Timeout trying to start %s" % argv[0])
-
-
-def _run_program(argv, root='/', stdin=None, stdout=None, env_prune=None, log_output=True,
-                 binary_output=False, filter_stderr=False):
+def _run_program(argv, root='/', stdin=None, stdout=None, env_prune=None,
+                 log_output=True, binary_output=False, filter_stderr=False,
+                 do_preexec=True, env_add=None, user=None):
     """ Run an external program, log the output and return it to the caller
 
         NOTE/WARNING: UnicodeDecodeError will be raised if the output of the of the
@@ -311,6 +185,9 @@ def _run_program(argv, root='/', stdin=None, stdout=None, env_prune=None, log_ou
         :param log_output: whether to log the output of command
         :param binary_output: whether to treat the output of command as binary data
         :param filter_stderr: whether to exclude the contents of stderr from the returned output
+        :param do_preexec: whether to use a preexec_fn for subprocess.Popen
+        :param env_add: environment variables added for the execution
+        :param user: Specify user UID under which the command will be executed
         :return: The return code of the command and the output
     """
     try:
@@ -320,7 +197,7 @@ def _run_program(argv, root='/', stdin=None, stdout=None, env_prune=None, log_ou
             stderr = subprocess.STDOUT
 
         proc = startProgram(argv, root=root, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr,
-                            env_prune=env_prune)
+                            env_prune=env_prune, env_add=env_add, do_preexec=do_preexec, user=user)
 
         (output_string, err_string) = proc.communicate()
         if not binary_output:
@@ -361,27 +238,14 @@ def _run_program(argv, root='/', stdin=None, stdout=None, env_prune=None, log_ou
         raise
 
     with program_log_lock:
-        program_log.debug("Return code: %d", proc.returncode)
+        program_log.debug("Return code of %s: %d", argv[0], proc.returncode)
 
     return (proc.returncode, output_string)
 
 
-def execInSysroot(command, argv, stdin=None, root=None):
-    """ Run an external program in the target root.
-        :param command: The command to run
-        :param argv: The argument list
-        :param stdin: The file object to read stdin from.
-        :param root: The directory to chroot to before running the command.
-        :return: The return code of the command
-    """
-    if root is None:
-        root = conf.target.system_root
-
-    return execWithRedirect(command, argv, stdin=stdin, root=root)
-
-
-def execWithRedirect(command, argv, stdin=None, stdout=None,
-                     root='/', env_prune=None, log_output=True, binary_output=False):
+def execWithRedirect(command, argv, stdin=None, stdout=None, root='/',
+                     env_prune=None, env_add=None, log_output=True, binary_output=False,
+                     do_preexec=True):
     """ Run an external program and redirect the output to a file.
 
         :param command: The command to run
@@ -390,17 +254,45 @@ def execWithRedirect(command, argv, stdin=None, stdout=None,
         :param stdout: Optional file object to redirect stdout and stderr to.
         :param root: The directory to chroot to before running command.
         :param env_prune: environment variable to remove before execution
+        :param env_add: environment variables added for the execution
         :param log_output: whether to log the output of command
         :param binary_output: whether to treat the output of command as binary data
+        :param do_preexec: whether to use a preexec_fn for subprocess.Popen
         :return: The return code of the command
     """
     argv = [command] + argv
     return _run_program(argv, stdin=stdin, stdout=stdout, root=root, env_prune=env_prune,
-                        log_output=log_output, binary_output=binary_output)[0]
+                        env_add=env_add, log_output=log_output, binary_output=binary_output,
+                        do_preexec=do_preexec)[0]
 
 
-def execWithCapture(command, argv, stdin=None, root='/', log_output=True, filter_stderr=False):
+def execWithCapture(command, argv, stdin=None, root='/', env_prune=None, env_add=None,
+                    log_output=True, filter_stderr=False, do_preexec=True):
     """ Run an external program and capture standard out and err.
+
+        :param command: The command to run
+        :param argv: The argument list
+        :param stdin: The file object to read stdin from.
+        :param root: The directory to chroot to before running command.
+        :param env_prune: environment variable to remove before execution
+        :param env_add: environment variables added for the execution
+        :param log_output: Whether to log the output of command
+        :param filter_stderr: Whether stderr should be excluded from the returned output
+        :param do_preexec: whether to use the preexec function
+        :return: The output of the command
+    """
+    argv = [command] + argv
+
+    return _run_program(argv, stdin=stdin, root=root, log_output=log_output, env_prune=env_prune,
+                        env_add=env_add, filter_stderr=filter_stderr, do_preexec=do_preexec)[1]
+
+
+def execWithCaptureAsLiveUser(command, argv, stdin=None, root='/', log_output=True,
+                              filter_stderr=False, do_preexec=True):
+    """ Run an external program and capture standard out and err as liveuser user.
+
+        The liveuser user account is used on Fedora live media. If we need to read values from the
+        running live system we might need to run the commands under the liveuser account.
 
         :param command: The command to run
         :param argv: The argument list
@@ -408,14 +300,23 @@ def execWithCapture(command, argv, stdin=None, root='/', log_output=True, filter
         :param root: The directory to chroot to before running command.
         :param log_output: Whether to log the output of command
         :param filter_stderr: Whether stderr should be excluded from the returned output
+        :param do_preexec: whether to use the preexec function
         :return: The output of the command
     """
     argv = [command] + argv
+
+    user = get_live_user()
+
+    if user is None:
+        raise OSError("Live user is requested to run command but can't be found")
+
     return _run_program(argv, stdin=stdin, root=root, log_output=log_output,
-                        filter_stderr=filter_stderr)[1]
+                        filter_stderr=filter_stderr, do_preexec=do_preexec,
+                        user=user.uid, env_add=user.env_add, env_prune=user.env_prune)[1]
 
 
-def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_stderr=False):
+def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_stderr=False,
+                  raise_on_nozero=True):
     """ Execute an external command and return the line output of the command
         in real-time.
 
@@ -433,19 +334,21 @@ def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_st
         :param root: The directory to chroot to before running command.
         :param env_prune: environment variable to remove before execution
         :param filter_stderr: Whether stderr should be excluded from the returned output
+        :param raise_on_nozero: Whether a nonzero exit status of the tool should cause an exception
 
         Output from the file is not logged to program.log
         This returns an iterator with the lines from the command until it has finished
     """
 
-    class ExecLineReader(object):
+    class ExecLineReader:
         """Iterator class for returning lines from a process and cleaning
            up the process when the output is no longer needed.
         """
 
-        def __init__(self, proc, argv):
+        def __init__(self, proc, argv, raise_on_nozero):
             self._proc = proc
             self._argv = argv
+            self._raise_on_nozero = raise_on_nozero
 
         def __iter__(self):
             return self
@@ -466,6 +369,10 @@ def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_st
                 # Output finished, wait for the process to end
                 self._proc.communicate()
 
+                # If we don't care about return codes, just finish
+                if not self._raise_on_nozero:
+                    raise StopIteration
+
                 # Check for successful exit
                 if self._proc.returncode < 0:
                     raise OSError("process '%s' was killed by signal %s" %
@@ -477,6 +384,10 @@ def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_st
 
             return line.strip()
 
+        @property
+        def rc(self):
+            return self._proc.returncode
+
     argv = [command] + argv
 
     if filter_stderr:
@@ -485,13 +396,13 @@ def execReadlines(command, argv, stdin=None, root='/', env_prune=None, filter_st
         stderr = subprocess.STDOUT
 
     try:
-        proc = startProgram(argv, root=root, stdin=stdin, stderr=stderr, env_prune=env_prune, bufsize=1)
+        proc = startProgram(argv, root=root, stdin=stdin, stderr=stderr, env_prune=env_prune)
     except OSError as e:
         with program_log_lock:
             program_log.error("Error running %s: %s", argv[0], e.strerror)
         raise
 
-    return ExecLineReader(proc, argv)
+    return ExecLineReader(proc, argv, raise_on_nozero)
 
 
 ## Run a shell.
@@ -501,17 +412,6 @@ def execConsole():
         proc.wait()
     except OSError as e:
         raise RuntimeError("Error running /bin/bash: " + e.strerror) from e
-
-
-## Create a directory path.  Don't fail if the directory already exists.
-def mkdirChain(directory):
-    """ Make a directory and all of its parents. Don't fail if part or
-        of it already exists.
-
-        :param str directory: The directory path to create
-    """
-
-    os.makedirs(directory, 0o755, exist_ok=True)
 
 
 def get_active_console(dev="console"):
@@ -563,107 +463,6 @@ def reIPL(ipldev):
         log.info("reIPL configuration successful")
 
 
-def resetRpmDb():
-    for rpmfile in glob.glob("%s/var/lib/rpm/__db.*" % conf.target.system_root):
-        try:
-            os.unlink(rpmfile)
-        except OSError as e:
-            log.debug("error %s removing file: %s", e, rpmfile)
-
-
-def setup_translations():
-    gettext.textdomain("anaconda")
-
-
-def _run_systemctl(command, service, root="/"):
-    """
-    Runs 'systemctl command service.service'
-
-    :return: exit status of the systemctl
-
-    """
-
-    args = [command, service]
-    if root != "/":
-        args += ["--root", root]
-
-    ret = execWithRedirect("systemctl", args)
-
-    return ret
-
-
-def start_service(service):
-    return _run_systemctl("start", service)
-
-
-def stop_service(service):
-    return _run_systemctl("stop", service)
-
-
-def restart_service(service):
-    return _run_systemctl("restart", service)
-
-
-def service_running(service):
-    ret = _run_systemctl("status", service)
-
-    return ret == 0
-
-
-def is_service_installed(service, root=None):
-    """Is a systemd service installed in the sysroot?
-
-    :param str service: name of the service to check
-    :param str root: path to the sysroot or None to use default sysroot path
-    """
-    if root is None:
-        root = conf.target.system_root
-
-    if not service.endswith(".service"):
-        service += ".service"
-
-    args = ["list-unit-files", service, "--no-legend"]
-
-    if root != "/":
-        args += ["--root", root]
-
-    unit_file = execWithCapture("systemctl", args)
-
-    return bool(unit_file)
-
-
-def enable_service(service, root=None):
-    """ Enable a systemd service in the sysroot.
-
-    :param str service: name of the service to enable
-    :param str root: path to the sysroot or None to use default sysroot path
-    """
-    if root is None:
-        root = conf.target.system_root
-
-    ret = _run_systemctl("enable", service, root=root)
-
-    if ret != 0:
-        raise ValueError("Error enabling service %s: %s" % (service, ret))
-
-
-def disable_service(service, root=None):
-    """ Disable a systemd service in the sysroot.
-
-    :param str service: name of the service to enable
-    :param str root: path to the sysroot or None to use default sysroot path
-    """
-    if root is None:
-        root = conf.target.system_root
-
-    # we ignore the error so we can disable services even if they don't
-    # exist, because that's effectively disabled
-    ret = _run_systemctl("disable", service, root=root)
-
-    if ret != 0:
-        log.warning("Disabling %s failed. It probably doesn't exist", service)
-
-
 def dracut_eject(device):
     """
     Use dracut shutdown hook to eject media after the system is shutdown.
@@ -675,7 +474,7 @@ def dracut_eject(device):
 
     try:
         if not os.path.exists(DRACUT_SHUTDOWN_EJECT):
-            mkdirChain(os.path.dirname(DRACUT_SHUTDOWN_EJECT))
+            make_directories(os.path.dirname(DRACUT_SHUTDOWN_EJECT))
             f = open_with_perm(DRACUT_SHUTDOWN_EJECT, "w", 0o755)
             f.write("#!/bin/sh\n")
             f.write("# Created by Anaconda\n")
@@ -700,7 +499,7 @@ def vtActivate(num):
     """
 
     try:
-        ret = execWithRedirect("chvt", [str(num)])
+        ret = execWithRedirect("chvt", [str(num)], do_preexec=False)
     except OSError as oserr:
         ret = -1
         log.error("Failed to run chvt: %s", oserr.strerror)
@@ -709,319 +508,6 @@ def vtActivate(num):
         log.error("Failed to switch to tty%d", num)
 
     return ret == 0
-
-
-def strip_accents(s):
-    """This function takes arbitrary unicode string
-    and returns it with all the diacritics removed.
-
-    :param s: arbitrary string
-    :type s: str
-
-    :return: s with diacritics removed
-    :rtype: str
-
-    """
-    return ''.join(c for c in unicodedata.normalize('NFD', s)
-                   if unicodedata.category(c) != 'Mn')
-
-
-def cmp_obj_attrs(obj1, obj2, attr_list):
-    """ Compare attributes of 2 objects for changes
-
-        Missing attrs are considered a mismatch
-
-        :param obj1: First object to compare
-        :type obj1: Any object
-        :param obj2: Second object to compare
-        :type obj2: Any object
-        :param attr_list: List of attributes to compare
-        :type attr_list: list or tuple of strings
-        :returns: True if the attrs all match
-        :rtype: bool
-    """
-    for attr in attr_list:
-        if hasattr(obj1, attr) and hasattr(obj2, attr):
-            if getattr(obj1, attr) != getattr(obj2, attr):
-                return False
-        else:
-            return False
-    return True
-
-
-def dir_tree_map(root, func, files=True, dirs=True):
-    """
-    Apply the given function to all files and directories in the directory tree
-    under the given root directory.
-
-    :param root: root of the directory tree the function should be mapped to
-    :type root: str
-    :param func: a function taking the directory/file path
-    :type func: path -> None
-    :param files: whether to apply the function to the files in the dir. tree
-    :type files: bool
-    :param dirs: whether to apply the function to the directories in the dir. tree
-    :type dirs: bool
-
-    TODO: allow using globs and thus more trees?
-
-    """
-
-    for (dir_ent, _dir_items, file_items) in os.walk(root):
-        if dirs:
-            # try to call the function on the directory entry
-            try:
-                func(dir_ent)
-            except OSError:
-                pass
-
-        if files:
-            # try to call the function on the files in the directory entry
-            for file_ent in (os.path.join(dir_ent, f) for f in file_items):
-                try:
-                    func(file_ent)
-                except OSError:
-                    pass
-
-        # directories under the directory entry will appear as directory entries
-        # in the loop
-
-
-def chown_dir_tree(root, uid, gid, from_uid_only=None, from_gid_only=None):
-    """
-    Change owner (uid and gid) of the files and directories under the given
-    directory tree (recursively).
-
-    :param root: root of the directory tree that should be chown'ed
-    :type root: str
-    :param uid: UID that should be set as the owner
-    :type uid: int
-    :param gid: GID that should be set as the owner
-    :type gid: int
-    :param from_uid_only: if given, the owner is changed only for the files and
-                          directories owned by that UID
-    :type from_uid_only: int or None
-    :param from_gid_only: if given, the owner is changed only for the files and
-                          directories owned by that GID
-    :type from_gid_only: int or None
-
-    """
-
-    def conditional_chown(path, uid, gid, from_uid=None, from_gid=None):
-        stats = os.stat(path)
-        if (from_uid and stats.st_uid != from_uid) or \
-                (from_gid and stats.st_gid != from_gid):
-            # owner UID or GID not matching, do nothing
-            return
-
-        # UID and GID matching or not required
-        os.chown(path, uid, gid)
-
-    if not from_uid_only and not from_gid_only:
-        # the easy way
-        dir_tree_map(root, lambda path: os.chown(path, uid, gid))
-    else:
-        # conditional chown
-        dir_tree_map(root, lambda path: conditional_chown(path, uid, gid,
-                                                          from_uid_only,
-                                                          from_gid_only))
-
-
-def get_kernel_taint(flag):
-    """Get a value of a kernel taint.
-
-    :param flag: a kernel taint flag
-    :return: False if the value of taint is 0, otherwise True
-    """
-    try:
-        tainted = int(open("/proc/sys/kernel/tainted").read())
-    except (OSError, ValueError):
-        tainted = 0
-
-    return bool(tainted & (1 << flag))
-
-
-def find_hardware_with_removed_support():
-    """Find hardware with removed support.
-
-    :return: a list of hardware specifications
-    """
-    pattern = "Warning: (.*) - Support for this device has been removed in this major release."
-    hardware = []
-
-    for line in execReadlines("journalctl", ["-b", "-k", "-g", pattern, "-o", "cat"]):
-        matched = re.match(pattern, line)
-
-        if matched:
-            hardware.append(matched.group(1))
-
-    return hardware
-
-
-def detect_unsupported_hardware():
-    """Detect unsupported hardware.
-
-    :return: a list of warnings
-    """
-    warnings = []  # pylint: disable=redefined-outer-name
-
-    if flags.automatedInstall or not conf.target.is_hardware:
-        log.info("Skipping detection of unsupported hardware.")
-        return []
-
-    # Check TAINT_HARDWARE_UNSUPPORTED
-    if not conf.system.can_detect_unsupported_hardware:
-        log.debug("This system doesn't support TAINT_HARDWARE_UNSUPPORTED.")
-    elif get_kernel_taint(TAINT_HARDWARE_UNSUPPORTED):
-        warnings.append(WARNING_HARDWARE_UNSUPPORTED)
-
-    # Check TAINT_SUPPORT_REMOVED
-    if not conf.system.can_detect_support_removed:
-        log.debug("This system doesn't support TAINT_SUPPORT_REMOVED.")
-    elif get_kernel_taint(TAINT_SUPPORT_REMOVED):
-        warning = WARNING_SUPPORT_REMOVED
-        hardware = find_hardware_with_removed_support()
-
-        if hardware:
-            warning += "\n\n" + "\n".join(hardware)
-
-        warnings.append(warning)
-
-    # Log all warnings.
-    for msg in warnings:
-        log.warning(msg)
-
-    return warnings
-
-
-def ensure_str(str_or_bytes, keep_none=True):
-    """
-    Returns a str instance for given string or ``None`` if requested to keep it.
-
-    :param str_or_bytes: string to be kept or converted to str type
-    :type str_or_bytes: str or bytes
-    :param bool keep_none: whether to keep None as it is or raise ValueError if
-                           ``None`` is passed
-    :raises ValueError: if applied on an object not being of type bytes nor str
-                        (nor NoneType if ``keep_none`` is ``False``)
-    """
-
-    if keep_none and str_or_bytes is None:
-        return None
-    elif isinstance(str_or_bytes, str):
-        return str_or_bytes
-    elif isinstance(str_or_bytes, bytes):
-        return str_or_bytes.decode(sys.getdefaultencoding())
-    else:
-        raise ValueError("str_or_bytes must be of type 'str' or 'bytes', not '%s'" % type(str_or_bytes))
-
-
-# Define translations between ASCII uppercase and lowercase for
-# locale-independent string conversions. The tables are 256-byte string used
-# with str.translate. If str.translate is used with a unicode string,
-# even if the string contains only 7-bit characters, str.translate will
-# raise a UnicodeDecodeError.
-_ASCIIlower_table = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
-_ASCIIupper_table = str.maketrans(string.ascii_lowercase, string.ascii_uppercase)
-
-
-def _toASCII(s):
-    """Convert a unicode string to ASCII"""
-    if isinstance(s, str):
-        # Decompose the string using the NFK decomposition, which in addition
-        # to the canonical decomposition replaces characters based on
-        # compatibility equivalence (e.g., ROMAN NUMERAL ONE has its own code
-        # point but it's really just a capital I), so that we can keep as much
-        # of the ASCII part of the string as possible.
-        s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode("ascii")
-    elif not isinstance(s, bytes):
-        s = ''
-    return s
-
-
-def upperASCII(s):
-    """Convert a string to uppercase using only ASCII character definitions.
-
-    The returned string will contain only ASCII characters. This function is
-    locale-independent.
-    """
-
-    # XXX: Python 3 has str.maketrans() and bytes.maketrans() so we should
-    # ideally use one or the other depending on the type of 's'. But it turns
-    # out we expect this function to always return string even if given bytes.
-    s = ensure_str(s)
-    return str.translate(_toASCII(s), _ASCIIupper_table)
-
-
-def lowerASCII(s):
-    """Convert a string to lowercase using only ASCII character definitions.
-
-    The returned string will contain only ASCII characters. This function is
-    locale-independent.
-    """
-
-    # XXX: Python 3 has str.maketrans() and bytes.maketrans() so we should
-    # ideally use one or the other depending on the type of 's'. But it turns
-    # out we expect this function to always return string even if given bytes.
-    s = ensure_str(s)
-    return str.translate(_toASCII(s), _ASCIIlower_table)
-
-
-def upcase_first_letter(text):
-    """
-    Helper function that upcases the first letter of the string. Python's
-    standard string.capitalize() not only upcases the first letter but also
-    lowercases all the others. string.title() capitalizes all words in the
-    string.
-
-    Note: Never use on translated strings!
-
-    :type text: str
-    :return: the given text with the first letter upcased
-    :rtype: str
-
-    """
-
-    if not text:
-        # cannot change anything
-        return text
-    elif len(text) == 1:
-        return text.upper()
-    else:
-        return text[0].upper() + text[1:]
-
-
-def get_mount_paths(devnode):
-    '''given a device node, return a list of all active mountpoints.'''
-    devno = os.stat(devnode).st_rdev
-    majmin = "%d:%d" % (os.major(devno), os.minor(devno))
-    mountinfo = (line.split() for line in open("/proc/self/mountinfo"))
-    return [info[4] for info in mountinfo if info[2] == majmin]
-
-
-def have_word_match(str1, str2):
-    """Tells if all words from str1 exist in str2 or not."""
-
-    if str1 is None or str2 is None:
-        # None never matches
-        return False
-
-    if str1 == "":
-        # empty string matches everything except from None
-        return True
-    elif str2 == "":
-        # non-empty string cannot be found in an empty string
-        return False
-
-    # Convert both arguments to string if not already
-    str1 = ensure_str(str1)
-    str2 = ensure_str(str2)
-
-    str1 = str1.lower()
-    str1_words = str1.split()
-    str2 = str2.lower()
-
-    return all(word in str2 for word in str1_words)
 
 
 def xprogressive_delay():
@@ -1036,27 +522,6 @@ def xprogressive_delay():
     while True:
         yield 0.25 * (2 ** counter)
         counter += 1
-
-
-def detect_virtualized_platform():
-    """Detect execution in a virtualized environment.
-
-    This runs systemd-detect-virt and, if the result is not 'none',
-    it returns an id of the detected virtualization technology.
-
-    Otherwise, it returns None.
-
-    :return: a virtualization technology identifier or None
-    """
-    try:
-        platform = execWithCapture("systemd-detect-virt", []).strip()
-    except (OSError, AttributeError):
-        return None
-
-    if platform == "none":
-        return None
-
-    return platform
 
 
 def persistent_root_image():
@@ -1118,85 +583,12 @@ def runOnErrorScripts(scripts):
     log.info("All kickstart %%onerror script(s) have been run")
 
 
-def parent_dir(directory):
-    """Return the parent's path"""
-    return "/".join(os.path.normpath(directory).split("/")[:-1])
-
-
 def requests_session():
     """Return a requests.Session object with file and ftp support."""
     session = requests.Session()
     session.mount("file://", FileAdapter())
     session.mount("ftp://", FTPAdapter())
     return session
-
-
-def open_with_perm(path, mode='r', perm=0o777, **kwargs):
-    """Open a file with the given permission bits.
-
-       This is more or less the same as using os.open(path, flags, perm), but
-       with the builtin open() semantics and return type instead of a file
-       descriptor.
-
-       :param str path: The path of the file to be opened
-       :param str mode: The same thing as the mode argument to open()
-       :param int perm: What permission bits to use if creating a new file
-    """
-    def _opener(path, open_flags):
-        return os.open(path, open_flags, perm)
-
-    return open(path, mode, opener=_opener, **kwargs)
-
-
-def id_generator():
-    """ Id numbers generator.
-        Generating numbers from 0 to X and increments after every call.
-
-        :returns: Generator which gives you unique numbers.
-    """
-    actual_id = 0
-    while(True):
-        yield actual_id
-        actual_id += 1
-
-
-def sysroot_path(path):
-    """Make the given relative or absolute path "sysrooted"
-       :param str path: path to be sysrooted
-       :returns: sysrooted path
-       :rtype: str
-    """
-    return os.path.join(conf.target.system_root, path.lstrip(os.path.sep))
-
-
-def join_paths(path, *paths):
-    """Always join paths.
-
-    The os.path.join() function has a drawback when second path is absolute. In that case it will
-    instead return the second path only.
-
-    :param path: first path we want to join
-    :param paths: paths we want to merge
-    :returns: return path created from all the input paths
-    :rtype: str
-    """
-    if len(paths) == 0:
-        return path
-
-    new_paths = []
-    for p in paths:
-        new_paths.append(p.lstrip(os.path.sep))
-
-    return os.path.join(path, *new_paths)
-
-
-def touch(file_path):
-    """Create an empty file."""
-    # this misrrors how touch works - it does not
-    # throw an error if the given path exists,
-    # even when the path points to dirrectory
-    if not os.path.exists(file_path):
-        os.mknod(file_path)
 
 
 def collect(module_pattern, path, pred):
@@ -1271,8 +663,8 @@ def collect(module_pattern, path, pred):
                     module_parts.pop()
 
                     # make sure all "parent" modules are in sys.modules
-                    for l in range(len(module_parts)):
-                        module_part_name = ".".join(module_parts[:l + 1])
+                    for ind in range(len(module_parts)):
+                        module_part_name = ".".join(module_parts[:ind + 1])
                         if module_part_name not in sys.modules:
                             module_part = types.ModuleType(module_part_name)
                             module_part.__path__ = [path]
@@ -1383,23 +775,6 @@ def synchronized(wrapped):
     return _wrapper
 
 
-def decode_bytes(data):
-    """Decode the given bytes.
-
-    Return the given string or a string decoded from the given bytes.
-
-    :param data: bytes or a string
-    :return: a string
-    """
-    if isinstance(data, str):
-        return data
-
-    if isinstance(data, bytes):
-        return data.decode('utf-8')
-
-    raise ValueError("Unsupported type '{}'.".format(type(data).__name__))
-
-
 def get_anaconda_version_string(build_time_version=False):
     """Return a string describing current Anaconda version.
     If the current version can't be determined the string
@@ -1429,41 +804,7 @@ def get_anaconda_version_string(build_time_version=False):
         return "unknown"
 
 
-def is_smt_enabled():
-    """Is Simultaneous Multithreading (SMT) enabled?
-
-    :return: True or False
-    """
-    if flags.automatedInstall \
-            or not conf.target.is_hardware \
-            or not conf.system.can_detect_enabled_smt:
-        log.info("Skipping detection of SMT.")
-        return False
-
-    try:
-        return int(open("/sys/devices/system/cpu/smt/active").read()) == 1
-    except (OSError, ValueError):
-        log.warning("Failed to detect SMT.")
-        return False
-
-
-def is_lpae_available():
-    """Is LPAE available?
-
-    :return: True of False
-    """
-    if not blivet.arch.is_arm():
-        return False
-
-    with open("/proc/cpuinfo", "r") as f:
-        for line in f:
-            if line.startswith("Features") and "lpae" in line.split():
-                return True
-
-    return False
-
-
-class LazyObject(object):
+class LazyObject:
     """The lazy object."""
 
     def __init__(self, getter):
@@ -1533,3 +874,55 @@ def get_os_release_value(name, sysroot="/"):
     # No value found.
     log.debug("%s not found in os-release files", name[:-1])
     return None
+
+
+def restorecon(paths, root, skip_nonexistent=False):
+    """Try to restore contexts for a list of paths.
+
+    Do not fail if the program does not exist because it was not in the payload, just say so.
+
+    :param [str] paths: list of paths to restore
+    :param str root: root to run in; mandatory because we restore contexts only on the new system
+    :param bool skip_nonexistent: optionally, do not fail if some of the paths do not exist
+    :return bool: did anything run at all
+    """
+    if skip_nonexistent:
+        opts = ["-ir"]
+    else:
+        opts = ["-r"]
+
+    try:
+        execWithRedirect("restorecon", opts + paths, root=root)
+    except FileNotFoundError:
+        return False
+    else:
+        return True
+
+
+def get_image_packages_info(max_string_chars=0):
+    """List of strings containing versions of installer image packages.
+
+    The package version specifications are space separated in the strings.
+
+    :param int max_string_chars: maximum number of character in a string
+    :return [str]
+    """
+    info_lines = []
+    if os.path.exists(PACKAGES_LIST_FILE):
+        with open(PACKAGES_LIST_FILE) as f:
+            while True:
+                lines = f.readlines(max_string_chars)
+                if not lines:
+                    break
+                info_lines.append(' '.join(line.strip() for line in lines))
+    return info_lines
+
+
+def is_stage2_on_nfs():
+    """Is the installation running from image mounted via NFS?"""
+    for line in open("/proc/mounts").readlines():
+        values = line.split()
+        if len(values) > 2:
+            if values[1] == DRACUT_REPO_DIR and values[2] in ("nfs", "nfs4"):
+                return True
+    return False

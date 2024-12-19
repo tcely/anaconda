@@ -16,19 +16,13 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from simpleline.render.widgets import CheckboxWidget, Widget
 
-from pyanaconda.ui.common import Spoke, StandaloneSpoke, NormalSpoke
-from pyanaconda.ui.tui.tuiobject import TUIObject
-from pyanaconda.ui.lib.help import get_help_path
 from pyanaconda.core.i18n import N_, _
+from pyanaconda.ui.common import NormalSpoke, Spoke, StandaloneSpoke
+from pyanaconda.ui.tui.tuiobject import TUIObject
 
-from simpleline.render.adv_widgets import HelpScreen
-from simpleline.render.screen import InputState
-from simpleline.render.screen_handler import ScreenHandler
-from simpleline.render.prompt import Prompt
-from simpleline.render.widgets import Widget, CheckboxWidget
-
-__all__ = ["TUISpoke", "StandaloneSpoke", "NormalTUISpoke"]
+__all__ = ["NormalTUISpoke", "StandaloneSpoke", "TUISpoke"]
 
 
 # Inherit abstract methods from Spoke
@@ -95,26 +89,7 @@ class NormalTUISpoke(TUISpoke, NormalSpoke):
        .. inheritance-diagram:: NormalTUISpoke
           :parts: 3
     """
-
-    def input(self, args, key):
-        """Handle the input."""
-        if key.lower() == Prompt.HELP:
-            if self.has_help:
-                help_path = get_help_path(self.helpFile, True)
-                ScreenHandler.push_screen_modal(HelpScreen(help_path))
-                return InputState.PROCESSED_AND_REDRAW
-
-        return super().input(args, key)
-
-    def prompt(self, args=None):
-        """Return the prompt."""
-        prompt = TUISpoke.prompt(self, args)
-
-        if self.has_help:
-            prompt.add_help_option()
-
-        return prompt
-
+    pass
 
 class StandaloneTUISpoke(TUISpoke, StandaloneSpoke):
     """

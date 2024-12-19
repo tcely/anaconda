@@ -16,20 +16,21 @@
 # Red Hat, Inc.
 #
 import time
-import requests
 
+import requests
 from blivet import udev
-from blivet.size import Size
 from blivet.errors import StorageError
 from blivet.formats import device_formats, get_format
 from blivet.formats.fs import FS
-from bytesize.bytesize import ROUND_HALF_UP
-
-from pyanaconda.core import util
-from pyanaconda.core.i18n import _
-from pyanaconda.modules.common.constants.services import NETWORK
+from bytesize.bytesize import ROUND_UP, MiB
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import util
+from pyanaconda.core.i18n import _
+from pyanaconda.core.kernel import kernel_arguments
+from pyanaconda.core.payload import parse_hdd_url
+from pyanaconda.modules.common.constants.services import NETWORK
+
 log = get_module_logger(__name__)
 
 
@@ -49,7 +50,7 @@ def is_supported_filesystem(fmt_type):
         and fmt.supported
         and fmt.formattable
         and (isinstance(fmt, FS) or fmt.type in ["biosboot", "prepboot", "swap"])
-        and fmt.type not in ("ntfs", "tmpfs")
+        and fmt.type not in ("ntfs", "tmpfs", "gfs2")
     )
 
 
@@ -101,34 +102,49 @@ def download_escrow_certificate(url):
     return certificate
 
 
-def find_live_backing_device(devicetree):
-    """Find the backing device for the live image.
-
-    Note that this is a little bit of a hack since we're assuming
-    that /run/initramfs/live will exist
+def find_backing_device(devicetree, mount_point):
+    """Find the backing device of the specified mount point.
 
     :param devicetree: a device tree
+    :param mount_point: a mount point
     :return: a device or None
     """
-    for mnt in open("/proc/mounts").readlines():
-        if " /run/initramfs/live " not in mnt:
+    for line in open("/proc/mounts").readlines():
+        values = line.split()
+
+        if mount_point not in values:
             continue
 
-        # Return the device mounted at /run/initramfs/live.
-        device_path = mnt.split()[0]
+        # Return the mounted device if available.
+        device_path = values[0]
         device_name = device_path.split("/")[-1]
         device = devicetree.get_device_by_name(device_name, hidden=True)
 
         if device:
             return device
 
-        # Or return the disk of this device.
+        # Or return the disk of the mounted device.
         info = udev.get_device(device_node=device_path)
         disk_name = udev.device_get_partition_disk(info) if info else ""
         disk = devicetree.get_device_by_name(disk_name, hidden=True)
 
         if disk:
             return disk
+
+    return None
+
+
+def find_stage2_device(devicetree):
+    """Find the backing device of the stage2 image.
+
+    :param devicetree: a device tree
+    :return: a device or None
+    """
+    url = kernel_arguments.get("stage2")
+
+    if url and url.startswith("hd:"):
+        device, _path = parse_hdd_url(url)
+        return devicetree.resolve_device(device)
 
     return None
 
@@ -149,7 +165,7 @@ def get_required_device_size(required_space, format_class=None):
         format_class = FS.biggest_overhead_FS()
 
     device_size = format_class.get_required_size(required_space)
-    return device_size.round_to_nearest(Size("1 MiB"), ROUND_HALF_UP)
+    return device_size.round_to_nearest(MiB, ROUND_UP)
 
 
 def find_optical_media(devicetree):

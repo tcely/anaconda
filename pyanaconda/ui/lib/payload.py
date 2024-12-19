@@ -15,10 +15,14 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from blivet.size import Size
 from dasbus.client.proxy import get_object_path
+
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.constants import PAYLOAD_TYPE_DNF
-from pyanaconda.modules.common.constants.services import PAYLOADS
+from pyanaconda.modules.common.constants.objects import DEVICE_TREE
+from pyanaconda.modules.common.constants.services import PAYLOADS, STORAGE
+from pyanaconda.modules.common.structures.storage import DeviceData, DeviceFormatData
 from pyanaconda.modules.common.task import sync_run_task
 
 log = get_module_logger(__name__)
@@ -81,10 +85,10 @@ def set_source(payload_proxy, source_proxy):
     :param source_proxy: a DBus proxy of a source
     """
     object_path = get_object_path(source_proxy)
-    payload_proxy.SetSources([object_path])
+    payload_proxy.Sources = [object_path]
 
 
-def get_source(payload_proxy, default_source_type=None):
+def get_source(payload_proxy):
     """Get a source of the given payload.
 
     If the payload has one or more sources, return the first one.
@@ -96,7 +100,6 @@ def get_source(payload_proxy, default_source_type=None):
     is not specified, raise an exception.
 
     :param payload_proxy: a DBus proxy of a payload
-    :param default_source_type: a default source type or None
     :return: a DBus proxy of a source
     :raise: ValueError if there is no source to return
     """
@@ -107,15 +110,12 @@ def get_source(payload_proxy, default_source_type=None):
         # really support multiple sources at this moment.
         return PAYLOADS.get_proxy(sources[0])
 
-    if default_source_type:
-        # Or create a new source of the specified type
-        # and attach it to the given payload.
-        source = create_source(default_source_type)
-        set_source(payload_proxy, source)
-        return source
+    # Or create a new source of the specified type
+    # and attach it to the given payload.
+    source = create_source(payload_proxy.DefaultSourceType)
+    set_source(payload_proxy, source)
 
-    # Or raise an exception.
-    raise ValueError("No source found!")
+    return source
 
 
 def set_up_sources(payload_proxy):
@@ -136,3 +136,52 @@ def tear_down_sources(payload_proxy):
     task_path = payload_proxy.TearDownSourcesWithTask()
     task_proxy = PAYLOADS.get_proxy(task_path)
     sync_run_task(task_proxy)
+
+
+def find_potential_hdiso_sources():
+    """Find potential HDISO sources.
+
+    Return a generator yielding Device instances that may have HDISO install
+    media somewhere. Candidate devices are simply any that we can mount.
+
+    :return: a list of device IDs
+    """
+    device_tree = STORAGE.get_proxy(DEVICE_TREE)
+    return device_tree.FindMountablePartitions()
+
+
+def get_hdiso_source_info(device_tree, device_id):
+    """Get info about a potential HDISO source.
+
+    :param device_tree: a proxy of a device tree
+    :param device_id: a device ID
+    :return: a dictionary with a device info
+    """
+    device_data = DeviceData.from_structure(
+        device_tree.GetDeviceData(device_id)
+    )
+
+    format_data = DeviceFormatData.from_structure(
+        device_tree.GetFormatData(device_id)
+    )
+
+    disk_data = DeviceData.from_structure(
+        device_tree.GetDeviceData(device_data.parents[0])
+    )
+
+    return {
+        "model": disk_data.attrs.get("model", "").replace("_", " "),
+        "path": device_data.path,
+        "size": Size(device_data.size),
+        "format": format_data.description,
+        "label": format_data.attrs.get("label") or format_data.attrs.get("uuid") or ""
+    }
+
+
+def get_hdiso_source_description(device_info):
+    """Get a description of a potential HDISO source.
+
+    :param device_info: a dictionary with a device info
+    :return: a string with a device description
+    """
+    return "{model} {path} ({size}) {format} {label}".format(**device_info)

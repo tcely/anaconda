@@ -18,10 +18,10 @@
 from simpleline.render.widgets import TextWidget
 
 from pyanaconda.core.constants import WARNING_SMT_ENABLED_TUI
+from pyanaconda.core.hw import is_smt_enabled
 from pyanaconda.core.i18n import N_, _
-from pyanaconda.core.util import is_smt_enabled
-from pyanaconda.ui.tui.spokes import StandaloneTUISpoke
 from pyanaconda.ui.tui.hubs.summary import SummaryHub
+from pyanaconda.ui.tui.spokes import StandaloneTUISpoke
 
 __all__ = ["KernelWarningSpoke"]
 
@@ -29,6 +29,11 @@ __all__ = ["KernelWarningSpoke"]
 class KernelWarningSpoke(StandaloneTUISpoke):
     """Spoke for kernel-related warnings."""
     preForHub = SummaryHub
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "kernel-warning"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

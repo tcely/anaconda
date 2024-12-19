@@ -19,25 +19,34 @@ import locale
 import re
 
 from blivet.size import Size
-from dasbus.error import DBusError
-
-from dasbus.typing import unwrap_variant
 from dasbus.client.proxy import get_object_path
+from dasbus.error import DBusError
+from dasbus.typing import unwrap_variant
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import PARTITIONING_METHOD_AUTOMATIC, BOOTLOADER_DRIVE_UNSET
+from pyanaconda.core.constants import (
+    BOOTLOADER_DRIVE_UNSET,
+    PARTITIONING_METHOD_AUTOMATIC,
+    PARTITIONING_METHOD_CUSTOM,
+)
 from pyanaconda.core.i18n import P_, _
-from pyanaconda.errors import errorHandler as error_handler, ERROR_RAISE
+from pyanaconda.core.storage import device_matches
+from pyanaconda.errors import ERROR_RAISE
+from pyanaconda.errors import errorHandler as error_handler
 from pyanaconda.flags import flags
-from pyanaconda.modules.common.constants.objects import DISK_SELECTION, BOOTLOADER, DEVICE_TREE, \
-    DISK_INITIALIZATION, NVDIMM
+from pyanaconda.modules.common.constants.objects import (
+    BOOTLOADER,
+    DEVICE_TREE,
+    DISK_INITIALIZATION,
+    DISK_SELECTION,
+)
 from pyanaconda.modules.common.constants.services import STORAGE
-from pyanaconda.modules.common.errors.configuration import StorageConfigurationError, \
-    BootloaderConfigurationError
+from pyanaconda.modules.common.errors.configuration import (
+    BootloaderConfigurationError,
+    StorageConfigurationError,
+)
 from pyanaconda.modules.common.structures.validation import ValidationReport
 from pyanaconda.modules.common.task import sync_run_task
-from pyanaconda.core.storage import device_matches
 
 log = get_module_logger(__name__)
 
@@ -84,7 +93,7 @@ def reset_storage(scan_all=False, retry=True):
     # Clear the exclusive disks to scan all devices in the system.
     if scan_all:
         disk_select_proxy = STORAGE.get_proxy(DISK_SELECTION)
-        disk_select_proxy.SetExclusiveDisks([])
+        disk_select_proxy.ExclusiveDisks = []
 
     # Scan the devices.
     storage_proxy = STORAGE.get_proxy()
@@ -115,7 +124,7 @@ def reset_storage(scan_all=False, retry=True):
 def reset_bootloader():
     """Reset the bootloader."""
     bootloader_proxy = STORAGE.get_proxy(BOOTLOADER)
-    bootloader_proxy.SetDrive(BOOTLOADER_DRIVE_UNSET)
+    bootloader_proxy.Drive = BOOTLOADER_DRIVE_UNSET
 
 
 def select_default_disks():
@@ -142,7 +151,7 @@ def select_default_disks():
 
         # Select all disks.
         selected_disks = [d for d in all_disks if d not in ignored_disks]
-        disk_select_proxy.SetSelectedDisks(selected_disks)
+        disk_select_proxy.SelectedDisks = selected_disks
         log.debug("Selecting all disks by default: %s", ",".join(selected_disks))
     else:
         # Get usable disks.
@@ -177,11 +186,11 @@ def apply_disk_selection(selected_names, reset_boot_drive=False):
 
     # Set the disks to select.
     disk_select_proxy = STORAGE.get_proxy(DISK_SELECTION)
-    disk_select_proxy.SetSelectedDisks(selected_names + ancestors_disks)
+    disk_select_proxy.SelectedDisks = selected_names + ancestors_disks
 
     # Set the drives to clear.
     disk_init_proxy = STORAGE.get_proxy(DISK_INITIALIZATION)
-    disk_init_proxy.SetDrivesToClear(selected_names)
+    disk_init_proxy.DrivesToClear = selected_names
 
     # Reset the boot drive if it is not selected.
     # FIXME: Move this logic the Storage module?
@@ -216,34 +225,6 @@ def get_disks_summary(disks):
     )
 
 
-def mark_protected_device(spec):
-    """Mark a device as protected.
-
-    :param spec: a specification of the device
-    """
-    disk_selection_proxy = STORAGE.get_proxy(DISK_SELECTION)
-    protected_devices = disk_selection_proxy.ProtectedDevices
-
-    if spec not in protected_devices:
-        protected_devices.append(spec)
-
-    disk_selection_proxy.SetProtectedDevices(protected_devices)
-
-
-def unmark_protected_device(spec):
-    """Unmark a device as protected.
-
-    :param spec: a specification of the device
-    """
-    disk_selection_proxy = STORAGE.get_proxy(DISK_SELECTION)
-    protected_devices = disk_selection_proxy.ProtectedDevices
-
-    if spec in protected_devices:
-        protected_devices.remove(spec)
-
-    disk_selection_proxy.SetProtectedDevices(protected_devices)
-
-
 def try_populate_devicetree():
     """Try to populate a device tree.
 
@@ -268,6 +249,32 @@ def try_populate_devicetree():
         else:
             # No need to retry.
             break
+
+
+def is_passphrase_required(partitioning):
+    """Is a passphrase required by the partitioning?
+
+    If the partitioning defines an encrypted device without
+    a passphrase, it is necessary to provide a passphrase
+    that will be used by all such devices.
+
+    :param partitioning: a DBus proxy of a partitioning
+    """
+    return partitioning.PartitioningMethod in (
+        PARTITIONING_METHOD_AUTOMATIC,
+        PARTITIONING_METHOD_CUSTOM
+    ) and partitioning.RequiresPassphrase()
+
+
+def set_required_passphrase(partitioning, passphrase):
+    """Set a passphrase required by the partitioning.
+
+    See the is_passphrase_required function.
+
+    :param partitioning: a DBus proxy of a partitioning
+    :param passphrase: a string with the passphrase
+    """
+    partitioning.SetPassphrase(passphrase)
 
 
 def apply_partitioning(partitioning, show_message_cb, reset_storage_cb):
@@ -324,15 +331,15 @@ def is_local_disk(device_type):
     While technically local disks, zFCP and NVDIMM devices are
     advanced storage and should not be considered local.
 
-    :param device_type: a device type
-    :return: True or False
+    :param str device_type: a device type
+    :return bool: True or False
     """
     return device_type not in (
         "dm-multipath",
         "iscsi",
         "fcoe",
         "zfcp",
-        "nvdimm"
+        "nvme-fabrics",
     )
 
 
@@ -364,25 +371,6 @@ def size_from_input(input_str, units=None):
     return size
 
 
-def ignore_nvdimm_blockdevs():
-    """Add nvdimm devices to be ignored to the ignored disks."""
-    if conf.target.is_directory:
-        return
-
-    nvdimm_proxy = STORAGE.get_proxy(NVDIMM)
-    ignored_nvdimm_devs = nvdimm_proxy.GetDevicesToIgnore()
-
-    if not ignored_nvdimm_devs:
-        return
-
-    log.debug("Adding NVDIMM devices %s to ignored disks", ",".join(ignored_nvdimm_devs))
-
-    disk_select_proxy = STORAGE.get_proxy(DISK_SELECTION)
-    ignored_disks = disk_select_proxy.IgnoredDisks
-    ignored_disks.extend(ignored_nvdimm_devs)
-    disk_select_proxy.SetIgnoredDisks(ignored_disks)
-
-
 def ignore_oemdrv_disks():
     """Ignore disks labeled OEMDRV."""
     matched = device_matches("LABEL=OEMDRV", disks_only=True)
@@ -394,14 +382,14 @@ def ignore_oemdrv_disks():
         if oemdrv_disk not in ignored_disks:
             log.info("Adding disk %s labeled OEMDRV to ignored disks.", oemdrv_disk)
             ignored_disks.append(oemdrv_disk)
-            disk_select_proxy.SetIgnoredDisks(ignored_disks)
+            disk_select_proxy.IgnoredDisks = ignored_disks
 
 
-def filter_disks_by_names(disks, names):
-    """Filter disks by the given names.
+def filter_disks_by_names(disks, disk_ids):
+    """Filter disks by the given disk_ids.
 
-    :param disks: a list of disks name
-    :param names: a list of names to filter
-    :return: a list of filtered disk names
+    :param disks: a list of disks IDs
+    :param disk_ids: a list of disk_IDs to filter
+    :return: a list of filtered disk IDs
     """
-    return list(filter(lambda name: name in disks, names))
+    return list(filter(lambda disk_id: disk_id in disks, disk_ids))

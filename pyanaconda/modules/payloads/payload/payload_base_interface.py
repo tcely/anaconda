@@ -20,7 +20,9 @@
 from abc import ABCMeta
 
 from dasbus.server.interface import dbus_interface
+from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base.base_template import ModuleInterfaceTemplate
 from pyanaconda.modules.common.constants.interfaces import PAYLOAD
 from pyanaconda.modules.common.containers import PayloadSourceContainer, TaskContainer
@@ -40,15 +42,32 @@ class PayloadBaseInterface(ModuleInterfaceTemplate, metaclass=ABCMeta):
 
     @property
     def Type(self) -> Str:
-        """Get type of this payload.
+        """Type of this payload.
 
         Possible types are values of the payload.base.constants.PayloadType enum
+
+        :return: a string representation of a payload type
         """
         return self.implementation.type.value
 
     @property
+    def DefaultSourceType(self) -> Str:
+        """Type of the default source.
+
+        See the SourceType enum for valid values.
+
+        :return: a string representation of a source type
+        """
+        return self.implementation.default_source_type.value
+
+    @property
     def SupportedSourceTypes(self) -> List[Str]:
-        """Get list of supported source types."""
+        """Get list of supported source types.
+
+        See the SourceType enum for valid values.
+
+        :return: a list of string representations of source types
+        """
         return [val.value for val in self.implementation.supported_source_types]
 
     @property
@@ -58,7 +77,9 @@ class PayloadBaseInterface(ModuleInterfaceTemplate, metaclass=ABCMeta):
             self.implementation.sources
         )
 
-    def SetSources(self, sources: List[ObjPath]):
+    @Sources.setter
+    @emits_properties_changed
+    def Sources(self, sources: List[ObjPath]):
         """Attach list of sources to this payload.
 
         Before setting the sources, please make sure the sources are not initialized otherwise

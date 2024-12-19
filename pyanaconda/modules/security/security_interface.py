@@ -17,11 +17,12 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.modules.common.constants.services import SECURITY
+from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base import KickstartModuleInterface
-from dasbus.server.interface import dbus_interface
+from pyanaconda.modules.common.constants.services import SECURITY
 from pyanaconda.modules.common.containers import TaskContainer
 from pyanaconda.modules.common.structures.realm import RealmData
 from pyanaconda.modules.security.constants import SELinuxMode
@@ -54,8 +55,9 @@ class SecurityInterface(KickstartModuleInterface):
         """
         return self.implementation.selinux.value
 
+    @SELinux.setter
     @emits_properties_changed
-    def SetSELinux(self, value: Int):
+    def SELinux(self, value: Int):
         """Sets the state of SELinux on the installed system.
 
         SELinux defaults to enforcing in anaconda.
@@ -72,8 +74,9 @@ class SecurityInterface(KickstartModuleInterface):
         """
         return self.implementation.authselect
 
+    @Authselect.setter
     @emits_properties_changed
-    def SetAuthselect(self, args: List[Str]):
+    def Authselect(self, args: List[Str]):
         """Set the arguments for the authselect tool.
 
         Example: ['select', 'sssd']
@@ -90,8 +93,9 @@ class SecurityInterface(KickstartModuleInterface):
         """
         return RealmData.to_structure(self.implementation.realm)
 
+    @Realm.setter
     @emits_properties_changed
-    def SetRealm(self, realm: Structure):
+    def Realm(self, realm: Structure):
         """Specify of the enrollment in a realm.
 
         The DBus structure is defined by RealmData.
@@ -108,8 +112,9 @@ class SecurityInterface(KickstartModuleInterface):
         """
         return self.implementation.fingerprint_auth_enabled
 
+    @FingerprintAuthEnabled.setter
     @emits_properties_changed
-    def SetFingerprintAuthEnabled(self, fingerprint_auth_enabled: bool):
+    def FingerprintAuthEnabled(self, fingerprint_auth_enabled: bool):
         """Set if fingerprint authentication should be enabled.
 
         :param bool fingerprint_auth_enabled: set to True to enable fingerprint authentication,

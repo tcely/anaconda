@@ -11,7 +11,9 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
-import sys, os, shutil
+import os
+import shutil
+import sys
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
@@ -19,7 +21,7 @@ import sys, os, shutil
 sys.path.insert(0, os.path.abspath('..'))
 
 # configuration required to import test modules
-for path in ["../pyanaconda/isys/.libs", "../pyanaconda", "../tests", "../tests/lib", "../dracut", "../widgets"]:
+for path in ["../pyanaconda", "../tests", "../tests/lib", "../dracut", "../widgets"]:
     sys.path.append(os.path.abspath(path))
 
 # -- General configuration -----------------------------------------------------
@@ -48,8 +50,8 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = u'Anaconda'
-copyright = u'2015, Red Hat, Inc.'      # pylint: disable=redefined-builtin
+project = 'Anaconda'
+copyright = '2015, Red Hat, Inc.'      # pylint: disable=redefined-builtin
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -108,8 +110,8 @@ pygments_style = 'sphinx'
 autoclass_content = 'both'
 
 # Inheritence diagram graphviz settings
-inheritance_graph_attrs = dict(rankdir="UD", fontsize=14, ratio='auto')
-inheritance_node_attrs = dict(style='rounded', margin='"0.07, 0.07"')
+inheritance_graph_attrs = {"rankdir": 'UD', "fontsize": 14, "ratio": 'auto'}
+inheritance_node_attrs = {"style": 'rounded', "margin": '"0.07, 0.07"'}
 
 # -- Options for HTML output ---------------------------------------------------
 
@@ -207,8 +209,8 @@ latex_elements = {
 # Grouping the document tree into LaTeX files. List of tuples
 # (source start file, target name, title, author, documentclass [howto/manual]).
 latex_documents = [
-  ('index', 'Anaconda.tex', u'Anaconda Documentation',
-   u'Anaconda Team', 'manual'),
+  ('index', 'Anaconda.tex', 'Anaconda Documentation',
+   'Anaconda Team', 'manual'),
 ]
 
 # The name of an image file (relative to this directory) to place at the top of
@@ -237,8 +239,8 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    ('index', 'Anaconda', u'Anaconda Documentation',
-     [u'Anaconda Team'], 1)
+    ('index', 'Anaconda', 'Anaconda Documentation',
+     ['Anaconda Team'], 1)
 ]
 
 # If true, show URL addresses after external links.
@@ -251,8 +253,8 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-  ('index', 'Anaconda', u'Anaconda Documentation',
-   u'Anaconda Team', 'Anaconda', 'One line description of project.',
+  ('index', 'Anaconda', 'Anaconda Documentation',
+   'Anaconda Team', 'Anaconda', 'One line description of project.',
    'Miscellaneous'),
 ]
 
@@ -269,10 +271,10 @@ texinfo_documents = [
 # -- Options for Epub output ---------------------------------------------------
 
 # Bibliographic Dublin Core info.
-epub_title = u'Anaconda'
-epub_author = u'Anaconda Team'
-epub_publisher = u'Anaconda Team'
-epub_copyright = u'2015, Anaconda Team'
+epub_title = 'Anaconda'
+epub_author = 'Anaconda Team'
+epub_publisher = 'Anaconda Team'
+epub_copyright = '2015, Anaconda Team'
 
 # The language of the text. It defaults to the language option
 # or en if the language is not set.
@@ -324,38 +326,3 @@ if not on_rtd:  # only import and set the theme if we're building docs locally
 autodoc_member_order = 'source'
 
 # otherwise, readthedocs.org uses their theme by default, so no need to specify it
-
-# This was taken directly from here:
-# http://read-the-docs.readthedocs.org/en/latest/faq.html#i-get-import-errors-on-libraries-that-depend-on-c-modules
-# I only added the __getitem__ method.
-# NOTE: this can be removed whenever we move to sphinx-1.3, at which point we'll
-#       be able to use autodoc_mock_imports (value is a list of modules to be
-#       mocked).
-class Mock(object):
-
-    __all__ = []
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __call__(self, *args, **kwargs):
-        return Mock()
-
-    @classmethod
-    def __getattr__(cls, name):
-        if name in ('__file__', '__path__'):
-            return '/dev/null'
-        elif name[0] == name[0].upper():
-            mockType = type(name, (), {})
-            mockType.__module__ = __name__
-            return mockType
-        else:
-            return Mock()
-
-    @classmethod
-    def __getitem__(cls, key):
-        return cls.__getattr__(key)
-
-MOCK_MODULES = ['_isys']
-for mod_name in MOCK_MODULES:
-    sys.modules[mod_name] = Mock()

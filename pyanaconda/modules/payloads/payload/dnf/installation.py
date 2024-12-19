@@ -17,22 +17,40 @@
 #
 import os
 import shutil
+
 import rpm
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core import util
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import RPM_LANGUAGES_NONE, RPM_LANGUAGES_ALL, MULTILIB_POLICY_BEST
+from pyanaconda.core.constants import (
+    MULTILIB_POLICY_BEST,
+    RPM_LANGUAGES_ALL,
+    RPM_LANGUAGES_NONE,
+)
 from pyanaconda.core.i18n import _
-from pyanaconda.modules.common.errors.installation import PayloadInstallationError, \
-    NonCriticalInstallationError
+from pyanaconda.core.path import join_paths, make_directories
+from pyanaconda.modules.common.errors.installation import (
+    NonCriticalInstallationError,
+    PayloadInstallationError,
+)
 from pyanaconda.modules.common.structures.packages import PackagesConfigurationData
 from pyanaconda.modules.common.task import Task
-from pyanaconda.modules.payloads.payload.dnf.requirements import collect_remote_requirements, \
-    collect_language_requirements, collect_platform_requirements, \
-    collect_driver_disk_requirements, apply_requirements
-from pyanaconda.modules.payloads.payload.dnf.utils import pick_download_location
-from pyanaconda.modules.payloads.payload.dnf.validation import CheckPackagesSelectionTask
+from pyanaconda.modules.payloads.payload.dnf.requirements import (
+    apply_requirements,
+    collect_dnf_requirements,
+    collect_driver_disk_requirements,
+    collect_language_requirements,
+    collect_platform_requirements,
+    collect_remote_requirements,
+)
+from pyanaconda.modules.payloads.payload.dnf.utils import (
+    get_kernel_version_list,
+    pick_download_location,
+)
+from pyanaconda.modules.payloads.payload.dnf.validation import (
+    CheckPackagesSelectionTask,
+)
 
 log = get_module_logger(__name__)
 
@@ -40,13 +58,13 @@ log = get_module_logger(__name__)
 class SetRPMMacrosTask(Task):
     """Installation task to set RPM macros."""
 
-    def __init__(self, data: PackagesConfigurationData):
+    def __init__(self, configuration: PackagesConfigurationData):
         """Create a task.
 
-        :param data: a packages configuration data
+        :param configuration: a packages configuration data
         """
         super().__init__()
-        self._data = data
+        self._data = configuration
         self._macros = []
 
     @property
@@ -61,7 +79,7 @@ class SetRPMMacrosTask(Task):
 
     def _collect_macros(self, data: PackagesConfigurationData):
         """Collect the RPM macros."""
-        macros = list()
+        macros = []
 
         # nofsync speeds things up at the risk of rpmdb data loss in a crash.
         # But if we crash mid-install you're boned anyway, so who cares?
@@ -92,11 +110,23 @@ class SetRPMMacrosTask(Task):
         """Add RPM macros to the global transaction environment."""
         for name, value in macros:
             log.debug("Set '%s' to '%s'.", name, value)
-            rpm.addMacro(name, value)
+            rpm.addMacro(name, value)  # pylint: disable=no-member
 
 
 class ResolvePackagesTask(CheckPackagesSelectionTask):
     """Installation task to resolve the software selection."""
+
+    def __init__(self, dnf_manager, selection, configuration):
+        """Resolve packages task
+
+        :param dnf_manager: a DNF manager
+        :param selection: a package selection data
+        :param configuration: a packages configuration data
+        """
+        super().__init__(dnf_manager, selection)
+        self._dnf_manager = dnf_manager
+        self._selection = selection
+        self._configuration = configuration
 
     @property
     def name(self):
@@ -130,6 +160,7 @@ class ResolvePackagesTask(CheckPackagesSelectionTask):
         return collect_remote_requirements() \
             + collect_language_requirements(self._dnf_manager) \
             + collect_platform_requirements(self._dnf_manager) \
+            + collect_dnf_requirements(self._dnf_manager, self._configuration) \
             + collect_driver_disk_requirements()
 
     def _collect_required_specs(self):
@@ -238,9 +269,90 @@ class InstallPackagesTask(Task):
         return "Install packages"
 
     def run(self):
-        """Run the task."""
+        """Run the task.
+
+        :return: a list of installed kernel versions
+        """
         self.report_progress(_("Preparing transaction from installation source"))
         self._dnf_manager.install_packages(self.report_progress)
+        return get_kernel_version_list()
+
+
+class WriteRepositoriesTask(Task):
+    """The installation task for writing repositories on the target system."""
+
+    def __init__(self, sysroot, dnf_manager, repositories):
+        """Create a new task.
+
+        :param str sysroot: a path to the system root
+        :param DNFManager dnf_manager: a DNF manager
+        :param [RepoConfigurationData] repositories: a list of repo data
+        """
+        super().__init__()
+        self._sysroot = sysroot
+        self._dnf_manager = dnf_manager
+        self._repositories = repositories
+
+    @property
+    def name(self):
+        return "Write repositories"
+
+    def run(self):
+        """Run the task."""
+        for repo in self._repositories:
+            if not self._can_write_repo(repo):
+                log.debug("Couldn't write %s.repo to the target system.", repo.name)
+                continue
+
+            log.info("Writing %s.repo to the target system.", repo.name)
+            content = self._dnf_manager.generate_repo_file(repo)
+            self._write_repo_file(repo.name, content)
+
+    def _can_write_repo(self, repo):
+        """Can we write the specified repository to the target system?
+
+        * Skip repositories that are not allowed to be installed.
+        * Skip repositories from the installation environment.
+        * Support only http, https and ftp protocols.
+        """
+        supported_protocols = [
+            "http:",
+            "https:",
+            "ftp:"
+        ]
+
+        if not repo.installation_enabled:
+            log.debug("Installation of the repository is not allowed.")
+            return False
+
+        if not repo.name:
+            log.debug("The name of the repository is not specified.")
+            return False
+
+        if not repo.url:
+            log.debug("The URL of the repository is not specified.")
+            return False
+
+        if not any(repo.url.startswith(p) for p in supported_protocols):
+            log.debug("The repository uses an unsupported protocol.")
+            return False
+
+        return True
+
+    def _write_repo_file(self, repo_name, content):
+        """Write the specified content into a repo file."""
+        repo_dir = join_paths(
+            self._sysroot,
+            "etc/yum.repos.d/"
+        )
+        make_directories(repo_dir)
+
+        repo_path = join_paths(
+            repo_dir,
+            repo_name + ".repo"
+        )
+        with open(repo_path, "w") as f:
+            f.write(content.strip() + "\n")
 
 
 class ImportRPMKeysTask(Task):
@@ -277,7 +389,7 @@ class ImportRPMKeysTask(Task):
 
         # Get substitutions for variables.
         # TODO: replace the interpolation with DNF once possible
-        basearch = util.execWithCapture("uname", ["-i"]).strip().replace("'", "")
+        basearch = os.uname().machine
         releasever = util.get_os_release_value("VERSION_ID", sysroot=self._sysroot) or ""
 
         # Import GPG keys to RPM database.
@@ -294,15 +406,16 @@ class ImportRPMKeysTask(Task):
 class UpdateDNFConfigurationTask(Task):
     """The installation task to update the dnf.conf file."""
 
-    def __init__(self, sysroot, data: PackagesConfigurationData):
+    def __init__(self, sysroot, configuration: PackagesConfigurationData, dnf_manager):
         """Create a new task.
 
         :param sysroot: a path to the system root
-        :param data: a packages configuration data
+        :param configuration: a packages configuration data
         """
         super().__init__()
         self._sysroot = sysroot
-        self._data = data
+        self._data = configuration
+        self._dnf_manager = dnf_manager
 
     @property
     def name(self):
@@ -322,11 +435,18 @@ class UpdateDNFConfigurationTask(Task):
         log.debug("Setting '%s' to '%s'.", option, value)
 
         cmd = "dnf"
-        args = [
-            "config-manager",
-            "--save",
-            "--setopt={}={}".format(option, value),
-        ]
+        if self._dnf_manager.is_package_available("dnf5"):
+            args = [
+                "config-manager",
+                "setopt",
+                "{}={}".format(option, value)
+            ]
+        else:
+            args = [
+                "config-manager",
+                "--save",
+                "--setopt={}={}".format(option, value)
+            ]
 
         try:
             rc = util.execWithRedirect(cmd, args, root=self._sysroot)

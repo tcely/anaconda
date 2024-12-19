@@ -16,29 +16,61 @@
 # Red Hat, Inc.
 #
 import configparser
+import copy
 import os
 import time
-
+from collections import namedtuple
 from functools import partial
+
 from productmd.treeinfo import TreeInfo
 from requests import RequestException
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import URL_TYPE_BASEURL, NETWORK_CONNECTION_TIMEOUT, \
-    DEFAULT_REPOS, productName, productVersion
-from pyanaconda.core.payload import split_protocol, ProxyString, ProxyStringError
+from pyanaconda.core.constants import (
+    DEFAULT_REPOS,
+    NETWORK_CONNECTION_TIMEOUT,
+    REPO_ORIGIN_TREEINFO,
+    URL_TYPE_BASEURL,
+    USER_AGENT,
+)
+from pyanaconda.core.path import join_paths
+from pyanaconda.core.payload import ProxyString, ProxyStringError, split_protocol
 from pyanaconda.core.util import requests_session, xprogressive_delay
 from pyanaconda.modules.common.structures.payload import RepoConfigurationData
+from pyanaconda.modules.common.task import Task
 
 log = get_module_logger(__name__)
 
 __all__ = [
-    "TreeInfoMetadataError",
-    "NoTreeInfoError",
     "InvalidTreeInfoError",
+    "LoadTreeInfoMetadataResult",
+    "LoadTreeInfoMetadataTask",
+    "NoTreeInfoError",
     "TreeInfoMetadata",
+    "TreeInfoMetadataError",
 ]
+
+
+def generate_treeinfo_repository(repo_data: RepoConfigurationData, repo_md):
+    """Generate repositories from tree metadata of the specified repository.
+
+    :param RepoConfigurationData repo_data: a repository with the .treeinfo file
+    :param TreeInfoRepoMetadata repo_md: a metadata of a treeinfo repository
+    :return RepoConfigurationData: a treeinfo repository
+    """
+    repo = copy.deepcopy(repo_data)
+
+    repo.origin = REPO_ORIGIN_TREEINFO
+    repo.name = repo_md.name
+
+    repo.type = URL_TYPE_BASEURL
+    repo.url = repo_md.url
+
+    repo.enabled = repo_md.enabled
+    repo.installation_enabled = False
+
+    return repo
 
 
 class TreeInfoMetadataError(Exception):
@@ -56,7 +88,7 @@ class InvalidTreeInfoError(TreeInfoMetadataError):
     pass
 
 
-class TreeInfoMetadata(object):
+class TreeInfoMetadata:
     """The representation of a .treeinfo file.
 
     The structure of the installation root can be similar to this:
@@ -90,18 +122,13 @@ class TreeInfoMetadata(object):
     # The number of download retries.
     MAX_TREEINFO_DOWNLOAD_RETRIES = 6
 
-    # The user agent for the request headers.
-    USER_AGENT = "%s (anaconda)/%s" % (productName, productVersion)
-
     def __init__(self):
         """Create a new instance."""
-        self._root_path = ""
         self._release_version = ""
         self._repositories = []
 
     def _reset(self):
         """Reset the metadata."""
-        self._root_path = ""
         self._release_version = ""
         self._repositories = []
 
@@ -136,17 +163,17 @@ class TreeInfoMetadata(object):
 
             if os.access(file_path, os.R_OK):
                 self._load_tree_info(
-                    root_path=path,
+                    root_url="file://" + path,
                     file_path=file_path
                 )
                 return
 
         raise NoTreeInfoError("No treeinfo metadata found.")
 
-    def _load_tree_info(self, root_path, file_path=None, file_content=None):
+    def _load_tree_info(self, root_url, file_path=None, file_content=None):
         """Load the treeinfo metadata.
 
-        :param root_path: a path to the installation root
+        :param root_url: a URL of the installation root
         :param file_path: a path to a treeinfo file or None
         :param file_content: a content of a treeinfo file or None
         :raise InvalidTreeInfoError: if the metadata is invalid
@@ -161,14 +188,18 @@ class TreeInfoMetadata(object):
                 tree_info.load(file_path)
 
             tree_info.validate()
+            log.debug("Loaded treeinfo metadata:\n%s", tree_info.dumps())
 
             # Load the release version.
             release_version = tree_info.release.version.lower()
 
-            # Load the repositories.
+            # Create repositories for variants and optional variants.
+            # Child variants (like addons) will be ignored.
             repo_list = []
 
             for name in tree_info.variants:
+                log.debug("Processing the '%s' variant.", name)
+
                 # Get the variant metadata.
                 data = tree_info.variants[name]
 
@@ -176,7 +207,7 @@ class TreeInfoMetadata(object):
                 repo_md = TreeInfoRepoMetadata(
                     repo_name=name,
                     tree_info=data,
-                    root_path=root_path,
+                    root_url=root_url,
                 )
 
                 repo_list.append(repo_md)
@@ -186,7 +217,6 @@ class TreeInfoMetadata(object):
             raise InvalidTreeInfoError("Invalid metadata: {}".format(str(e))) from None
 
         # Update this treeinfo representation.
-        self._root_path = root_path
         self._repositories = repo_list
         self._release_version = release_version
 
@@ -215,7 +245,7 @@ class TreeInfoMetadata(object):
 
         # Process the metadata.
         self._load_tree_info(
-            root_path=data.url,
+            root_url=data.url,
             file_content=content
         )
 
@@ -249,13 +279,14 @@ class TreeInfoMetadata(object):
                 proxy = ProxyString(proxy_url)
                 proxies = {
                     "http": proxy.url,
-                    "https": proxy.url
+                    "https": proxy.url,
+                    "ftp": proxy.url
                 }
             except ProxyStringError as e:
                 log.debug("Failed to parse the proxy '%s': %s", proxy_url, e)
 
         # Prepare headers.
-        headers = {"user-agent": self.USER_AGENT}
+        headers = {"user-agent": USER_AGENT}
 
         # Return a partial function.
         return partial(
@@ -310,35 +341,30 @@ class TreeInfoMetadata(object):
     def verify_image_base_repo(self):
         """Verify the base repository of an ISO image.
 
+        We only check whether the repodata directory of the base repo
+        exists. That doesn't have to mean that the repo is valid.
+
         :return: True or False
         """
-        repo_md = self._get_base_repository() or self._get_root_repository()
+        repo_md = self.get_base_repository() or self.get_root_repository()
 
         if not repo_md:
             log.debug("There is no usable repository available")
             return False
 
-        if not repo_md.valid:
+        if not repo_md.url.startswith("file://"):
+            raise ValueError("Unexpected type of URL: {}".format(repo_md.url))
+
+        repo_path = repo_md.url.removeprefix("file://")
+        data_path = os.path.join(repo_path, "repodata")
+
+        if not os.access(data_path, os.R_OK):
             log.debug("There is no valid repository available.")
             return False
 
         return True
 
-    def get_base_repo_url(self):
-        """Return an URL of the base repository.
-
-        :return: an URL of the base repo
-        """
-        repo_md = self._get_base_repository()
-
-        if repo_md:
-            log.debug("The treeinfo defines a base repository at: %s", repo_md.path)
-            return repo_md.path
-
-        log.debug("No base repository found in the treeinfo. Using installation tree root.")
-        return self._root_path
-
-    def _get_base_repository(self):
+    def get_base_repository(self):
         """Return metadata of the base repository.
 
         :return: an instance of TreeInfoRepoMetadata or None
@@ -349,7 +375,7 @@ class TreeInfoMetadata(object):
 
         return None
 
-    def _get_root_repository(self):
+    def get_root_repository(self):
         """Return metadata of the root repository.
 
         :return: an instance of TreeInfoRepoMetadata or None
@@ -361,20 +387,23 @@ class TreeInfoMetadata(object):
         return None
 
 
-class TreeInfoRepoMetadata(object):
+class TreeInfoRepoMetadata:
     """Metadata repo object contains metadata about repository."""
 
-    def __init__(self, repo_name, tree_info, root_path):
+    def __init__(self, repo_name, tree_info, root_url):
         """Do not instantiate this class directly.
 
         :param repo_name: a name of the repository
         :param tree_info: a metadata of the repository
-        :param root_path: a root path of the installation source
+        :param root_url: a URL of the installation source
         """
         self._name = repo_name
         self._type = tree_info.type
-        self._root_path = root_path
         self._relative_path = tree_info.paths.repository
+        self._url = self._get_url(
+            root_url=root_url,
+            relative_path=self._relative_path
+        )
 
     @property
     def type(self):
@@ -395,33 +424,120 @@ class TreeInfoRepoMetadata(object):
         return self._type in conf.payload.enabled_repositories_from_treeinfo
 
     @property
-    def valid(self):
-        """Is the repository valid?
-
-        We only check whether the repodata directory exists.
-        That doesn't have to mean that the repo is valid.
-
-        :return: True or False
-        """
-        return os.access(os.path.join(self.path, "repodata"), os.R_OK)
-
-    @property
     def relative_path(self):
-        """Relative path of the repository."""
+        """Relative path of the repository.
+
+        :return: a relative path
+        """
         return self._relative_path
 
     @property
-    def path(self):
-        """Absolute path of the repository."""
-        if self._relative_path == ".":
-            return self._root_path
+    def url(self):
+        """URL of the repository.
+
+        :return: a URL
+        """
+        return self._url
+
+    @staticmethod
+    def _get_url(root_url, relative_path):
+        """Get the URL of the repository."""
+        if relative_path == ".":
+            return root_url
+
+        # Get the protocol.
+        protocol, root_path = split_protocol(root_url)
 
         # Create the absolute path.
-        full_path = os.path.join(self._root_path, self._relative_path)
-        protocol, url = split_protocol(full_path)
+        absolute_path = join_paths(root_path, relative_path)
 
         # Normalize the URL to solve problems with a relative path.
         # This is especially useful for NFS (root/path/../new_path).
-        url = os.path.normpath(url)
+        return protocol + os.path.normpath(absolute_path)
 
-        return protocol + url
+
+# The result of the LoadTreeInfoMetadataTask task.
+LoadTreeInfoMetadataResult = namedtuple(
+    "LoadTreeInfoMetadataResult", [
+        "repository_data",
+        "release_version",
+        "treeinfo_repositories"
+    ]
+)
+
+
+class LoadTreeInfoMetadataTask(Task):
+    """Task to process treeinfo metadata of an installation source."""
+
+    def __init__(self, data: RepoConfigurationData):
+        """Create a task.
+
+        :param RepoConfigurationData data: a repo configuration data
+        """
+        super().__init__()
+        self._repository_data = data
+
+    @property
+    def name(self):
+        """The task name."""
+        return "Load treeinfo metadata"
+
+    def run(self):
+        """Run the task."""
+        log.debug("Reload treeinfo metadata.")
+        try:
+            return self._load_treeinfo_metadata()
+        except NoTreeInfoError as e:
+            log.debug("No treeinfo metadata to use: %s", str(e))
+        except TreeInfoMetadataError as e:
+            log.warning("Couldn't use treeinfo metadata: %s", str(e))
+
+        return self._handle_no_treeinfo_metadata()
+
+    def _load_treeinfo_metadata(self):
+        """Load treeinfo metadata if available."""
+        # Load the treeinfo metadata.
+        treeinfo_metadata = TreeInfoMetadata()
+        treeinfo_metadata.load_data(self._repository_data)
+
+        # Update the base repository. Use the base or root repository
+        # from the treeinfo metadata if available. Otherwise, use the
+        # original installation source.
+        repository_md = treeinfo_metadata.get_base_repository() \
+            or treeinfo_metadata.get_root_repository()
+
+        repository_data = self._generate_repository(repository_md) \
+            or self._repository_data
+
+        # Generate the treeinfo repositories from the metadata. Skip
+        # a repository that is used as a new base repository if any.
+        treeinfo_repositories = [
+            self._generate_repository(m)
+            for m in treeinfo_metadata.repositories
+            if m is not repository_md
+        ]
+
+        # Get values of substitution variables.
+        release_version = treeinfo_metadata.release_version or None
+
+        # Return the results.
+        return LoadTreeInfoMetadataResult(
+            repository_data=repository_data,
+            treeinfo_repositories=treeinfo_repositories,
+            release_version=release_version,
+        )
+
+    def _generate_repository(self, repo_md):
+        """Generate a repository from q treeinfo metadata."""
+        if not repo_md:
+            return None
+
+        return generate_treeinfo_repository(self._repository_data, repo_md)
+
+    def _handle_no_treeinfo_metadata(self):
+        """The treeinfo metadata couldn't be loaded."""
+        return LoadTreeInfoMetadataResult(
+            repository_data=None,
+            treeinfo_repositories=[],
+            release_version=None,
+        )

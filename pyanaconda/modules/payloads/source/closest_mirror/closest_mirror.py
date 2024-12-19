@@ -17,18 +17,28 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.core.i18n import _
-from pyanaconda.modules.payloads.constants import SourceType
-from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror_interface import \
-    ClosestMirrorSourceInterface
-from pyanaconda.modules.payloads.source.repo_files.repo_files import RepoFilesSourceModule
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.i18n import _
+from pyanaconda.core.signal import Signal
+from pyanaconda.modules.payloads.constants import SourceType
+from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror_interface import (
+    ClosestMirrorSourceInterface,
+)
+from pyanaconda.modules.payloads.source.repo_files.repo_files import (
+    RepoFilesSourceModule,
+)
 
 log = get_module_logger(__name__)
 
 
 class ClosestMirrorSourceModule(RepoFilesSourceModule):
     """The source payload module for the closest mirror."""
+
+    def __init__(self):
+        """Create the module."""
+        super().__init__()
+        self._updates_enabled = True
+        self.updates_enabled_changed = Signal()
 
     def for_publication(self):
         """Get the interface used to publish this source."""
@@ -43,3 +53,20 @@ class ClosestMirrorSourceModule(RepoFilesSourceModule):
     def description(self):
         """Get description of this source."""
         return _("Closest mirror")
+
+    @property
+    def updates_enabled(self):
+        """Should repositories that provide updates be enabled?
+
+        :return: True or False
+        """
+        return self._updates_enabled
+
+    def set_updates_enabled(self, enabled):
+        """Enable or disable repositories that provide updates.
+
+        :param enabled: True to enable, False to disable
+        """
+        self._updates_enabled = enabled
+        self.updates_enabled_changed.emit()
+        log.debug("Updates enabled is set to '%s'.", enabled)

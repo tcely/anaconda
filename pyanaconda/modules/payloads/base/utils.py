@@ -17,64 +17,12 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import functools
-import os
-import stat
-
-from distutils.version import LooseVersion
-
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.payload import rpm_version_key
+
 log = get_module_logger(__name__)
-
-
-def get_dir_size(directory):
-    """Get the size of a directory and all its subdirectories.
-
-    :param str directory: the name of the directory to find the size of
-    :return: the size of the directory in kilobytes
-    """
-    def get_subdir_size(directory):
-        # returns size in bytes
-        try:
-            mydev = os.lstat(directory)[stat.ST_DEV]
-        except OSError as e:
-            log.debug("failed to stat %s: %s", directory, e)
-            return 0
-
-        try:
-            dirlist = os.listdir(directory)
-        except OSError as e:
-            log.debug("failed to listdir %s: %s", directory, e)
-            return 0
-
-        dsize = 0
-        for f in dirlist:
-            curpath = '%s/%s' % (directory, f)
-            try:
-                sinfo = os.lstat(curpath)
-            except OSError as e:
-                log.debug("failed to stat %s/%s: %s", directory, f, e)
-                continue
-
-            if stat.S_ISDIR(sinfo[stat.ST_MODE]):
-                if os.path.ismount(curpath):
-                    continue
-                if mydev == sinfo[stat.ST_DEV]:
-                    dsize += get_subdir_size(curpath)
-            elif stat.S_ISREG(sinfo[stat.ST_MODE]):
-                dsize += sinfo[stat.ST_SIZE]
-
-        return dsize
-    return get_subdir_size(directory) // 1024
 
 
 def sort_kernel_version_list(kernel_version_list):
     """Sort the given kernel version list."""
-    kernel_version_list.sort(key=functools.cmp_to_key(_compare_versions))
-
-
-def _compare_versions(v1, v2):
-    """Compare two version number strings."""
-    first_version = LooseVersion(v1)
-    second_version = LooseVersion(v2)
-    return (first_version > second_version) - (first_version < second_version)
+    kernel_version_list.sort(key=rpm_version_key)

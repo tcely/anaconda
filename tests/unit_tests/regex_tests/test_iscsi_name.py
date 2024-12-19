@@ -17,7 +17,9 @@
 import unittest
 
 from regexcheck import regex_match
-from pyanaconda.core.regexes import ISCSI_IQN_NAME_REGEX, ISCSI_EUI_NAME_REGEX
+
+from pyanaconda.core.regexes import ISCSI_EUI_NAME_REGEX, ISCSI_IQN_NAME_REGEX
+
 
 class iSCSIiqnnameRegexTestCase(unittest.TestCase):
     def test_iqnname(self):
@@ -51,7 +53,7 @@ class iSCSIiqnnameRegexTestCase(unittest.TestCase):
                 'iqn.2014-15.com.example:iscsi no space allowed',
                 ]
 
-        self.assertTrue(regex_match(ISCSI_IQN_NAME_REGEX, good_tests, bad_tests))
+        assert regex_match(ISCSI_IQN_NAME_REGEX, good_tests, bad_tests)
 
 
 class iSCSIeuinameRegexTestCase(unittest.TestCase):
@@ -71,4 +73,4 @@ class iSCSIeuinameRegexTestCase(unittest.TestCase):
                 'eui.AAAABBBBCCCCD4567'
                 ]
 
-        self.assertTrue(regex_match(ISCSI_EUI_NAME_REGEX, good_tests, bad_tests))
+        assert regex_match(ISCSI_EUI_NAME_REGEX, good_tests, bad_tests)

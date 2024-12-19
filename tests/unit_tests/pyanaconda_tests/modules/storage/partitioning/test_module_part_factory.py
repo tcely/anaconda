@@ -18,11 +18,16 @@
 # Red Hat Author(s): Vendula Poncova <vponcova@redhat.com>
 #
 import unittest
-from unittest.mock import patch, PropertyMock
+from unittest.mock import PropertyMock, patch
 
+import pytest
 from blivet.formats.fs import BTRFS
-from pyanaconda.core.kickstart.specification import KickstartSpecificationHandler, \
-    KickstartSpecificationParser
+from pykickstart.base import RemovedCommand
+
+from pyanaconda.core.kickstart.specification import (
+    KickstartSpecificationHandler,
+    KickstartSpecificationParser,
+)
 from pyanaconda.modules.storage.kickstart import StorageKickstartSpecification
 from pyanaconda.modules.storage.partitioning.base import PartitioningModule
 from pyanaconda.modules.storage.partitioning.base_interface import PartitioningInterface
@@ -37,13 +42,13 @@ class PartitioningFactoryTestCase(unittest.TestCase):
         """Test create_partitioning."""
         for method in PartitioningMethod:
             module = PartitioningFactory.create_partitioning(method)
-            self.assertIsInstance(module, PartitioningModule)
-            self.assertIsInstance(module.for_publication(), PartitioningInterface)
-            self.assertEqual(module.partitioning_method, method)
+            assert isinstance(module, PartitioningModule)
+            assert isinstance(module.for_publication(), PartitioningInterface)
+            assert module.partitioning_method == method
 
     def test_failed_partitioning(self):
         """Test failed create_partitioning."""
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             PartitioningFactory.create_partitioning("INVALID")
 
     @patch.object(BTRFS, "formattable", new_callable=PropertyMock)
@@ -81,10 +86,11 @@ class PartitioningFactoryTestCase(unittest.TestCase):
             PartitioningMethod.CUSTOM,
             "raid / --level=1 --device=0 raid.01 raid.02"
         )
-        self._check_method(
-            PartitioningMethod.CUSTOM,
-            "btrfs / --subvol --name=root fedora-btrfs"
-        )
+        if not isinstance(StorageKickstartSpecification.commands["btrfs"](), RemovedCommand):
+            self._check_method(
+                PartitioningMethod.CUSTOM,
+                "btrfs / --subvol --name=root fedora-btrfs"
+            )
         self._check_method(
             None,
             ""
@@ -96,4 +102,4 @@ class PartitioningFactoryTestCase(unittest.TestCase):
         handler = KickstartSpecificationHandler(specification)
         parser = KickstartSpecificationParser(handler, specification)
         parser.readKickstartFromString(kickstart)
-        self.assertEqual(method, PartitioningFactory.get_method_for_kickstart(handler))
+        assert method == PartitioningFactory.get_method_for_kickstart(handler)

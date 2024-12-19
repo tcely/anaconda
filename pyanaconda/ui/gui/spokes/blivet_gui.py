@@ -21,28 +21,35 @@
 
 """Module with the BlivetGuiSpoke class."""
 from threading import Lock
+
 from pyanaconda.errors import RemovedModuleError
 
 try:
-    from blivetgui.osinstall import BlivetGUIAnaconda  # pylint: disable=import-error
-    from blivetgui.communication.client import BlivetGUIClient  # pylint: disable=import-error
+    from blivetgui.communication.client import (
+        BlivetGUIClient,  # pylint: disable=import-error
+    )
     from blivetgui.config import config  # pylint: disable=import-error
-except ImportError:
-    raise RemovedModuleError("This module is not supported!") from None
-
-from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.ui.gui.spokes import NormalSpoke
-from pyanaconda.ui.helpers import StorageCheckHandler
-from pyanaconda.ui.categories.system import SystemCategory
-from pyanaconda.ui.gui.spokes.lib.summary import ActionSummaryDialog
-from pyanaconda.core.constants import THREAD_EXECUTE_STORAGE, THREAD_STORAGE, \
-    PARTITIONING_METHOD_BLIVET
-from pyanaconda.core.i18n import _, CN_, C_
-from pyanaconda.ui.lib.storage import create_partitioning, apply_partitioning
-from pyanaconda.threading import threadMgr
-from pyanaconda.modules.common.constants.services import STORAGE
+    from blivetgui.osinstall import BlivetGUIAnaconda  # pylint: disable=import-error
+except ImportError as e:
+    raise RemovedModuleError("This module is not supported: {}".format(e)) from None
 
 import gi
+
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import (
+    PARTITIONING_METHOD_BLIVET,
+    THREAD_EXECUTE_STORAGE,
+    THREAD_STORAGE,
+)
+from pyanaconda.core.i18n import C_, CN_, _
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.modules.common.constants.services import STORAGE
+from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.gui.spokes import NormalSpoke
+from pyanaconda.ui.gui.spokes.lib.summary import ActionSummaryDialog
+from pyanaconda.ui.helpers import StorageCheckHandler
+from pyanaconda.ui.lib.storage import apply_partitioning, create_partitioning
+
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
@@ -96,7 +103,10 @@ class BlivetGuiSpoke(NormalSpoke, StorageCheckHandler):
     # title of the spoke (will be displayed on the hub)
     title = CN_("GUI|Spoke", "_Blivet-GUI Partitioning")
 
-    helpFile = "blivet-gui/index.page"
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "blivet-gui-partitioning"
 
     ### methods defined by API ###
     def __init__(self, data, storage, payload):
@@ -175,7 +185,7 @@ class BlivetGuiSpoke(NormalSpoke, StorageCheckHandler):
         :see: pyanaconda.ui.common.UIObject.refresh
         """
         for thread_name in [THREAD_EXECUTE_STORAGE, THREAD_STORAGE]:
-            threadMgr.wait(thread_name)
+            thread_manager.wait(thread_name)
 
         if not self._partitioning:
             # Create the partitioning now. It cannot by done earlier, because

@@ -18,21 +18,38 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import Mock, call, patch
 
-from unittest.mock import patch, call, Mock
+import pytest
 
-from pyanaconda.core.constants import RPM_LANGUAGES_NONE, MULTILIB_POLICY_ALL
-from pyanaconda.core.util import join_paths
-from pyanaconda.modules.common.errors.installation import NonCriticalInstallationError, \
-    PayloadInstallationError
-from pyanaconda.modules.common.structures.packages import PackagesConfigurationData, \
-    PackagesSelectionData
+from pyanaconda.core.constants import MULTILIB_POLICY_ALL, RPM_LANGUAGES_NONE
+from pyanaconda.core.path import join_paths
+from pyanaconda.modules.common.errors.installation import (
+    NonCriticalInstallationError,
+    PayloadInstallationError,
+)
+from pyanaconda.modules.common.structures.packages import (
+    PackagesConfigurationData,
+    PackagesSelectionData,
+)
+from pyanaconda.modules.common.structures.payload import RepoConfigurationData
 from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.payloads.payload.dnf.dnf_manager import DNFManager, MissingSpecsError, \
-    BrokenSpecsError, InvalidSelectionError
-from pyanaconda.modules.payloads.payload.dnf.installation import ImportRPMKeysTask, \
-    SetRPMMacrosTask, DownloadPackagesTask, InstallPackagesTask, PrepareDownloadLocationTask, \
-    CleanUpDownloadLocationTask, ResolvePackagesTask, UpdateDNFConfigurationTask
+from pyanaconda.modules.payloads.payload.dnf.dnf_manager import (
+    DNFManager,
+    InvalidSelectionError,
+    MissingSpecsError,
+)
+from pyanaconda.modules.payloads.payload.dnf.installation import (
+    CleanUpDownloadLocationTask,
+    DownloadPackagesTask,
+    ImportRPMKeysTask,
+    InstallPackagesTask,
+    PrepareDownloadLocationTask,
+    ResolvePackagesTask,
+    SetRPMMacrosTask,
+    UpdateDNFConfigurationTask,
+    WriteRepositoriesTask,
+)
 
 
 class SetRPMMacrosTaskTestCase(unittest.TestCase):
@@ -46,7 +63,7 @@ class SetRPMMacrosTaskTestCase(unittest.TestCase):
 
     def _check_macros(self, task, mock_rpm, expected_macros):
         """Check that the expected macros are set up."""
-        self.assertEqual(task._macros, expected_macros)
+        assert task._macros == expected_macros
 
         calls = [call(*macro) for macro in expected_macros]
         mock_rpm.addMacro.assert_has_calls(calls)
@@ -78,11 +95,11 @@ class SetRPMMacrosTaskTestCase(unittest.TestCase):
     @patch("pyanaconda.modules.payloads.payload.dnf.installation.rpm")
     def test_set_rpm_macros_install_langs(self, mock_rpm):
         data = PackagesConfigurationData()
-        data.languages = "en,es"
+        data.languages = "en:es"
 
         macros = [
             ('__dbi_htconfig', 'hash nofsync %{__dbi_other} %{__dbi_perms}'),
-            ('_install_langs', 'en,es'),
+            ('_install_langs', 'en:es'),
         ]
 
         task = self._run_task(data)
@@ -146,7 +163,7 @@ class ImportRPMKeysTaskTestCase(unittest.TestCase):
                 task.run()
 
             msg = "No GPG keys to import."
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
+            assert any(map(lambda x: msg in x, cm.output))
 
     def test_import_no_rpm(self):
         """Import GPG keys without installed rpm."""
@@ -157,7 +174,7 @@ class ImportRPMKeysTaskTestCase(unittest.TestCase):
                 task.run()
 
             msg = "Can not import GPG keys to RPM database"
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
+            assert any(map(lambda x: msg in x, cm.output))
 
     @patch("pyanaconda.modules.payloads.payload.dnf.installation.util.execWithRedirect")
     def test_import_error(self, mock_exec):
@@ -172,7 +189,7 @@ class ImportRPMKeysTaskTestCase(unittest.TestCase):
                 task.run()
 
             msg = "Failed to import the GPG key."
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
+            assert any(map(lambda x: msg in x, cm.output))
 
     @patch("pyanaconda.modules.payloads.payload.dnf.installation.util.execWithRedirect")
     def test_import_keys(self, mock_exec):
@@ -193,11 +210,12 @@ class ImportRPMKeysTaskTestCase(unittest.TestCase):
                 call("rpm", ["--import", key_2], root=sysroot),
             ])
 
+    @patch("pyanaconda.modules.payloads.payload.dnf.installation.os.uname")
     @patch("pyanaconda.modules.payloads.payload.dnf.installation.util")
-    def test_import_substitution(self, mock_util):
+    def test_import_substitution(self, mock_util, mock_uname):
         """Import GPG keys with variables."""
         mock_util.execWithRedirect.return_value = 0
-        mock_util.execWithCapture.return_value = "s390x"
+        mock_uname.return_value = Mock(machine='s390x')
         mock_util.get_os_release_value.return_value = "34"
 
         key = "/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch"
@@ -228,7 +246,7 @@ class DownloadPackagesTaskTestCase(unittest.TestCase):
         task.progress_changed_signal.connect(callback)
         task.run()
 
-        self.assertEqual(task.name, "Download packages")
+        assert task.name == "Download packages"
         dnf_manager.download_packages.assert_called_once_with(task.report_progress)
 
         callback.assert_has_calls([
@@ -258,7 +276,7 @@ class InstallPackagesTaskTestCase(unittest.TestCase):
         task.progress_changed_signal.connect(callback)
         task.run()
 
-        self.assertEqual(task.name, "Install packages")
+        assert task.name == "Install packages"
         dnf_manager.install_packages.assert_called_once_with(task.report_progress)
 
         callback.assert_has_calls([
@@ -292,15 +310,15 @@ class PrepareDownloadLocationTaskTestCase(unittest.TestCase):
             os.mknod(os.path.join(path, "f3"))
 
             task = PrepareDownloadLocationTask(dnf_manager)
-            self.assertEqual(task.run(), path)
+            assert task.run() == path
 
             # The manager should apply the location.
             dnf_manager.set_download_location.assert_called_once_with(path)
 
             # The files should be deleted.
-            self.assertFalse(os.path.exists(os.path.join(path, "f1")))
-            self.assertFalse(os.path.exists(os.path.join(path, "f2")))
-            self.assertFalse(os.path.exists(os.path.join(path, "f3")))
+            assert not os.path.exists(os.path.join(path, "f1"))
+            assert not os.path.exists(os.path.join(path, "f2"))
+            assert not os.path.exists(os.path.join(path, "f3"))
 
 
 class CleanUpDownloadLocationTaskTestCase(unittest.TestCase):
@@ -333,9 +351,9 @@ class CleanUpDownloadLocationTaskTestCase(unittest.TestCase):
             task.run()
 
             # The files should be deleted.
-            self.assertFalse(os.path.exists(os.path.join(path, "f1")))
-            self.assertFalse(os.path.exists(os.path.join(path, "f2")))
-            self.assertFalse(os.path.exists(os.path.join(path, "f3")))
+            assert not os.path.exists(os.path.join(path, "f1"))
+            assert not os.path.exists(os.path.join(path, "f2"))
+            assert not os.path.exists(os.path.join(path, "f3"))
 
 
 class ResolvePackagesTaskTestCase(unittest.TestCase):
@@ -370,13 +388,12 @@ class ResolvePackagesTaskTestCase(unittest.TestCase):
 
         dnf_manager = Mock()
         dnf_manager.default_environment = None
+        data = PackagesConfigurationData()
 
-        task = ResolvePackagesTask(dnf_manager, selection)
+        task = ResolvePackagesTask(dnf_manager, selection, data)
         task.run()
 
         dnf_manager.clear_selection.assert_called_once_with()
-        dnf_manager.disable_modules.assert_called_once_with([])
-        dnf_manager.enable_modules.assert_called_once_with([])
         dnf_manager.apply_specs.assert_called_once_with(
             ["@core", "@r1", "@r2", "r4", "r5"], ["@r3", "r6"]
         )
@@ -400,25 +417,25 @@ class ResolvePackagesTaskTestCase(unittest.TestCase):
         dnf_manager = Mock()
         dnf_manager.default_environment = None
 
-        dnf_manager.disable_modules.side_effect = MissingSpecsError("e1")
         dnf_manager.apply_specs.side_effect = MissingSpecsError("e2")
 
-        with self.assertRaises(NonCriticalInstallationError) as cm:
-            task = ResolvePackagesTask(dnf_manager, selection)
+        with pytest.raises(NonCriticalInstallationError) as cm:
+            data = PackagesConfigurationData()
+            task = ResolvePackagesTask(dnf_manager, selection, data)
             task.run()
 
-        expected = "e1\n\ne2"
-        self.assertEqual(str(cm.exception), expected)
+        expected = "e2"
+        assert str(cm.value) == expected
 
-        dnf_manager.enable_modules.side_effect = BrokenSpecsError("e3")
         dnf_manager.resolve_selection.side_effect = InvalidSelectionError("e4")
 
-        with self.assertRaises(PayloadInstallationError) as cm:
-            task = ResolvePackagesTask(dnf_manager, selection)
+        with pytest.raises(PayloadInstallationError) as cm:
+            data = PackagesConfigurationData()
+            task = ResolvePackagesTask(dnf_manager, selection, data)
             task.run()
 
-        expected = "e3\n\ne4"
-        self.assertEqual(str(cm.exception), expected)
+        expected = "e4"
+        assert str(cm.value) == expected
 
 
 class UpdateDNFConfigurationTaskTestCase(unittest.TestCase):
@@ -429,8 +446,9 @@ class UpdateDNFConfigurationTaskTestCase(unittest.TestCase):
         """Don't update the DNF configuration."""
         with tempfile.TemporaryDirectory() as sysroot:
             data = PackagesConfigurationData()
+            dnf_manager = DNFManager()
 
-            task = UpdateDNFConfigurationTask(sysroot, data)
+            task = UpdateDNFConfigurationTask(sysroot, data, dnf_manager)
             task.run()
 
             execute.assert_not_called()
@@ -443,14 +461,15 @@ class UpdateDNFConfigurationTaskTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as sysroot:
             data = PackagesConfigurationData()
             data.multilib_policy = MULTILIB_POLICY_ALL
+            dnf_manager = DNFManager()
 
-            task = UpdateDNFConfigurationTask(sysroot, data)
+            task = UpdateDNFConfigurationTask(sysroot, data, dnf_manager)
 
             with self.assertLogs(level="WARNING") as cm:
                 task.run()
 
             msg = "Failed to update the DNF configuration (1)."
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
+            assert any(map(lambda x: msg in x, cm.output))
 
     @patch("pyanaconda.core.util.execWithRedirect")
     def test_error_update(self, execute):
@@ -460,25 +479,28 @@ class UpdateDNFConfigurationTaskTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as sysroot:
             data = PackagesConfigurationData()
             data.multilib_policy = MULTILIB_POLICY_ALL
+            dnf_manager = DNFManager()
 
-            task = UpdateDNFConfigurationTask(sysroot, data)
+            task = UpdateDNFConfigurationTask(sysroot, data, dnf_manager)
 
             with self.assertLogs(level="WARNING") as cm:
                 task.run()
 
             msg = "Couldn't update the DNF configuration: Fake!"
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
+            assert any(map(lambda x: msg in x, cm.output))
 
     @patch("pyanaconda.core.util.execWithRedirect")
-    def test_multilib_policy(self, execute):
-        """Update the multilib policy."""
+    def test_multilib_policy_dnf4(self, execute):
+        """Update the multilib policy on pre-dnf5 systems."""
         execute.return_value = 0
 
         with tempfile.TemporaryDirectory() as sysroot:
             data = PackagesConfigurationData()
             data.multilib_policy = MULTILIB_POLICY_ALL
+            dnf_manager = Mock(spec=DNFManager)
+            dnf_manager.is_package_available.return_value = False
 
-            task = UpdateDNFConfigurationTask(sysroot, data)
+            task = UpdateDNFConfigurationTask(sysroot, data, dnf_manager)
             task.run()
 
             execute.assert_called_once_with(
@@ -489,4 +511,195 @@ class UpdateDNFConfigurationTaskTestCase(unittest.TestCase):
                     "--setopt=multilib_policy=all",
                 ],
                 root=sysroot
+            )
+
+    @patch("pyanaconda.core.util.execWithRedirect")
+    def test_multilib_policy_dnf5(self, execute):
+        """Update the multilib policy on dnf5 systems."""
+        execute.return_value = 0
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            data = PackagesConfigurationData()
+            data.multilib_policy = MULTILIB_POLICY_ALL
+            dnf_manager = Mock(spec=DNFManager)
+            dnf_manager.is_package_available.return_value = True
+
+            task = UpdateDNFConfigurationTask(sysroot, data, dnf_manager)
+            task.run()
+
+            execute.assert_called_once_with(
+                "dnf",
+                [
+                    "config-manager",
+                    "setopt",
+                    "multilib_policy=all",
+                ],
+                root=sysroot
+            )
+
+
+class WriteRepositoriesTaskTestCase(unittest.TestCase):
+    """Test the WriteRepositoriesTask task."""
+
+    def _run_task(self, sysroot, repositories):
+        """Run the task."""
+        dnf_manager = DNFManager()
+        task = WriteRepositoriesTask(
+            sysroot=sysroot,
+            dnf_manager=dnf_manager,
+            repositories=repositories
+        )
+        task.run()
+
+    def _check_files(self, sysroot, file_names):
+        """Check existence of the generated repo files."""
+        path = join_paths(sysroot, "etc/yum.repos.d/")
+
+        if not file_names:
+            assert not os.path.exists(path)
+        else:
+            assert sorted(os.listdir(path)) == file_names
+
+    def _check_content(self, sysroot, file_name, file_content):
+        """Check the content of the generated repo file."""
+        path = join_paths(sysroot, "etc/yum.repos.d/", file_name)
+
+        with open(path, "rt") as f:
+            assert f.read() == file_content
+
+    def test_installation_disabled(self):
+        """Skip repositories that are not allowed."""
+        r1 = RepoConfigurationData()
+        r1.name = "r1"
+        r1.url = "http://repo"
+        r1.installation_enabled = False
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            with self.assertLogs(level="DEBUG") as cm:
+                self._run_task(sysroot, [r1])
+
+            self._check_files(sysroot, [])
+
+        msg = "Installation of the repository is not allowed."
+        assert msg in "\n".join(cm.output)
+
+    def test_missing_name(self):
+        """Skip repositories with a missing name."""
+        r1 = RepoConfigurationData()
+        r1.url = "http://repo"
+        r1.installation_enabled = True
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            with self.assertLogs(level="DEBUG") as cm:
+                self._run_task(sysroot, [r1])
+
+            self._check_files(sysroot, [])
+
+        msg = "The name of the repository is not specified."
+        assert msg in "\n".join(cm.output)
+
+    def test_missing_url(self):
+        """Skip repositories with a missing URL."""
+        r1 = RepoConfigurationData()
+        r1.name = "r1"
+        r1.installation_enabled = True
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            with self.assertLogs(level="DEBUG") as cm:
+                self._run_task(sysroot, [r1])
+
+            self._check_files(sysroot, [])
+
+        msg = "The URL of the repository is not specified."
+        assert msg in "\n".join(cm.output)
+
+    def test_unsupported_protocol(self):
+        """Skip repositories with an unsupported protocol."""
+        r1 = RepoConfigurationData()
+        r1.name = "r1"
+        r1.url = "nfs://server:/repo"
+        r1.installation_enabled = True
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            with self.assertLogs(level="DEBUG") as cm:
+                self._run_task(sysroot, [r1])
+
+            self._check_files(sysroot, [])
+
+        msg = "The repository uses an unsupported protocol."
+        assert msg in "\n".join(cm.output)
+
+    def test_write_repository(self):
+        """Write a repository."""
+        r1 = RepoConfigurationData()
+        r1.name = "r1"
+        r1.url = "http://repo"
+        r1.installation_enabled = True
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            self._run_task(sysroot, [r1])
+            self._check_files(sysroot, [
+                "r1.repo"
+            ])
+            self._check_content(
+                sysroot,
+                "r1.repo",
+                "[r1]\n"
+                "name = r1\n"
+                "enabled = 1\n"
+                "baseurl = http://repo\n"
+            )
+
+    def test_write_multiple_repositories(self):
+        """Write multiple repositories."""
+        r1 = RepoConfigurationData()
+        r1.name = "r1"
+        r1.url = "http://repo/1"
+        r1.installation_enabled = True
+
+        r2 = RepoConfigurationData()
+        r2.name = "r2"
+        r2.url = "https://repo/2"
+        r2.installation_enabled = True
+
+        r3 = RepoConfigurationData()
+        r3.name = "r3"
+        r3.url = "ftp://repo/3"
+        r3.installation_enabled = True
+
+        r4 = RepoConfigurationData()
+        r4.name = "r4"
+        r4.url = "nfs://repo/4"
+        r4.installation_enabled = True
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            self._run_task(sysroot, [r1, r2, r3])
+            self._check_files(sysroot, [
+                "r1.repo",
+                "r2.repo",
+                "r3.repo",
+            ])
+            self._check_content(
+                sysroot,
+                "r1.repo",
+                "[r1]\n"
+                "name = r1\n"
+                "enabled = 1\n"
+                "baseurl = http://repo/1\n"
+            )
+            self._check_content(
+                sysroot,
+                "r2.repo",
+                "[r2]\n"
+                "name = r2\n"
+                "enabled = 1\n"
+                "baseurl = https://repo/2\n"
+            )
+            self._check_content(
+                sysroot,
+                "r3.repo",
+                "[r3]\n"
+                "name = r3\n"
+                "enabled = 1\n"
+                "baseurl = ftp://repo/3\n"
             )

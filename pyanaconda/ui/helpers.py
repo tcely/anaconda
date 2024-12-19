@@ -57,18 +57,28 @@
 from abc import ABCMeta, abstractmethod
 
 from pyanaconda.core import constants
-from pyanaconda.core.payload import create_nfs_url
+from pyanaconda.core.constants import DRACUT_REPO_DIR
+from pyanaconda.core.i18n import _
+from pyanaconda.core.path import join_paths
+from pyanaconda.core.payload import create_hdd_url, create_nfs_url
+from pyanaconda.core.product import get_product_name, get_product_version
 from pyanaconda.modules.common.structures.payload import RepoConfigurationData
 from pyanaconda.ui.lib.payload import create_source, set_source, tear_down_sources
-from pyanaconda.ui.lib.storage import mark_protected_device, unmark_protected_device
 
 
-class StorageCheckHandler(object, metaclass=ABCMeta):
+def get_distribution_text():
+    return _("%(productName)s %(productVersion)s INSTALLATION") % {
+        "productName": get_product_name().upper(),
+        "productVersion": get_product_version().upper()
+    }
+
+
+class StorageCheckHandler(metaclass=ABCMeta):
     errors = []
     warnings = []
 
 
-class SourceSwitchHandler(object, metaclass=ABCMeta):
+class SourceSwitchHandler(metaclass=ABCMeta):
     """ A class that can be used as a mixin handling
     installation source switching.
     It will correctly switch to the new method
@@ -84,13 +94,10 @@ class SourceSwitchHandler(object, metaclass=ABCMeta):
         self._device = None
         self._current_iso_path = None
 
-    def _tear_down_existing_source(self):
-        source_proxy = self.payload.get_source_proxy()
-
-        if source_proxy.Type == constants.SOURCE_TYPE_HDD and source_proxy.Partition:
-            unmark_protected_device(source_proxy.Partition)
-
+    def _set_source(self, source_proxy):
+        """Set a new installation source."""
         tear_down_sources(self.payload.proxy)
+        set_source(self.payload.proxy, source_proxy)
 
     def set_source_hdd_iso(self, device_name, iso_path):
         """ Switch to the HDD ISO install source
@@ -100,77 +107,58 @@ class SourceSwitchHandler(object, metaclass=ABCMeta):
         :param iso_path: full path to the source ISO file
         :type iso_path: string
         """
-        self._tear_down_existing_source()
+        configuration = RepoConfigurationData()
+        configuration.url = create_hdd_url(device_name, join_paths("/", iso_path))
 
-        new_source_proxy = create_source(constants.SOURCE_TYPE_HDD)
-        new_source_proxy.SetPartition(device_name)
-        # the / gets stripped off by payload.ISO_image
-        new_source_proxy.SetDirectory("/" + iso_path)
-
-        # protect current device_name
-        mark_protected_device(device_name)
-
-        set_source(self.payload.proxy, new_source_proxy)
+        source_proxy = create_source(constants.SOURCE_TYPE_HDD)
+        source_proxy.Configuration = RepoConfigurationData.to_structure(configuration)
+        self._set_source(source_proxy)
 
     def set_source_url(self, url, url_type=constants.URL_TYPE_BASEURL, proxy=None):
         """ Switch to install source specified by URL """
-        # clean any old HDD ISO sources
-        self._tear_down_existing_source()
+        source_proxy = create_source(constants.SOURCE_TYPE_URL)
 
-        url_source_proxy = create_source(constants.SOURCE_TYPE_URL)
+        configuration = RepoConfigurationData()
+        configuration.url = url
+        configuration.type = url_type
+        configuration.proxy = proxy or ""
 
-        repo_conf = RepoConfigurationData()
-        repo_conf.url = url
-        repo_conf.type = url_type
-        repo_conf.proxy = proxy or ""
-
-        url_source_proxy.SetRepoConfiguration(
-            RepoConfigurationData.to_structure(repo_conf)
-        )
-
-        set_source(self.payload.proxy, url_source_proxy)
+        source_proxy.Configuration = RepoConfigurationData.to_structure(configuration)
+        self._set_source(source_proxy)
 
     def set_source_nfs(self, server, directory, opts):
         """ Switch to NFS install source """
-        # clean any old HDD ISO sources
-        self._tear_down_existing_source()
+        configuration = RepoConfigurationData()
+        configuration.url = create_nfs_url(server, directory, opts)
 
-        nfs_url = create_nfs_url(server, directory, opts)
-
-        nfs_source_proxy = create_source(constants.SOURCE_TYPE_NFS)
-        nfs_source_proxy.SetURL(nfs_url)
-
-        set_source(self.payload.proxy, nfs_source_proxy)
+        source_proxy = create_source(constants.SOURCE_TYPE_NFS)
+        source_proxy.Configuration = RepoConfigurationData.to_structure(configuration)
+        self._set_source(source_proxy)
 
     def set_source_cdrom(self):
         """ Switch to cdrom install source """
-        # clean any old HDD ISO sources
-        self._tear_down_existing_source()
-
-        cdrom_source_proxy = create_source(constants.SOURCE_TYPE_CDROM)
-
-        set_source(self.payload.proxy, cdrom_source_proxy)
+        source_proxy = create_source(constants.SOURCE_TYPE_CDROM)
+        self._set_source(source_proxy)
 
     def set_source_hmc(self):
         """ Switch to install source via HMC """
-        # clean any old HDD ISO sources
-        self._tear_down_existing_source()
-
         hmc_source_proxy = create_source(constants.SOURCE_TYPE_HMC)
+        self._set_source(hmc_source_proxy)
 
-        set_source(self.payload.proxy, hmc_source_proxy)
+    def set_source_dracut(self):
+        """ Switch to install source provided by Dracut."""
+        source_proxy = create_source(constants.SOURCE_TYPE_REPO_PATH)
+        source_proxy.Path = DRACUT_REPO_DIR
+        self._set_source(source_proxy)
 
-    def set_source_closest_mirror(self):
+    def set_source_closest_mirror(self, updates_enabled=True):
         """ Switch to the closest mirror install source """
-        # clean any old HDD ISO sources
-        self._tear_down_existing_source()
-
-        repo_files_source_proxy = create_source(constants.SOURCE_TYPE_CLOSEST_MIRROR)
-
-        set_source(self.payload.proxy, repo_files_source_proxy)
+        source_proxy = create_source(constants.SOURCE_TYPE_CLOSEST_MIRROR)
+        source_proxy.UpdatesEnabled = updates_enabled
+        self._set_source(source_proxy)
 
 
-class InputCheck(object):
+class InputCheck:
     """Handle an input validation check.
 
        This class is used by classes that implement InputCheckHandler to
@@ -241,7 +229,7 @@ class InputCheck(object):
         self._enabled = value
 
 
-class InputCheckHandler(object, metaclass=ABCMeta):
+class InputCheckHandler(metaclass=ABCMeta):
     """Provide a framework for adding input validation checks to a screen.
 
        This helper class provides a mean of defining and associating input
@@ -300,20 +288,6 @@ class InputCheckHandler(object, metaclass=ABCMeta):
         checkRef = InputCheck(self, input_obj, run_check, data)
         self._check_list.append(checkRef)
         return checkRef
-
-    def remove_check(self, inputcheck):
-        """Remove an input check.
-
-           If the check being removed is not in the OK status, the status will
-           be set to CHECK_OK and set_status will be called.
-
-           :param inputcheck InputCheck: the InputCheck object to remove
-           :raise ValueError: if the inputcheck does not exist for this InputCheckHandler
-        """
-        self._check_list.remove(inputcheck)
-        if inputcheck.check_status != InputCheck.CHECK_OK:
-            inputcheck._check_status = InputCheck.CHECK_OK
-            self.set_status(inputcheck)
 
     @property
     def failed_checks(self):

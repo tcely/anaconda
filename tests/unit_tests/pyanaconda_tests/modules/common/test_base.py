@@ -19,14 +19,18 @@ import unittest
 import warnings
 
 from dasbus.typing import *  # pylint: disable=wildcard-import
+from pykickstart.errors import (
+    KickstartDeprecationWarning,
+    KickstartParseError,
+    KickstartParseWarning,
+)
 
-from pykickstart.errors import KickstartParseError, KickstartParseWarning, \
-    KickstartDeprecationWarning
-
-from tests.unit_tests.pyanaconda_tests import patch_dbus_publish_object, check_task_creation_list
-
-from pyanaconda.modules.common.base import KickstartService, KickstartModuleInterface
+from pyanaconda.modules.common.base import KickstartModuleInterface, KickstartService
 from pyanaconda.modules.common.task import Task
+from tests.unit_tests.pyanaconda_tests import (
+    check_task_creation_list,
+    patch_dbus_publish_object,
+)
 
 
 class BaseModuleTestCase(unittest.TestCase):
@@ -57,7 +61,7 @@ class BaseModuleTestCase(unittest.TestCase):
             'warning-messages': get_variant(List[Structure], [])
         }
 
-        self.assertEqual(interface.ReadKickstart(""), report)
+        assert interface.ReadKickstart("") == report
 
     def test_read_kickstart_error_line_number(self):
         """Test ReadKickstart with a custom error on a specified line."""
@@ -81,7 +85,7 @@ class BaseModuleTestCase(unittest.TestCase):
             'warning-messages': get_variant(List[Structure], [])
         }
 
-        self.assertEqual(interface.ReadKickstart(""), report)
+        assert interface.ReadKickstart("") == report
 
     def test_read_kickstart_warning(self):
         """Test ReadKickstart with a custom warning."""
@@ -114,7 +118,7 @@ class BaseModuleTestCase(unittest.TestCase):
             'warning-messages': get_variant(List[Structure], [first_warning, second_warning])
         }
 
-        self.assertEqual(interface.ReadKickstart(""), report)
+        assert interface.ReadKickstart("") == report
 
     def test_default_configure_bootloader_with_tasks(self):
         """Test the ConfigureBootloaderWithTasks method with defaults."""
@@ -122,7 +126,7 @@ class BaseModuleTestCase(unittest.TestCase):
         interface = KickstartModuleInterface(service)
 
         tasks = interface.ConfigureBootloaderWithTasks(["1", "2", "3"])
-        self.assertEqual(tasks, [])
+        assert tasks == []
 
     @patch_dbus_publish_object
     def test_configure_bootloader_with_tasks(self, publisher):
@@ -146,4 +150,4 @@ class BaseModuleTestCase(unittest.TestCase):
         interface = KickstartModuleInterface(service)
 
         tasks = interface.ConfigureBootloaderWithTasks(["1", "2", "3"])
-        check_task_creation_list(self, tasks, publisher, [Task1])
+        check_task_creation_list(tasks, publisher, [Task1])

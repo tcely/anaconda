@@ -19,7 +19,9 @@
 import unittest
 
 from regexcheck import regex_group
+
 from pyanaconda.core.regexes import URL_PARSE
+
 
 class URLRegexTestCase(unittest.TestCase):
     def test_url_regex(self):
@@ -389,4 +391,4 @@ class URLRegexTestCase(unittest.TestCase):
                   ( "http://fe80::1234:56:78/blah/blah", None)
                 ]
 
-        self.assertTrue(regex_group(URL_PARSE, tests))
+        assert regex_group(URL_PARSE, tests)

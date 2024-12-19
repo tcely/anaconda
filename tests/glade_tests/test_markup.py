@@ -16,11 +16,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from gladecheck import check_glade_files
 from unittest import TestCase
-from pocketlint.pangocheck import markup_nodes, markup_match, markup_necessary
 
+from gladecheck import check_glade_files
 from lxml import etree
+from pocketlint.pangocheck import markup_match, markup_necessary, markup_nodes
 
 
 class PangoElementException(Exception):
@@ -62,7 +62,7 @@ class CheckMarkup(TestCase):
         for label in glade_tree.xpath(".//property[@name='label' and ../property[@name='use_markup']/text() = 'True']"):
             # Wrap the label text in <markup> tags and parse the tree
             try:
-                # pylint: disable=unescaped-markup
+                # pylint: disable=unescaped-markup,c-extension-no-member
                 pango_tree = etree.fromstring("<markup>%s</markup>" % label.text)
                 _validate_pango_markup(pango_tree)
 
@@ -70,6 +70,7 @@ class CheckMarkup(TestCase):
                 self.assertTrue(markup_necessary(pango_tree),
                         msg="Markup %s could be expressed as attributes at %s%s:%d" %
                             (label.text, label.base, lang_str, label.sourceline))
+            # pylint: disable=c-extension-no-member
             except etree.XMLSyntaxError as xx:
                 raise AssertionError(
                     "Unable to parse pango markup %s at %s%s:%d" %

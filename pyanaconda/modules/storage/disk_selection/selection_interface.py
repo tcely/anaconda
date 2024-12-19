@@ -20,6 +20,7 @@
 from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base import KickstartModuleInterfaceTemplate
 from pyanaconda.modules.common.constants.objects import DISK_SELECTION
 from pyanaconda.modules.common.structures.validation import ValidationReport
@@ -43,21 +44,22 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
         """The list of selected disks."""
         return self.implementation.selected_disks
 
+    @SelectedDisks.setter
     @emits_properties_changed
-    def SetSelectedDisks(self, drives: List[Str]):
+    def SelectedDisks(self, drives: List[Str]):
         """Set the list of selected disks.
 
         Specifies those disks that anaconda can use for
         partitioning, formatting, and clearing.
 
-        :param drives: a list of drives names
+        :param drives: a list of drives IDs
         """
         self.implementation.set_selected_disks(drives)
 
     def ValidateSelectedDisks(self, drives: List[Str]) -> Structure:
         """Validate the list of selected disks.
 
-        :param drives: a list of drives names
+        :param drives: a list of drives IDs
         :return: a validation report
         """
         return ValidationReport.to_structure(
@@ -69,8 +71,9 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
         """The list of drives to scan."""
         return self.implementation.exclusive_disks
 
+    @ExclusiveDisks.setter
     @emits_properties_changed
-    def SetExclusiveDisks(self, drives: List[Str]):
+    def ExclusiveDisks(self, drives: List[Str]):
         """Set the list of drives to scan.
 
         Specifies those disks that anaconda will scan during
@@ -79,7 +82,7 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
 
         It can be set from the kickstart with 'ignoredisk --onlyuse'.
 
-        :param drives: a list of drives names
+        :param drives: a list of drives IDs
         """
         self.implementation.set_exclusive_disks(drives)
 
@@ -88,14 +91,15 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
         """The list of ignored disks."""
         return self.implementation.ignored_disks
 
+    @IgnoredDisks.setter
     @emits_properties_changed
-    def SetIgnoredDisks(self, drives: List[Str]):
+    def IgnoredDisks(self, drives: List[Str]):
         """Set the list of ignored disks.
 
         Specifies those disks that anaconda should not touch
         when it does partitioning, formatting, and clearing.
 
-        :param drives: a list of drive names
+        :param drives: a list of drive IDs
         """
         self.implementation.set_ignored_disks(drives)
 
@@ -104,13 +108,14 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
         """The list of devices to protect."""
         return self.implementation.protected_devices
 
+    @ProtectedDevices.setter
     @emits_properties_changed
-    def SetProtectedDevices(self, devices: List[Str]):
+    def ProtectedDevices(self, devices: List[Str]):
         """Set the list of protected devices.
 
         Specifies those disks that anaconda should protect.
 
-        :param devices: a list of device names
+        :param devices: a list of device IDs
         """
         self.implementation.set_protected_devices(devices)
 
@@ -119,8 +124,9 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
         """The dictionary of disk images."""
         return self.implementation.disk_images
 
+    @DiskImages.setter
     @emits_properties_changed
-    def SetDiskImages(self, disk_images: Dict[Str, Str]):
+    def DiskImages(self, disk_images: Dict[Str, Str]):
         """Set the dictionary of disk images.
 
         :param disk_images: a dictionary of image names and file names
@@ -130,6 +136,6 @@ class DiskSelectionInterface(KickstartModuleInterfaceTemplate):
     def GetUsableDisks(self) -> List[Str]:
         """Get a list of disks that can be used for the installation.
 
-        :return: a list of disk names
+        :return: a list of disk IDs
         """
         return self.implementation.get_usable_disks()

@@ -19,10 +19,11 @@
 #
 
 import unittest
-from unittest.mock import patch, Mock, PropertyMock
+from unittest.mock import Mock, PropertyMock, patch
 
-from dasbus.typing import get_variant, Str
+import pytest
 from dasbus.client.observer import DBusObserverError
+from dasbus.typing import Str, get_variant
 
 from pyanaconda.core.constants import RHSM_SERVICE_TIMEOUT
 from pyanaconda.modules.subscription.initialization import StartRHSMTask
@@ -38,7 +39,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
     """
 
     @patch_system_dbus_get_proxy
-    @patch("pyanaconda.core.util.start_service")
+    @patch("pyanaconda.modules.subscription.initialization.start_service")
     def test_success(self, start_service, get_proxy):
         """Test StartRHSMTask - successful task."""
 
@@ -50,7 +51,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         config_proxy = Mock()
         get_proxy.return_value = config_proxy
         # run the task and expect it to succeed
-        self.assertTrue(task.run())
+        assert task.run()
         # check service was started correctly
         start_service.assert_called_once_with("rhsm.service")
         # check proxy was requested
@@ -71,7 +72,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         )
 
     @patch("pyanaconda.modules.common.constants.services.RHSM.get_proxy")
-    @patch("pyanaconda.core.util.start_service")
+    @patch("pyanaconda.modules.subscription.initialization.start_service")
     def test_insecure(self, start_service, get_proxy):
         """Test StartRHSMTask - setting the server.insecure RHSM config key."""
         # create the task & disable SSL certificate validation
@@ -82,7 +83,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         config_proxy = Mock()
         get_proxy.return_value = config_proxy
         # run the task and expect it to succeed
-        self.assertTrue(task.run())
+        assert task.run()
         # check service was started correctly
         start_service.assert_called_once_with("rhsm.service")
         # check proxy was requested
@@ -100,7 +101,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         )
 
     @patch("pyanaconda.modules.common.constants.services.RHSM.get_proxy")
-    @patch("pyanaconda.core.util.start_service")
+    @patch("pyanaconda.modules.subscription.initialization.start_service")
     def test_unit_start_failed(self, start_service, get_proxy):
         """Test StartRHSMTask - systemd unit failed to start."""
 
@@ -109,7 +110,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         # simulate successful systemd service start
         start_service.return_value = 1
         # run the task and expect it to fail
-        self.assertFalse(task.run())
+        assert not task.run()
         # check service was started correctly
         start_service.assert_called_once_with("rhsm.service")
         # check proxy was not requested
@@ -124,7 +125,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         task.get_result = Mock()
         task.get_result.return_value = True
         # test the method
-        self.assertTrue(task.is_service_available(1))
+        assert task.is_service_available(1)
 
     def test_is_service_available_failure(self):
         """Test StartRHSMTask - test is_service_available() - failure."""
@@ -135,9 +136,9 @@ class StartRHSMTaskTestCase(unittest.TestCase):
         task.get_result = Mock()
         task.get_result.return_value = False
         # test the method
-        self.assertFalse(task.is_service_available(1))
+        assert not task.is_service_available(1)
 
-    @patch("pyanaconda.threading.threadMgr.get")
+    @patch("pyanaconda.core.threads.thread_manager.get")
     def test_is_service_available_timeout(self, thread_mgr_get):
         """Test StartRHSMTask - test is_service_available() - timeout."""
 
@@ -153,18 +154,18 @@ class StartRHSMTaskTestCase(unittest.TestCase):
             task.get_result = Mock()
             task.get_result.return_value = False
             # make sure is_running is True
-            self.assertTrue(task.is_running)
+            assert task.is_running
             # us a mock thread, so that it's
             # join method exists immediately
             mock_thread = Mock()
             thread_mgr_get.return_value = mock_thread
             # test the method times out
-            self.assertFalse(task.is_service_available(timeout=1.0))
+            assert not task.is_service_available(timeout=1.0)
             # check that the mock thread join() was called with expected
             # timeout
             mock_thread.join.assert_called_once_with(1.0)
 
-    @patch("pyanaconda.threading.threadMgr.get")
+    @patch("pyanaconda.core.threads.thread_manager.get")
     def test_is_service_available_waiting(self, thread_mgr_get):
         """Test StartRHSMTask - test is_service_available() - waiting."""
 
@@ -179,7 +180,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
             task.get_result = Mock()
             task.get_result.return_value = True
             # make sure is_running is True
-            self.assertTrue(task.is_running)
+            assert task.is_running
             # assure is_running switches to False before
             # the method starts waiting on the mock thread
             mock_thread = Mock()
@@ -192,7 +193,7 @@ class StartRHSMTaskTestCase(unittest.TestCase):
             # by replacing the thread by Mock instance,
             # we can avoid running the method in a thread
             # as it will join() Mock instance not a real thread
-            self.assertTrue(task.is_service_available(timeout=1.0))
+            assert task.is_service_available(timeout=1.0)
             # check that the mock thread was joined with the
             # expected timeout value
             mock_thread.join.assert_called_once_with(1.0)
@@ -205,7 +206,7 @@ class RHSMObserverTestCase(unittest.TestCase):
         """Set up the observer."""
         observer._service_available = Mock()
         observer._service_unavailable = Mock()
-        self.assertFalse(observer.is_service_available)
+        assert not observer.is_service_available
 
     def _make_service_available(self, observer):
         """Make the service available."""
@@ -214,7 +215,7 @@ class RHSMObserverTestCase(unittest.TestCase):
 
     def _test_if_service_available(self, observer):
         """Test if service is available."""
-        self.assertTrue(observer.is_service_available)
+        assert observer.is_service_available
 
         observer._service_available.emit.assert_called_once_with(observer)
         observer._service_available.reset_mock()
@@ -229,7 +230,7 @@ class RHSMObserverTestCase(unittest.TestCase):
 
     def _test_if_service_unavailable(self, observer):
         """Test if service is unavailable."""
-        self.assertFalse(observer.is_service_available)
+        assert not observer.is_service_available
 
         observer._service_available.emit.assert_not_called()
         observer._service_available.reset_mock()
@@ -279,7 +280,7 @@ class RHSMObserverTestCase(unittest.TestCase):
         self._setup_observer(observer)
         self._make_service_unavailable(observer)
         # DBusObserverError should be raise
-        with self.assertRaises(DBusObserverError):
+        with pytest.raises(DBusObserverError):
             observer.get_proxy("BAZ")
         # the observer should raise the exception before trying to get a proxy
         get_proxy.assert_not_called()

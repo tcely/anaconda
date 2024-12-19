@@ -22,25 +22,37 @@ import re
 
 from blivet import devicefactory
 from blivet.devicelibs import crypto, raid
-from blivet.devices import LUKSDevice, MDRaidArrayDevice, LVMVolumeGroupDevice
+from blivet.devices import LUKSDevice, LVMVolumeGroupDevice, MDRaidArrayDevice
 from blivet.errors import StorageError
 from blivet.formats import get_format
 from blivet.size import Size
 
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.i18n import _
+from pyanaconda.core.product import get_product_name, get_product_version
+from pyanaconda.core.storage import (
+    CONTAINER_DEVICE_TYPES,
+    DEVICE_TEXT_MAP,
+    NAMED_DEVICE_TYPES,
+    PARTITION_ONLY_FORMAT_TYPES,
+    SUPPORTED_DEVICE_TYPES,
+)
 from pyanaconda.modules.common.errors.configuration import StorageConfigurationError
-from pyanaconda.modules.common.errors.storage import UnsupportedDeviceError, UnknownDeviceError
-from pyanaconda.modules.common.structures.device_factory import DeviceFactoryRequest, \
-    DeviceFactoryPermissions
-from pyanaconda.modules.storage.disk_initialization import DiskInitializationConfig
-from pyanaconda.modules.storage.platform import platform, PLATFORM_MOUNT_POINTS
-from pyanaconda.product import productName, productVersion
+from pyanaconda.modules.common.errors.storage import (
+    UnknownDeviceError,
+    UnsupportedDeviceError,
+)
+from pyanaconda.modules.common.structures.device_factory import (
+    DeviceFactoryPermissions,
+    DeviceFactoryRequest,
+)
 from pyanaconda.modules.storage.devicetree.root import Root
-from pyanaconda.modules.storage.devicetree.utils import get_supported_filesystems, \
-    is_supported_filesystem
-from pyanaconda.core.storage import DEVICE_TEXT_MAP, PARTITION_ONLY_FORMAT_TYPES, \
-    NAMED_DEVICE_TYPES, CONTAINER_DEVICE_TYPES, SUPPORTED_DEVICE_TYPES
+from pyanaconda.modules.storage.devicetree.utils import (
+    get_supported_filesystems,
+    is_supported_filesystem,
+)
+from pyanaconda.modules.storage.disk_initialization import DiskInitializationConfig
+from pyanaconda.modules.storage.platform import PLATFORM_MOUNT_POINTS, platform
 
 log = get_module_logger(__name__)
 
@@ -61,7 +73,7 @@ def collect_used_devices(storage):
     used_devices = []
 
     for root in storage.roots:
-        for device in list(root.mounts.values()) + root.swaps:
+        for device in root.devices:
             if device not in storage.devices:
                 continue
             used_devices.extend(device.ancestors)
@@ -177,9 +189,9 @@ def collect_roots(storage):
         # Get the name.
         name = root.name
 
-        # Get the supported swap devices.
-        swaps = [
-            d for d in root.swaps
+        # Get the supported devices.
+        devices = [
+            d for d in root.devices
             if d in supported_devices
             and (d.format.exists or root.name == new_root_name)
         ]
@@ -192,14 +204,14 @@ def collect_roots(storage):
             and d.disks
         }
 
-        if not swaps and not mounts:
+        if not devices and not mounts:
             continue
 
         # Add a root with supported devices.
         roots.append(Root(
             name=name,
+            devices=devices,
             mounts=mounts,
-            swaps=swaps
         ))
 
     return roots
@@ -211,7 +223,7 @@ def get_new_root_name():
     :return: a translated string
     """
     return _("New {name} {version} Installation").format(
-        name=productName, version=productVersion
+        name=get_product_name(), version=get_product_version()
     )
 
 
@@ -227,29 +239,15 @@ def create_new_root(storage, boot_drive):
         boot_drive=boot_drive
     )
 
-    bootloader_devices = collect_bootloader_devices(
-        storage=storage,
-        boot_drive=boot_drive
-    )
-
-    swaps = [
-        d for d in devices
-        if d.format.type == "swap"
-    ]
-
     mounts = {
         d.format.mountpoint: d for d in devices
         if getattr(d.format, "mountpoint", None)
     }
 
-    for device in devices:
-        if device in bootloader_devices:
-            mounts[device.format.name] = device
-
     return Root(
         name=get_new_root_name(),
+        devices=devices,
         mounts=mounts,
-        swaps=swaps
     )
 
 
@@ -382,7 +380,7 @@ def validate_device_factory_request(storage, request: DeviceFactoryRequest):
     :param request: a device factory request to validate
     :return: an error message
     """
-    device = storage.devicetree.resolve_device(request.device_spec)
+    device = storage.devicetree.get_device_by_device_id(request.device_spec)
     device_type = request.device_type
     reformat = request.reformat
     fs_type = request.format_type
@@ -520,12 +518,12 @@ def resize_device(storage, device, new_size, old_size):
     # And then we need to re-check that the max size is actually
     # different from the current size.
 
-    if use_size == device.size or use_size == device.raw_device.size:
+    if use_size in (device.size, device.raw_device.size):
         # The size hasn't changed.
         log.debug("Canceled resize of device %s to %s.", device.raw_device.name, use_size)
         return False
 
-    if new_size == device.current_size or use_size == device.current_size:
+    if device.current_size in (new_size, use_size):
         # The size has been set back to its original value.
         log.debug("Removing resize of device %s.", device.raw_device.name)
 
@@ -618,6 +616,7 @@ def change_encryption(storage, device, encrypted, luks_version):
         return device.raw_device
     else:
         log.info("Applying encryption to %s.", device.name)
+        luks_version = luks_version or storage.default_luks_version
         new_fmt = get_format("luks", device=device.path, luks_version=luks_version)
         storage.format_device(device, new_fmt)
         luks_dev = LUKSDevice("luks-" + device.name, parents=[device])
@@ -787,12 +786,12 @@ def get_device_factory_arguments(storage, request: DeviceFactoryRequest, subset=
     """
     args = {
         "device_type": request.device_type,
-        "device": storage.devicetree.get_device_by_name(request.device_spec),
-        "disks": [storage.devicetree.get_device_by_name(d) for d in request.disks],
+        "device": storage.devicetree.get_device_by_device_id(request.device_spec),
+        "disks": [storage.devicetree.get_device_by_device_id(d) for d in request.disks],
         "mountpoint": request.mount_point or None,
         "fstype": request.format_type or None,
         "label": request.label or None,
-        "luks_version": request.luks_version or None,
+        "luks_version": request.luks_version or storage.default_luks_version,
         "device_name": request.device_name or None,
         "size": Size(request.device_size) or None,
         "raid_level": get_raid_level_by_name(request.device_raid_level),
@@ -828,7 +827,7 @@ def generate_device_factory_request(storage, device) -> DeviceFactoryRequest:
 
     # Generate the device data.
     request = DeviceFactoryRequest()
-    request.device_spec = device.name
+    request.device_spec = device.device_id
     request.device_name = getattr(device.raw_device, "lvname", device.raw_device.name)
     request.device_size = device.size.get_bytes()
     request.device_type = device_type
@@ -845,7 +844,7 @@ def generate_device_factory_request(storage, device) -> DeviceFactoryRequest:
     else:
         disks = device.disks
 
-    request.disks = [d.name for d in disks]
+    request.disks = [d.device_id for d in disks]
 
     if request.device_type not in CONTAINER_DEVICE_TYPES:
         return request
@@ -870,7 +869,7 @@ def set_container_data(request: DeviceFactoryRequest, container):
     :param request: a device factory request
     :param container: a container
     """
-    request.container_spec = container.name
+    request.container_spec = container.device_id
     request.container_name = container.name
     request.container_encrypted = container.encrypted
     request.container_raid_level = get_container_raid_level_name(container)
@@ -894,7 +893,7 @@ def generate_container_data(storage, request: DeviceFactoryRequest):
         return
 
     # Find a container of the requested type.
-    device = storage.devicetree.resolve_device(request.device_spec)
+    device = storage.devicetree.get_device_by_device_id(request.device_spec)
     container = get_container(storage, request.device_type, device.raw_device)
 
     if container:
@@ -930,7 +929,7 @@ def update_container_data(storage, request: DeviceFactoryRequest, container_name
         set_container_data(request, container)
 
         # Use the container's disks.
-        request.disks = [d.name for d in container.disks]
+        request.disks = [d.device_id for d in container.disks]
     else:
         # Set the request from the new container.
         request.container_name = container_name
@@ -947,8 +946,8 @@ def generate_device_factory_permissions(storage, request: DeviceFactoryRequest):
     :return: device factory permissions
     """
     permissions = DeviceFactoryPermissions()
-    device = storage.devicetree.resolve_device(request.device_spec)
-    container = storage.devicetree.resolve_device(request.container_name)
+    device = storage.devicetree.get_device_by_device_id(request.device_spec)
+    container = storage.devicetree.get_device_by_device_id(request.container_spec)
     fmt = get_format(request.format_type)
 
     if not device:
@@ -1090,6 +1089,7 @@ def _destroy_device(storage, device):
     # is preexisting, reinitialize the disk.
     if device.type == "partition" and device.exists and device.disk.format.exists:
         config = DiskInitializationConfig()
+        config.initialize_labels = True
 
         if config.can_initialize(storage, device.disk):
             storage.initialize_disk(device.disk)
@@ -1123,9 +1123,9 @@ def _destroy_device(storage, device):
         # Configure the factory's devices.
         factory.configure()
 
-    # Finally, remove empty parents of the device.
+    # Finally, remove empty parents of the device, except for btrfs subvolumes.
     for parent in device.parents:
-        if not parent.children and not parent.is_disk:
+        if not parent.children and not parent.is_disk and not parent.type == "btrfs subvolume":
             destroy_device(storage, parent)
 
 

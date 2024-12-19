@@ -19,9 +19,10 @@
 #
 
 import unittest
+
 from pyanaconda.core.i18n import _
-from pyanaconda.ui.common import sort_categories
 from pyanaconda.ui.categories import SpokeCategory
+from pyanaconda.ui.common import sort_categories
 
 
 class AaaCategory(SpokeCategory):
@@ -68,4 +69,4 @@ class CommonCodeTestCase(unittest.TestCase):
         # then A & B as they have the same sort order but A comes before B
         # on the alphabet.
         expected_category_list = [CccCategory, AaaCategory, BbbCategory]
-        self.assertEqual(sort_categories(category_list), expected_category_list)
+        assert sort_categories(category_list) == expected_category_list

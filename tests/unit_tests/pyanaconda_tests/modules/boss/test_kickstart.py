@@ -16,14 +16,23 @@
 # Red Hat, Inc.
 #
 
-import unittest
 import os
+import unittest
 from contextlib import contextmanager
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+from pykickstart.constants import KS_SCRIPT_POST, KS_SCRIPT_PREINSTALL
 
 from pyanaconda.modules.boss.kickstart_manager import KickstartManager
 from pyanaconda.modules.boss.module_manager.module_observer import ModuleObserver
-from pyanaconda.modules.common.structures.kickstart import KickstartReport, KickstartMessage
+from pyanaconda.modules.common.errors.runtime import ScriptError
+from pyanaconda.modules.common.structures.kickstart import (
+    KickstartMessage,
+    KickstartReport,
+)
+from pyanaconda.modules.runtime.scripts import ScriptsModule
+from pyanaconda.modules.runtime.scripts.runtime import RunScriptsTask
+from pyanaconda.modules.runtime.scripts.scripts_interface import ScriptsInterface
 
 KICKSTART1 = """
 text
@@ -242,27 +251,27 @@ class KickstartManagerTestCase(unittest.TestCase):
         with self._create_ks_files(self._kickstart_include) as filename:
             report = manager.read_kickstart_file(filename)
 
-        self.assertEqual(module1.kickstart, self._m1_kickstart)
-        self.assertEqual(module2.kickstart, self._m2_kickstart)
-        self.assertEqual(module3.kickstart, self._m3_kickstart)
-        self.assertEqual(module4.kickstart, "")
+        assert module1.kickstart == self._m1_kickstart
+        assert module2.kickstart == self._m2_kickstart
+        assert module3.kickstart == self._m3_kickstart
+        assert module4.kickstart == ""
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(len(report.get_messages()), 2)
+        assert report.is_valid() is False
+        assert len(report.get_messages()) == 2
 
         error = report.get_messages()[0]
-        self.assertEqual(error.module_name, "1")
-        self.assertEqual(error.file_name, "ks.manager.test.include1.cfg")
-        self.assertEqual(error.line_number, 5)
-        self.assertEqual(error.message, "Mocked parse error: \"PARSE_ERROR\" found")
+        assert error.module_name == "1"
+        assert error.file_name == "ks.manager.test.include1.cfg"
+        assert error.line_number == 5
+        assert error.message == "Mocked parse error: \"PARSE_ERROR\" found"
 
         error = report.get_messages()[1]
-        self.assertEqual(error.module_name, "3")
-        self.assertEqual(error.file_name, "ks.manager.test.include.cfg")
-        self.assertEqual(error.line_number, 41)
-        self.assertEqual(error.message, "Mocked parse error: \"PARSE_ERROR\" found")
+        assert error.module_name == "3"
+        assert error.file_name == "ks.manager.test.include.cfg"
+        assert error.line_number == 41
+        assert error.message == "Mocked parse error: \"PARSE_ERROR\" found"
 
-        self.assertEqual(manager.generate_kickstart(), self._m123_kickstart)
+        assert manager.generate_kickstart() == self._m123_kickstart
 
     def test_nothing_to_parse(self):
         ks_content = ""
@@ -270,10 +279,10 @@ class KickstartManagerTestCase(unittest.TestCase):
         with self._create_ks_files([("ks.mgr.test.empty.cfg", ks_content)]) as filename:
             report = manager.read_kickstart_file(filename)
 
-        self.assertEqual(report.is_valid(), True)
-        self.assertEqual(len(report.get_messages()), 0)
+        assert report.is_valid() is True
+        assert len(report.get_messages()) == 0
 
-        self.assertEqual(manager.generate_kickstart(), "")
+        assert manager.generate_kickstart() == ""
 
     def test_unknown_section_split(self):
         ks_content = """
@@ -286,14 +295,14 @@ blah
         with self._create_ks_files([("ks.mgr.test.unknown_sect.cfg", ks_content)]) as filename:
             report = manager.read_kickstart_file(filename)
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(len(report.get_messages()), 1)
+        assert report.is_valid() is False
+        assert len(report.get_messages()) == 1
 
         error = report.get_messages()[0]
-        self.assertEqual(error.module_name, "org.fedoraproject.Anaconda.Boss")
-        self.assertEqual(error.file_name, "ks.mgr.test.unknown_sect.cfg")
-        self.assertEqual(error.line_number, 2)
-        self.assertEqual(error.message, 'Unknown kickstart section: %unknown_section')
+        assert error.module_name == "org.fedoraproject.Anaconda.Boss"
+        assert error.file_name == "ks.mgr.test.unknown_sect.cfg"
+        assert error.line_number == 2
+        assert error.message == 'Unknown kickstart section: %unknown_section'
 
     def test_missing_section_end_split(self):
         ks_content = """
@@ -305,14 +314,14 @@ blah
         with self._create_ks_files([("ks.mgr.test.missing_end.cfg", ks_content)]) as filename:
             report = manager.read_kickstart_file(filename)
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(len(report.get_messages()), 1)
+        assert report.is_valid() is False
+        assert len(report.get_messages()) == 1
 
         error = report.get_messages()[0]
-        self.assertEqual(error.module_name, "org.fedoraproject.Anaconda.Boss")
-        self.assertEqual(error.file_name, "ks.mgr.test.missing_end.cfg")
-        self.assertEqual(error.line_number, 3)
-        self.assertEqual(error.message, 'Section %packages does not end with %end.')
+        assert error.module_name == "org.fedoraproject.Anaconda.Boss"
+        assert error.file_name == "ks.mgr.test.missing_end.cfg"
+        assert error.line_number == 3
+        assert error.message == 'Section %packages does not end with %end.'
 
     def test_missing_include_split(self):
         ks_content = """
@@ -323,27 +332,149 @@ network --device=ens3
         with self._create_ks_files([("ks.mgr.test.missing_include.cfg", ks_content)]) as filename:
             report = manager.read_kickstart_file(filename)
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(len(report.get_messages()), 1)
+        assert report.is_valid() is False
+        assert len(report.get_messages()) == 1
 
         error = report.get_messages()[0]
-        self.assertEqual(
-            error.module_name, "org.fedoraproject.Anaconda.Boss"
-        )
-        self.assertEqual(
-            error.file_name, "ks.mgr.test.missing_include.cfg"
-        )
-        self.assertEqual(
-            error.line_number, 0
-        )
-        self.assertEqual(
-            error.message,
-            "Unable to open input kickstart file: Error opening file: "
+        assert error.module_name == "org.fedoraproject.Anaconda.Boss"
+        assert error.file_name == "ks.mgr.test.missing_include.cfg"
+        assert error.line_number == 0
+        assert error.message == \
+            "Unable to open input kickstart file: Error opening file: " \
             "[Errno 2] No such file or directory: 'missing_include.cfg'"
-        )
 
 
-class TestModule(object):
+class TestScriptsInterface(unittest.TestCase):
+
+    @patch('pyanaconda.modules.common.containers.TaskContainer.to_object_path')
+    def test_run_scripts_with_task(self, mock_to_object_path):
+        """Test running scripts through DBus interface."""
+        scripts_mock = Mock()
+        scripts_interface = ScriptsInterface(scripts_mock)
+
+        # Test running post scripts
+        script_type = KS_SCRIPT_POST
+        scripts_interface.RunScriptsWithTask(script_type)
+
+        # Ensure that the task for running the scripts is executed
+        scripts_mock.run_scripts_with_task.assert_called_once_with(script_type)
+        mock_to_object_path.assert_called_once()
+
+
+class TestScriptsModule(unittest.TestCase):
+
+    def setUp(self):
+        self.module = ScriptsModule()
+
+    def test_process_kickstart(self):
+        """Test that process_kickstart stores scripts data."""
+        ksdata = Mock()
+        ksdata.scripts = ["script1", "script2"]
+        self.module.process_kickstart(ksdata)
+
+        self.assertEqual(self.module._scripts, ["script1", "script2"])
+
+    def test_setup_kickstart(self):
+        """Test that setup_kickstart assigns scripts data."""
+        ksdata = Mock()
+        self.module._scripts = ["script1", "script2"]
+        self.module.setup_kickstart(ksdata)
+
+        self.assertEqual(ksdata.scripts, ["script1", "script2"])
+
+
+class TestRunScriptsTask(unittest.TestCase):
+
+    def setUp(self):
+        self.scripts = [
+            Mock(type=KS_SCRIPT_POST, run=Mock(return_value=None)),
+            Mock(type=KS_SCRIPT_POST, run=Mock(return_value=(42, "Error in script")))
+        ]
+        self.task = RunScriptsTask(KS_SCRIPT_POST, self.scripts)
+
+    def test_task_name(self):
+        """Test the name of the task."""
+        self.assertEqual(self.task.name, "Run scripts")
+
+    @patch('pyanaconda.core.util.execWithRedirect')
+    def test_run_successful_script(self, mock_execWithRedirect):
+        """Test running scripts successfully."""
+        # Adjust test to only have successful scripts
+        successful_script = [Mock(type=KS_SCRIPT_POST, run=Mock(return_value=None))]
+        task = RunScriptsTask(KS_SCRIPT_POST, successful_script)
+
+        try:
+            task.run()
+        except ScriptError:
+            self.fail("RunScriptsTask.run() raised ScriptError unexpectedly!")
+        mock_execWithRedirect.assert_not_called()
+
+    def test_run_failing_script(self):
+        """Test that a failing script raises ScriptError."""
+        with self.assertRaises(ScriptError) as cm:
+            self.task.run()
+
+        self.assertEqual(str(cm.exception), '42\n\nError in script')
+        self.scripts[1].run.assert_called_once_with('/mnt/sysroot')
+
+    @patch('pyanaconda.core.util.execWithRedirect')
+    def test_run_post_script_success(self, mock_execWithRedirect):
+        """Test running %post scripts successfully."""
+        script = Mock()
+        script.type = KS_SCRIPT_POST
+        script.run.return_value = None
+
+        task = RunScriptsTask(KS_SCRIPT_POST, [script])
+        task.run()
+
+        script.run.assert_called_once_with('/mnt/sysroot')
+        mock_execWithRedirect.assert_not_called()
+
+    @patch('pyanaconda.core.util.execWithRedirect')
+    def test_run_preinstall_script_success(self, mock_execWithRedirect):
+        """Test running %pre-install scripts successfully."""
+        script = Mock()
+        script.type = KS_SCRIPT_PREINSTALL
+        script.run.return_value = None
+
+        task = RunScriptsTask(KS_SCRIPT_PREINSTALL, [script])
+        task.run()
+
+        script.run.assert_called_once_with('/')
+        mock_execWithRedirect.assert_not_called()
+
+    def test_run_post_script_with_error(self):
+        """Test running %post scripts with an error."""
+        script = Mock()
+        script.type = KS_SCRIPT_POST
+        script.run.return_value = (10, "Test Error Message")
+
+        task = RunScriptsTask(KS_SCRIPT_POST, [script])
+
+        with self.assertRaises(ScriptError) as cm:
+            task.run()
+
+        self.assertEqual(cm.exception.lineno, '10')
+        self.assertEqual(cm.exception.details, "Test Error Message")
+        script.run.assert_called_once_with('/mnt/sysroot')
+
+    def test_run_preinstall_script_with_error(self):
+        """Test running %pre-install scripts with an error."""
+        script = Mock()
+        script.type = KS_SCRIPT_PREINSTALL
+        script.run.return_value = (20, "Pre-Install Error")
+
+        task = RunScriptsTask(KS_SCRIPT_PREINSTALL, [script])
+
+        with self.assertRaises(ScriptError) as cm:
+            task.run()
+
+        self.assertEqual(cm.exception.lineno, '20')
+        self.assertEqual(cm.exception.details, "Pre-Install Error")
+        script.run.assert_called_once_with('/')
+
+
+class TestModule:
 
     def __init__(self, commands=None, sections=None, addons=None):
         self.kickstart_commands = commands or []

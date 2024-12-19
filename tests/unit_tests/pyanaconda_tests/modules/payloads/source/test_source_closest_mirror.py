@@ -19,10 +19,14 @@
 import unittest
 
 from pyanaconda.core.constants import SOURCE_TYPE_CLOSEST_MIRROR
-from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror import \
-    ClosestMirrorSourceModule
-from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror_interface import \
-    ClosestMirrorSourceInterface
+from pyanaconda.modules.common.constants.interfaces import PAYLOAD_SOURCE_CLOSEST_MIRROR
+from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror import (
+    ClosestMirrorSourceModule,
+)
+from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror_interface import (
+    ClosestMirrorSourceInterface,
+)
+from tests.unit_tests.pyanaconda_tests import check_dbus_property
 
 
 class ClosestMirrorSourceInterfaceTestCase(unittest.TestCase):
@@ -32,17 +36,31 @@ class ClosestMirrorSourceInterfaceTestCase(unittest.TestCase):
         self.module = ClosestMirrorSourceModule()
         self.interface = ClosestMirrorSourceInterface(self.module)
 
+    def _check_dbus_property(self, *args, **kwargs):
+        check_dbus_property(
+            PAYLOAD_SOURCE_CLOSEST_MIRROR,
+            self.interface,
+            *args, **kwargs
+        )
+
     def test_type(self):
         """Test the type of CDN."""
-        self.assertEqual(SOURCE_TYPE_CLOSEST_MIRROR, self.interface.Type)
+        assert SOURCE_TYPE_CLOSEST_MIRROR == self.interface.Type
 
     def test_description(self):
         """Test the description of CDN."""
-        self.assertEqual("Closest mirror", self.interface.Description)
+        assert "Closest mirror" == self.interface.Description
 
     def test_required_space(self):
         """Test the required_space property."""
-        self.assertEqual(self.module.required_space, 0)
+        assert self.module.required_space == 0
 
     def test_repr(self):
-        self.assertEqual(repr(self.module), "Source(type='CLOSEST_MIRROR')")
+        assert repr(self.module) == "Source(type='CLOSEST_MIRROR')"
+
+    def test_updates_enabled(self):
+        """Test the UpdatesEnabled property."""
+        self._check_dbus_property(
+            "UpdatesEnabled",
+            True
+        )

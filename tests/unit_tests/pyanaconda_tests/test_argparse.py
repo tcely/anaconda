@@ -16,182 +16,293 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import unittest
+
+import pytest
 
 from pyanaconda import argument_parsing
 from pyanaconda.core.configuration.anaconda import AnacondaConfiguration
-from pyanaconda.core.kernel import KernelArguments
 from pyanaconda.core.constants import DisplayModes
-import unittest
+from pyanaconda.core.kernel import KernelArguments
 
 
 class ArgparseTest(unittest.TestCase):
-    def _parseCmdline(self, argv, version="", boot_cmdline=None):
-        ap = argument_parsing.getArgumentParser(version, boot_cmdline)
-        opts = ap.parse_args(argv, boot_cmdline=boot_cmdline)
-        return (opts, ap.removed_no_inst_bootargs)
+    def _parseCmdline(self, argv=None, boot_cmdline=None):
+        ap = argument_parsing.getArgumentParser("", boot_cmdline)
+        return ap.parse_args(argv, boot_cmdline=boot_cmdline)
 
     def test_without_inst_prefix(self):
         boot_cmdline = KernelArguments.from_string("stage2=http://cool.server.com/test")
-        opts, removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.stage2, None)
-        self.assertEqual(removed, ["stage2"])
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.stage2 is None
 
         boot_cmdline = KernelArguments.from_string("stage2=http://cool.server.com/test "
-                                                   "vnc")
-        opts, removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.stage2, None)
-        self.assertFalse(opts.vnc)
-        self.assertListEqual(removed, ["stage2", "vnc"])
+                                                   "rdp")
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.stage2 is None
+        assert not opts.rdp_enabled
 
     def test_with_inst_prefix(self):
         boot_cmdline = KernelArguments.from_string("inst.stage2=http://cool.server.com/test")
-        opts, removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.stage2, "http://cool.server.com/test")
-        self.assertEqual(removed, [])
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.stage2 == "http://cool.server.com/test"
 
         boot_cmdline = KernelArguments.from_string("inst.stage2=http://cool.server.com/test "
-                                                   "inst.vnc")
-        opts, removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.stage2, "http://cool.server.com/test")
-        self.assertTrue(opts.vnc)
-        self.assertEqual(removed, [])
+                                                   "inst.rdp")
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.stage2 == "http://cool.server.com/test"
+        assert opts.rdp_enabled
 
     def test_inst_prefix_mixed(self):
         boot_cmdline = KernelArguments.from_string("inst.stage2=http://cool.server.com/test "
-                                                   "vnc")
-        opts, removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.stage2, "http://cool.server.com/test")
-        self.assertFalse(opts.vnc)
-        self.assertListEqual(removed, ["vnc"])
+                                                   "rdp")
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.stage2 == "http://cool.server.com/test"
+        assert not opts.rdp_enabled
 
     def test_display_mode(self):
-        opts, _removed = self._parseCmdline(['--cmdline'])
-        self.assertEqual(opts.display_mode, DisplayModes.TUI)
-        self.assertTrue(opts.noninteractive)
+        opts = self._parseCmdline(['--cmdline'])
+        assert opts.display_mode == DisplayModes.TUI
+        assert opts.noninteractive
 
-        opts, _removed = self._parseCmdline(['--graphical'])
-        self.assertEqual(opts.display_mode, DisplayModes.GUI)
-        self.assertFalse(opts.noninteractive)
+        opts = self._parseCmdline(['--graphical'])
+        assert opts.display_mode == DisplayModes.GUI
+        assert not opts.noninteractive
 
-        opts, _removed = self._parseCmdline(['--text'])
-        self.assertEqual(opts.display_mode, DisplayModes.TUI)
-        self.assertFalse(opts.noninteractive)
+        opts = self._parseCmdline(['--text'])
+        assert opts.display_mode == DisplayModes.TUI
+        assert not opts.noninteractive
 
-        opts, _removed = self._parseCmdline(['--noninteractive'])
-        self.assertTrue(opts.noninteractive)
+        opts = self._parseCmdline(['--noninteractive'])
+        assert opts.noninteractive
 
         # Test the default
-        opts, _removed = self._parseCmdline([])
-        self.assertEqual(opts.display_mode, DisplayModes.GUI)
-        self.assertFalse(opts.noninteractive)
+        opts = self._parseCmdline([])
+        assert opts.display_mode == DisplayModes.GUI
+        assert not opts.noninteractive
 
         # console=whatever in the boot args defaults to --text
         boot_cmdline = KernelArguments.from_string("console=/dev/ttyS0")
-        opts, _removed = self._parseCmdline([], boot_cmdline=boot_cmdline)
-        self.assertEqual(opts.display_mode, DisplayModes.TUI)
+        opts = self._parseCmdline([], boot_cmdline=boot_cmdline)
+        assert opts.display_mode == DisplayModes.TUI
 
     def test_selinux(self):
         from pykickstart.constants import SELINUX_DISABLED, SELINUX_ENFORCING
+
         from pyanaconda.core.constants import SELINUX_DEFAULT
 
         # with no arguments, use SELINUX_DEFAULT
-        opts, _removed = self._parseCmdline([])
-        self.assertEqual(opts.selinux, SELINUX_DEFAULT)
+        opts = self._parseCmdline([])
+        assert opts.selinux == SELINUX_DEFAULT
 
         # --selinux or --selinux=1 means SELINUX_ENFORCING
-        opts, _removed = self._parseCmdline(['--selinux'])
-        self.assertEqual(opts.selinux, SELINUX_ENFORCING)
+        opts = self._parseCmdline(['--selinux'])
+        assert opts.selinux == SELINUX_ENFORCING
 
         # --selinux=0 means SELINUX_DISABLED
-        opts, _removed = self._parseCmdline(['--selinux=0'])
-        self.assertEqual(opts.selinux, SELINUX_DISABLED)
+        opts = self._parseCmdline(['--selinux=0'])
+        assert opts.selinux == SELINUX_DISABLED
 
         # --noselinux means SELINUX_DISABLED
-        opts, _removed = self._parseCmdline(['--noselinux'])
-        self.assertEqual(opts.selinux, SELINUX_DISABLED)
+        opts = self._parseCmdline(['--noselinux'])
+        assert opts.selinux == SELINUX_DISABLED
 
     def test_dirinstall(self):
         # when not specified, dirinstall should evaluate to False
-        opts, _removed = self._parseCmdline([])
-        self.assertFalse(opts.dirinstall)
+        opts = self._parseCmdline([])
+        assert not opts.dirinstall
 
         # with no argument, dirinstall should default to /mnt/sysimage
-        opts, _removed = self._parseCmdline(['--dirinstall'])
-        self.assertEqual(opts.dirinstall, "/mnt/sysimage")
+        opts = self._parseCmdline(['--dirinstall'])
+        assert opts.dirinstall == "/mnt/sysimage"
 
         # with an argument, dirinstall should use that
-        opts, _removed = self._parseCmdline(['--dirinstall=/what/ever'])
-        self.assertEqual(opts.dirinstall, "/what/ever")
+        opts = self._parseCmdline(['--dirinstall=/what/ever'])
+        assert opts.dirinstall == "/what/ever"
 
     def test_storage(self):
         conf = AnacondaConfiguration.from_defaults()
 
-        opts, _removed = self._parseCmdline([])
+        opts = self._parseCmdline([])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.storage.dmraid, True)
-        self.assertEqual(conf.storage.ibft, True)
+        assert conf.storage.ibft is True
 
-        opts, _removed = self._parseCmdline(['--nodmraid', '--ibft'])
+        opts = self._parseCmdline(['--ibft'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.storage.dmraid, False)
-        self.assertEqual(conf.storage.ibft, True)
+        assert conf.storage.ibft is True
 
     def test_target(self):
         conf = AnacondaConfiguration.from_defaults()
 
-        opts, _removed = self._parseCmdline([])
+        opts = self._parseCmdline([])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.target.is_hardware, True)
-        self.assertEqual(conf.target.is_image, False)
-        self.assertEqual(conf.target.is_directory, False)
-        self.assertEqual(conf.target.physical_root, "/mnt/sysimage")
+        assert conf.target.is_hardware is True
+        assert conf.target.is_image is False
+        assert conf.target.is_directory is False
+        assert conf.target.physical_root == "/mnt/sysimage"
 
-        opts, _removed = self._parseCmdline(['--image=/what/ever.img'])
+        opts = self._parseCmdline(['--image=/what/ever.img'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.target.is_hardware, False)
-        self.assertEqual(conf.target.is_image, True)
-        self.assertEqual(conf.target.is_directory, False)
-        self.assertEqual(conf.target.physical_root, "/mnt/sysimage")
+        assert conf.target.is_hardware is False
+        assert conf.target.is_image is True
+        assert conf.target.is_directory is False
+        assert conf.target.physical_root == "/mnt/sysimage"
 
-        opts, _removed = self._parseCmdline(['--dirinstall=/what/ever'])
+        opts = self._parseCmdline(['--dirinstall=/what/ever'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.target.is_hardware, False)
-        self.assertEqual(conf.target.is_image, False)
-        self.assertEqual(conf.target.is_directory, True)
-        self.assertEqual(conf.target.physical_root, "/what/ever")
+        assert conf.target.is_hardware is False
+        assert conf.target.is_image is False
+        assert conf.target.is_directory is True
+        assert conf.target.physical_root == "/what/ever"
+
+    def test_target_nosave(self):
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline([])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is True
+        assert conf.target.can_save_installation_logs is True
+        assert conf.target.can_save_output_kickstart is True
+
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline(['--nosave=all'])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is False
+        assert conf.target.can_save_installation_logs is False
+        assert conf.target.can_save_output_kickstart is False
+
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline(['--nosave=all_ks'])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is False
+        assert conf.target.can_save_installation_logs is True
+        assert conf.target.can_save_output_kickstart is False
+
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline(['--nosave=logs'])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is True
+        assert conf.target.can_save_installation_logs is False
+        assert conf.target.can_save_output_kickstart is True
+
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline(['--nosave=input_ks'])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is False
+        assert conf.target.can_save_installation_logs is True
+        assert conf.target.can_save_output_kickstart is True
+
+        conf = AnacondaConfiguration.from_defaults()
+        opts = self._parseCmdline(['--nosave=output_ks'])
+        conf.set_from_opts(opts)
+
+        assert conf.target.can_copy_input_kickstart is True
+        assert conf.target.can_save_installation_logs is True
+        assert conf.target.can_save_output_kickstart is False
 
     def test_system(self):
         conf = AnacondaConfiguration.from_defaults()
 
-        opts, _removed = self._parseCmdline([])
+        opts = self._parseCmdline([])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.system._is_boot_iso, True)
-        self.assertEqual(conf.system._is_live_os, False)
-        self.assertEqual(conf.system._is_unknown, False)
+        assert conf.system._is_boot_iso is True
+        assert conf.system._is_live_os is False
+        assert conf.system._is_unknown is False
 
-        opts, _removed = self._parseCmdline(['--liveinst'])
+        opts = self._parseCmdline(['--liveinst'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.system._is_boot_iso, False)
-        self.assertEqual(conf.system._is_live_os, True)
-        self.assertEqual(conf.system._is_unknown, False)
+        assert conf.system._is_boot_iso is False
+        assert conf.system._is_live_os is True
+        assert conf.system._is_unknown is False
 
-        opts, _removed = self._parseCmdline(['--dirinstall=/what/ever'])
+        opts = self._parseCmdline(['--dirinstall=/what/ever'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.system._is_boot_iso, False)
-        self.assertEqual(conf.system._is_live_os, False)
-        self.assertEqual(conf.system._is_unknown, True)
+        assert conf.system._is_boot_iso is False
+        assert conf.system._is_live_os is False
+        assert conf.system._is_unknown is True
 
-        opts, _removed = self._parseCmdline(['--image=/what/ever.img'])
+        opts = self._parseCmdline(['--image=/what/ever.img'])
         conf.set_from_opts(opts)
 
-        self.assertEqual(conf.system._is_boot_iso, False)
-        self.assertEqual(conf.system._is_live_os, False)
-        self.assertEqual(conf.system._is_unknown, True)
+        assert conf.system._is_boot_iso is False
+        assert conf.system._is_live_os is False
+        assert conf.system._is_unknown is True
+
+    def test_addrepo(self):
+        # Test invalid options.
+        with pytest.raises(ValueError):
+            self._parseCmdline(["--addrepo=r1"])
+
+        with pytest.raises(ValueError):
+            self._parseCmdline(["--addrepo=http://url/1"])
+
+        # Test cmdline options.
+        opts = self._parseCmdline([
+            "--addrepo=r1,http://url/1"
+        ])
+        assert opts.addRepo == [
+            ("r1", "http://url/1")
+        ]
+
+        opts = self._parseCmdline([
+            "--addrepo=r1,http://url/1",
+            "--addrepo=r2,http://url/2",
+            "--addrepo=r3,http://url/3",
+        ])
+        assert opts.addRepo == [
+            ("r1", "http://url/1"),
+            ("r2", "http://url/2"),
+            ("r3", "http://url/3"),
+        ]
+
+        # Test invalid boot options.
+        boot_cmdline = KernelArguments.from_string(
+            "inst.addrepo=r1"
+        )
+        with pytest.raises(ValueError) as cm:
+            self._parseCmdline([], boot_cmdline)
+
+        expected = \
+            "The addrepo option has incorrect format ('r1'). " \
+            "Use: inst.addrepo=<name>,<url>"
+
+        assert str(cm.value) == expected
+
+        boot_cmdline = KernelArguments.from_string(
+            "inst.addrepo=http://url/1"
+        )
+        with pytest.raises(ValueError):
+            self._parseCmdline([], boot_cmdline)
+
+        # Test boot options.
+        boot_cmdline = KernelArguments.from_string(
+            "inst.addrepo=r1,http://url/1"
+        )
+        opts = self._parseCmdline([], boot_cmdline)
+        assert opts.addRepo == [
+            ("r1", "http://url/1")
+        ]
+
+        boot_cmdline = KernelArguments.from_string(
+            "inst.addrepo=r1,http://url/1 "
+            "inst.addrepo=r2,http://url/2 "
+            "inst.addrepo=r3,http://url/3 "
+        )
+        opts = self._parseCmdline([], boot_cmdline)
+        assert opts.addRepo == [
+            ("r1", "http://url/1"),
+            ("r2", "http://url/2"),
+            ("r3", "http://url/3"),
+        ]

@@ -17,12 +17,15 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
-from dasbus.server.interface import dbus_interface
+
 from pyanaconda.modules.common.constants.interfaces import PAYLOAD_SOURCE_RPM_OSTREE
 from pyanaconda.modules.common.structures.rpm_ostree import RPMOSTreeConfigurationData
-from pyanaconda.modules.payloads.source.source_base_interface import PayloadSourceBaseInterface
+from pyanaconda.modules.payloads.source.source_base_interface import (
+    PayloadSourceBaseInterface,
+)
 
 __all__ = ["RPMOSTreeSourceInterface"]
 
@@ -46,8 +49,9 @@ class RPMOSTreeSourceInterface(PayloadSourceBaseInterface):
             self.implementation.configuration
         )
 
+    @Configuration.setter
     @emits_properties_changed
-    def SetConfiguration(self, data: Structure):
+    def Configuration(self, data: Structure):
         """Set the source configuration.
 
         :param data: a structure of the type RPMOSTreeConfigurationData

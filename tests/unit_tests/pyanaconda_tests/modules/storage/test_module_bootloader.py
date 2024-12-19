@@ -20,37 +20,62 @@
 import os
 import tempfile
 import unittest
-
 from unittest import mock
 from unittest.mock import Mock, patch
 
+import pytest
 from blivet.devices import BTRFSDevice, DiskDevice
 from blivet.formats import get_format
 from blivet.size import Size
 
-from pyanaconda.modules.storage.devicetree import create_storage
-from tests.unit_tests.pyanaconda_tests import patch_dbus_publish_object, check_dbus_property, \
-    reset_boot_loader_factory, check_task_creation_list
-
-from pyanaconda.modules.storage import platform
-from pyanaconda.modules.storage.bootloader import BootLoaderFactory
-from pyanaconda.modules.storage.bootloader.base import BootLoader
-from pyanaconda.modules.storage.bootloader.efi import EFIGRUB, MacEFIGRUB, Aarch64EFIGRUB, ArmEFIGRUB
-from pyanaconda.modules.storage.bootloader.extlinux import EXTLINUX
-from pyanaconda.modules.storage.bootloader.grub2 import GRUB2, IPSeriesGRUB2, PowerNVGRUB2
-from pyanaconda.modules.storage.bootloader.zipl import ZIPL
-from pyanaconda.modules.common.errors.storage import UnavailableStorageError
-from pyanaconda.modules.storage.constants import BootloaderMode
-
-from pyanaconda.modules.storage.bootloader.image import LinuxBootLoaderImage
-from pyanaconda.core.constants import BOOTLOADER_SKIPPED, BOOTLOADER_LOCATION_PARTITION, \
-    PAYLOAD_TYPE_RPM_OSTREE, PAYLOAD_TYPE_LIVE_IMAGE
+from pyanaconda.core.constants import (
+    BOOTLOADER_LOCATION_PARTITION,
+    BOOTLOADER_SKIPPED,
+    PAYLOAD_TYPE_DNF,
+    PAYLOAD_TYPE_LIVE_IMAGE,
+    PAYLOAD_TYPE_RPM_OSTREE,
+)
+from pyanaconda.core.path import make_directories, touch
 from pyanaconda.modules.common.constants.objects import BOOTLOADER
-from pyanaconda.modules.storage.bootloader import BootloaderModule
-from pyanaconda.modules.storage.bootloader.bootloader_interface import BootloaderInterface
-from pyanaconda.modules.storage.bootloader.installation import ConfigureBootloaderTask, \
-    InstallBootloaderTask, FixZIPLBootloaderTask, FixBTRFSBootloaderTask, RecreateInitrdsTask, \
-    CreateRescueImagesTask, CreateBLSEntriesTask
+from pyanaconda.modules.common.errors.storage import UnavailableStorageError
+from pyanaconda.modules.storage import platform
+from pyanaconda.modules.storage.bootloader import BootLoaderFactory, BootloaderModule
+from pyanaconda.modules.storage.bootloader.base import BootLoader
+from pyanaconda.modules.storage.bootloader.bootloader_interface import (
+    BootloaderInterface,
+)
+from pyanaconda.modules.storage.bootloader.efi import (
+    EFIGRUB,
+    Aarch64EFIGRUB,
+    ArmEFIGRUB,
+)
+from pyanaconda.modules.storage.bootloader.extlinux import EXTLINUX
+from pyanaconda.modules.storage.bootloader.grub2 import (
+    GRUB2,
+    IPSeriesGRUB2,
+    PowerNVGRUB2,
+)
+from pyanaconda.modules.storage.bootloader.image import LinuxBootLoaderImage
+from pyanaconda.modules.storage.bootloader.installation import (
+    CollectKernelArgumentsTask,
+    ConfigureBootloaderTask,
+    CreateBLSEntriesTask,
+    CreateRescueImagesTask,
+    FixBTRFSBootloaderTask,
+    FixZIPLBootloaderTask,
+    InstallBootloaderTask,
+    RecreateInitrdsTask,
+)
+from pyanaconda.modules.storage.bootloader.zipl import ZIPL
+from pyanaconda.modules.storage.constants import BootloaderMode
+from pyanaconda.modules.storage.devicetree import create_storage
+from tests.unit_tests.pyanaconda_tests import (
+    check_dbus_property,
+    check_task_creation,
+    check_task_creation_list,
+    patch_dbus_publish_object,
+    reset_boot_loader_factory,
+)
 
 
 class BootloaderInterfaceTestCase(unittest.TestCase):
@@ -63,7 +88,6 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
 
     def _check_dbus_property(self, *args, **kwargs):
         check_dbus_property(
-            self,
             BOOTLOADER,
             self.bootloader_interface,
             *args, **kwargs
@@ -71,7 +95,7 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
 
     def test_get_default_type(self):
         """Test GetDefaultType."""
-        self.assertEqual(self.bootloader_interface.GetDefaultType(), "DEFAULT")
+        assert self.bootloader_interface.GetDefaultType() == "DEFAULT"
 
     def test_bootloader_mode_property(self):
         """Test the bootloader mode property."""
@@ -147,21 +171,21 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
 
     def test_is_efi(self):
         """Test IsEFI."""
-        with self.assertRaises(UnavailableStorageError):
+        with pytest.raises(UnavailableStorageError):
             self.bootloader_interface.IsEFI()
 
         storage = Mock()
         self.bootloader_module.on_storage_changed(storage)
 
         storage.bootloader = GRUB2()
-        self.assertEqual(self.bootloader_interface.IsEFI(), False)
+        assert self.bootloader_interface.IsEFI() is False
 
         storage.bootloader = EFIGRUB()
-        self.assertEqual(self.bootloader_interface.IsEFI(), True)
+        assert self.bootloader_interface.IsEFI() is True
 
     def test_get_arguments(self):
         """Test GetArguments."""
-        with self.assertRaises(UnavailableStorageError):
+        with pytest.raises(UnavailableStorageError):
             self.bootloader_interface.GetArguments()
 
         storage = Mock()
@@ -169,11 +193,11 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
 
         storage.bootloader = GRUB2()
         storage.bootloader.boot_args.update(["x=1", "y=2"])
-        self.assertEqual(self.bootloader_interface.GetArguments(), ["x=1", "y=2"])
+        assert self.bootloader_interface.GetArguments() == ["x=1", "y=2"]
 
     def test_detect_windows(self):
         """Test DetectWindows."""
-        with self.assertRaises(UnavailableStorageError):
+        with pytest.raises(UnavailableStorageError):
             self.bootloader_interface.DetectWindows()
 
         device = Mock()
@@ -185,10 +209,10 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
         self.bootloader_module.on_storage_changed(storage)
 
         storage.bootloader.has_windows.return_value = False
-        self.assertEqual(self.bootloader_interface.DetectWindows(), False)
+        assert self.bootloader_interface.DetectWindows() is False
 
         storage.bootloader.has_windows.return_value = True
-        self.assertEqual(self.bootloader_interface.DetectWindows(), True)
+        assert self.bootloader_interface.DetectWindows() is True
 
     @patch_dbus_publish_object
     def test_install_bootloader_with_tasks(self, publisher):
@@ -201,6 +225,7 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
         task_classes = [
             CreateRescueImagesTask,
             ConfigureBootloaderTask,
+            CollectKernelArgumentsTask,
             InstallBootloaderTask,
             CreateBLSEntriesTask
         ]
@@ -209,7 +234,7 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
             PAYLOAD_TYPE_LIVE_IMAGE, [version]
         )
 
-        check_task_creation_list(self, task_paths, publisher, task_classes)
+        check_task_creation_list(task_paths, publisher, task_classes)
 
     @patch_dbus_publish_object
     def test_generate_initramfs_with_tasks(self, publisher):
@@ -222,14 +247,21 @@ class BootloaderInterfaceTestCase(unittest.TestCase):
         task_classes = [
             RecreateInitrdsTask,
             FixBTRFSBootloaderTask,
-            FixZIPLBootloaderTask,
         ]
 
         task_paths = self.bootloader_interface.GenerateInitramfsWithTasks(
             PAYLOAD_TYPE_LIVE_IMAGE, [version]
         )
 
-        check_task_creation_list(self, task_paths, publisher, task_classes)
+        check_task_creation_list(task_paths, publisher, task_classes)
+
+    @patch_dbus_publish_object
+    def test_fix_zipl_bootloader_with_task(self, publisher):
+        """Test FixZIPLBootloaderWithTask."""
+        task_path = self.bootloader_interface.FixZIPLBootloaderWithTask()
+        self.bootloader_interface.BootloaderMode = BootloaderMode.ENABLED
+        obj = check_task_creation(task_path, publisher, FixZIPLBootloaderTask)
+        assert obj.implementation._mode == BootloaderMode.ENABLED
 
 
 class BootloaderTasksTestCase(unittest.TestCase):
@@ -362,26 +394,80 @@ class BootloaderTasksTestCase(unittest.TestCase):
         bootloader.add_image.assert_called_once()
         image = bootloader.add_image.call_args[0][0]
 
-        self.assertIsInstance(image, LinuxBootLoaderImage)
-        self.assertEqual(image, bootloader.default)
-        self.assertEqual(image.version, version)
-        self.assertEqual(image.label, "anaconda")
-        self.assertEqual(image.device, storage.root_device)
+        assert isinstance(image, LinuxBootLoaderImage)
+        assert image == bootloader.default
+        assert image.version == version
+        assert image.label == "anaconda"
+        assert image.device == storage.root_device
+
+    def test_collect_kernel_arguments(self):
+        """Test the collection of the kernel arguments for the installation."""
+        bootloader = Mock()
+        storage = Mock(bootloader=bootloader)
+
+        CollectKernelArgumentsTask(storage, BootloaderMode.DISABLED).run()
+        bootloader.collect_arguments.assert_not_called()
+
+        CollectKernelArgumentsTask(storage, BootloaderMode.SKIPPED).run()
+        bootloader.collect_arguments.assert_not_called()
+
+        CollectKernelArgumentsTask(storage, BootloaderMode.ENABLED).run()
+        bootloader.collect_arguments.assert_called_once_with(storage)
 
     def test_install(self):
         """Test the installation task for the boot loader."""
         bootloader = Mock()
         storage = Mock(bootloader=bootloader)
 
-        InstallBootloaderTask(storage, BootloaderMode.DISABLED).run()
-        bootloader.write.assert_not_called()
+        with tempfile.TemporaryDirectory() as sysroot:
+            InstallBootloaderTask(
+                storage,
+                BootloaderMode.DISABLED,
+                PAYLOAD_TYPE_DNF,
+                sysroot
+            ).run()
+            bootloader.write.assert_not_called()
 
-        InstallBootloaderTask(storage, BootloaderMode.SKIPPED).run()
-        bootloader.write.assert_not_called()
+            InstallBootloaderTask(
+                storage,
+                BootloaderMode.SKIPPED,
+                PAYLOAD_TYPE_DNF,
+                sysroot
+            ).run()
+            bootloader.write.assert_not_called()
 
-        InstallBootloaderTask(storage, BootloaderMode.ENABLED).run()
-        bootloader.prepare.assert_called_once()
-        bootloader.write.assert_called_once()
+            InstallBootloaderTask(
+                storage,
+                BootloaderMode.ENABLED,
+                PAYLOAD_TYPE_DNF,
+                sysroot
+            ).run()
+            bootloader.prepare.assert_called_once()
+            bootloader.write.assert_called_once()
+
+            bootloader.prepare.reset_mock()
+            bootloader.write.reset_mock()
+            InstallBootloaderTask(
+                storage,
+                BootloaderMode.ENABLED,
+                PAYLOAD_TYPE_RPM_OSTREE,
+                sysroot
+            ).run()
+            bootloader.prepare.assert_called_once()
+            bootloader.write.assert_called_once()
+
+            bootloader.prepare.reset_mock()
+            bootloader.write.reset_mock()
+            make_directories(sysroot + "/usr/bin")
+            touch(sysroot + "/usr/bin/bootupctl")
+            InstallBootloaderTask(
+                storage,
+                BootloaderMode.ENABLED,
+                PAYLOAD_TYPE_RPM_OSTREE,
+                sysroot
+            ).run()
+            bootloader.prepare.assert_not_called()
+            bootloader.write.assert_not_called()
 
     @patch('pyanaconda.modules.storage.bootloader.utils.execWithRedirect')
     def test_create_bls_entries(self, exec_mock):
@@ -442,9 +528,9 @@ class BootloaderTasksTestCase(unittest.TestCase):
                     ], root=root
                 )
             ])
-            self.assertFalse(os.path.exists(
+            assert not os.path.exists(
                 root + "/boot/loader/entries/fake.conf"
-            ))
+            )
 
         exec_mock.reset_mock()
         exec_mock.return_value = 0
@@ -476,10 +562,12 @@ class BootloaderTasksTestCase(unittest.TestCase):
     @patch('pyanaconda.modules.storage.bootloader.utils.conf')
     def test_recreate_initrds(self, conf_mock, exec_mock):
         """Test the installation task that recreates initrds."""
+        storage = Mock(bootloader=EFIGRUB())
         version = "4.17.7-200.fc28.x86_64"
 
         with tempfile.TemporaryDirectory() as root:
             task = RecreateInitrdsTask(
+                storage=storage,
                 sysroot=root,
                 payload_type=PAYLOAD_TYPE_RPM_OSTREE,
                 kernel_versions=[version]
@@ -492,6 +580,7 @@ class BootloaderTasksTestCase(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             task = RecreateInitrdsTask(
+                storage=storage,
                 sysroot=root,
                 payload_type=PAYLOAD_TYPE_LIVE_IMAGE,
                 kernel_versions=[version]
@@ -519,6 +608,7 @@ class BootloaderTasksTestCase(unittest.TestCase):
             open(root + "/usr/sbin/new-kernel-pkg", 'wb').close()
 
             task = RecreateInitrdsTask(
+                storage=storage,
                 sysroot=root,
                 payload_type=PAYLOAD_TYPE_LIVE_IMAGE,
                 kernel_versions=[version]
@@ -539,6 +629,7 @@ class BootloaderTasksTestCase(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             task = RecreateInitrdsTask(
+                storage=storage,
                 sysroot=root,
                 payload_type=PAYLOAD_TYPE_LIVE_IMAGE,
                 kernel_versions=[version]
@@ -642,12 +733,14 @@ class BootloaderTasksTestCase(unittest.TestCase):
         )
         install.assert_called_once_with(
             storage,
-            BootloaderMode.ENABLED
+            BootloaderMode.ENABLED,
+            PAYLOAD_TYPE_LIVE_IMAGE,
+            sysroot
         )
 
     @patch('pyanaconda.modules.storage.bootloader.installation.conf')
     @patch("pyanaconda.modules.storage.bootloader.installation.arch.is_s390")
-    @patch("pyanaconda.modules.storage.bootloader.installation.execInSysroot")
+    @patch("pyanaconda.modules.storage.bootloader.installation.execWithRedirect")
     def test_fix_zipl(self, execute, is_s390, conf):
         """Test the installation task for the ZIPL fix."""
         is_s390.return_value = False
@@ -667,8 +760,9 @@ class BootloaderTasksTestCase(unittest.TestCase):
 
         is_s390.return_value = True
         conf.target.is_directory = False
+        conf.target.system_root = "/target/root"
         FixZIPLBootloaderTask(BootloaderMode.ENABLED).run()
-        execute.assert_called_once_with("zipl", [])
+        execute.assert_called_once_with("zipl", [], root="/target/root")
 
 
 class BootLoaderFactoryTestCase(unittest.TestCase):
@@ -677,43 +771,42 @@ class BootLoaderFactoryTestCase(unittest.TestCase):
     def test_create_boot_loader(self):
         """Test create_boot_loader."""
         boot_loader = BootLoaderFactory.create_boot_loader()
-        self.assertIsNotNone(boot_loader)
-        self.assertIsInstance(boot_loader, BootLoader)
+        assert boot_loader is not None
+        assert isinstance(boot_loader, BootLoader)
 
     def test_get_generic_class(self):
         """Test get_generic_class."""
         cls = BootLoaderFactory.get_generic_class()
-        self.assertEqual(cls, BootLoader)
+        assert cls == BootLoader
 
     @reset_boot_loader_factory()
     def test_get_default_class(self):
         """Test get_default_class."""
         cls = BootLoaderFactory.get_default_class()
-        self.assertEqual(cls, None)
+        assert cls is None
 
         BootLoaderFactory.set_default_class(EXTLINUX)
         cls = BootLoaderFactory.get_default_class()
-        self.assertEqual(cls, EXTLINUX)
+        assert cls == EXTLINUX
 
     def test_get_class_by_name(self):
         """Test get_class_by_name."""
         cls = BootLoaderFactory.get_class_by_name("EXTLINUX")
-        self.assertEqual(cls, EXTLINUX)
+        assert cls == EXTLINUX
 
         cls = BootLoaderFactory.get_class_by_name("DEFAULT")
-        self.assertEqual(cls, None)
+        assert cls is None
 
     def test_get_class_by_platform(self):
         """Test get_class_by_platform."""
         # Test unknown platform.
         cls = BootLoaderFactory.get_class_by_platform(Mock())
-        self.assertEqual(cls, None)
+        assert cls is None
 
         # Test known platforms.
         boot_loader_by_platform = {
             platform.X86: GRUB2,
             platform.EFI: EFIGRUB,
-            platform.MacEFI: MacEFIGRUB,
             platform.PPC: GRUB2,
             platform.IPSeriesPPC: IPSeriesGRUB2,
             platform.PowerNV: PowerNVGRUB2,
@@ -726,8 +819,8 @@ class BootLoaderFactoryTestCase(unittest.TestCase):
         for platform_type, boot_loader_class in boot_loader_by_platform.items():
             # Get the boot loader class.
             cls = BootLoaderFactory.get_class_by_platform(platform_type)
-            self.assertEqual(cls, boot_loader_class)
+            assert cls == boot_loader_class
 
             # Get the boot loader instance.
             obj = cls()
-            self.assertIsInstance(obj, BootLoader)
+            assert isinstance(obj, BootLoader)

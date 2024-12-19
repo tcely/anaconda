@@ -7,24 +7,25 @@
 ARCH=$(uname -m)
 KERNEL=$(uname -r)
 
-MODULE_LIST="cramfs squashfs iscsi_tcp "
+MODULE_LIST="squashfs iscsi_tcp "
 
 # if no file matches the glob expand it to the empty string
 # we need this when any ko file cannot be found
 shopt -s nullglob
 
 SCSI_MODULES=/lib/modules/$KERNEL/kernel/drivers/scsi/device_handler/
-for m in $SCSI_MODULES/*.ko; do
+for m in "$SCSI_MODULES"/*.ko*; do
     # Shell spew to work around not having basename
-    # Trim the paths off the prefix, then the . suffix
-    a="${m##*/}"
-    MODULE_LIST+=" ${a%.*}"
+    m="${m##*/}"
+    # Handle *.ko, *.ko.zst, *.ko.gz, *.ko.xz etc.
+    IFS='.ko' read -r -a m <<< "$m"
+    MODULE_LIST+=" ${m[0]}"
 done
 
 shopt -u nullglob
 
-if [ "$ARCH" != "s390" -a "$ARCH" != "s390x" ]; then
-    MODULE_LIST+=" floppy edd iscsi_ibft "
+if [ "$ARCH" != "s390" ] && [ "$ARCH" != "s390x" ]; then
+    MODULE_LIST+=" edd iscsi_ibft "
 else
     MODULE_LIST+=" hmcdrv "
 fi
@@ -33,16 +34,16 @@ if [ "$ARCH" = "ppc" ]; then
     MODULE_LIST+=" spufs "
 fi
 
-MODULE_LIST+=" raid0 raid1 raid5 raid6 raid456 raid10 linear dm-mod dm-zero  \
+MODULE_LIST+=" raid0 raid1 raid5 raid6 raid456 raid10 dm-mod dm-zero  \
               dm-mirror dm-snapshot dm-multipath dm-round-robin dm-crypt cbc \
-              sha256 lrw xts "
+              lrw xts "
 
 for m in $MODULE_LIST; do
-    if ! modinfo $m >/dev/null 2>&1 ; then
+    if ! modinfo "$m" >/dev/null 2>&1 ; then
         echo "anaconda-modprobe: Module $m not found" >&2
         continue
     fi
-    if modprobe $m ; then
+    if modprobe "$m" ; then
         debug_msg "$m was loaded"
     else
         debug_msg "$m was NOT loaded"

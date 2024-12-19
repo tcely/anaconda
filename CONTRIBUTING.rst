@@ -6,24 +6,44 @@ help with implementing changes in Anaconda, please follow our
 `blog series <https://rhinstaller.wordpress.com/2019/10/11/anaconda-debugging-and-testing-part-1/>`_ or
 an `addon guide <http://rhinstaller.github.io/anaconda-addon-development-guide/index.html>`_ to create Anaconda addon.
 
-How to run make commands
-------------------------
+Setting up development container
+--------------------------------
 
-Anaconda has plenty of dependencies and because of that it's hard to set environment to
-with Anaconda properly. To get all the dependencies you are free to use script in the Anaconda
-repository.
+The anaconda team uses a containerized development environment using toolbx.
+If you can install `toolbx <https://containertoolbx.org/>`_ or
+`distrobox <https://distrobox.privatedns.org/>`_ on your system, it is highly
+recommended to do that:
 
-Follow these steps to keep your machine clean from all the Anaconda dependencies. It will
-create a container where you can install all the dependencies. If you are not interested in
-dealing with container just skip this part and continue on the next one::
+ - It is known to work and gives you reproducible results.
+ - It avoids having to install development packages on your main machine.
+
+If you are not interested in dealing with containers, just skip this part and continue on the next one::
 
     sudo dnf install toolbox
+
+To create and enter a development toolbx for Anaconda just run these commands::
+
     toolbox create
     toolbox enter
 
-To prepare the environment in the container or on your system just run these commands::
+Installing dependencies
+-----------------------
+
+If you are using `cockpit/tasks container <https://quay.io/repository/cockpit/tasks>`_
+for Web UI development only, you can skip this part.
+
+To get all the dependencies and prepare the environment in the container or
+on your system just run these commands::
 
     sudo ./scripts/testing/install_dependencies.sh
+
+
+How to run make commands
+------------------------
+
+Anaconda uses autotools so there are familiar `./configure` script and  Makefile targets.
+To prepare Anaconda sources, you need to run these commands::
+
     ./autogen.sh && ./configure
 
 How to Contribute to the Anaconda Installer (the short version)
@@ -31,17 +51,19 @@ How to Contribute to the Anaconda Installer (the short version)
 
 1) I want to contribute to the upstream Anaconda Installer (used in Fedora):
 
-- open a pull request for the ``<next Fedora number>-devel`` branch (f25-devel, etc.)
+- base and test your changes on a clone of the ``fedora-<next Fedora number>`` branch.
+- open a pull request for the ``fedora-<next Fedora number>`` branch (``fedora-38``, etc.)
 - check the *Commit Messages* section below for how to format your commit messages
 - check the *Release Notes* section below for how to provide a release note
 
 2) I want to contribute to the RHEL Anaconda installer:
 
-- open a pull request for the ``<RHEL number>-branch``  branch (rhel7-branch, etc.)
+- base and test your changes on a clone of the ``rhel-<RHEL number>``  branch.
+- open a pull request for the ``rhel-<RHEL number>``  branch (``rhel-9``, etc.)
 - check the *Commits for RHEL Branches* section below for how to format your commit messages
 - check the *Release Notes* section below for how to provide a release note
 
-If you want to contribute a change to both the upstream and RHEL Anaconda then follow both a) and b) separately.
+If you want to contribute a change to both the upstream and RHEL Anaconda then follow both 1) and 2) separately.
 
 Which is my target git branch?
 ------------------------------
@@ -49,25 +71,15 @@ Which is my target git branch?
 Depending on where you want to make your contribution please choose your correct branch based on the table below.
 
 +--------------------------+--------------+
-| Fedora Rawhide only      | master       |
+| Fedora Rawhide           | master       |
 +--------------------------+--------------+
-| Fedora XX and Rawhide    | fXX-devel    |
+| Fedora XX                | fedora-XX    |
 +--------------------------+--------------+
-| Fedora XX only           | fXX-release  |
-+--------------------------+--------------+
-| RHEL-X / CentOS Stream X | rhel-x       |
+| RHEL-X / CentOS Stream X | rhel-X       |
 +--------------------------+--------------+
 
-Notice that the ``master`` branch should only be a target of a pull request if the change does not apply to any
-of the branched Fedora versions. If the change applies to both Fedora Rawhide and Fedora XX, then a ``fXX-devel``
-branch has to be targeted. All changes to ``fXX-devel`` branches are merged back into ``master``, so there's no
-need to open a separate pull-request for ``master`` in that case.
-
-If a change only applies to a Fedora XX release and the changes don't have to be merged back into ``master``,
-then the target branch should be a ``fXX-release`` relese branch.
-
-The ``rhel-x`` branches on the other hand are not merged back into ``master``, and so a separate pull request
-has to be opened targeting either a ``fXX-devel`` branch or ``master``.
+All of these branches are independent, never merged into each another, so if you want to put your
+changes into multiple branches, you have to open multiple pull requests.
 
 Finding Bugs to Fix
 -------------------
@@ -86,6 +98,107 @@ category. You can quickly list these by searching the Red Hat bugzilla for bugs 
 
 Patches for bugs without keywords are welcome, too!
 
+Testing Anaconda changes
+------------------------
+
+To test changes in Anaconda you have a few options based on what you need to do.
+
+Backend and TUI development
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+There are two options to develop and test changes which are not yet released.
+
+To find out more information about quick way to propagate your changes into the existing installation ISO image see `this blogpost <https://rhinstaller.wordpress.com/2019/10/11/anaconda-debugging-and-testing-part-1/>`_.
+
+Another way is to build the boot.iso directly (takes more time but it's easier to do). See the next section to find out how to build the ISO.
+
+Building installation images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Building the ISO is the most precise way to find the behavior of Anaconda in the installation environment. However, it needs a lot of HW resources and time to build.
+During the build, you will be ask for ``sudo`` password. Unfortunately, it is required to run the build as root because the build process needs to work with ``/dev/loop`` devices.
+Please do not use `toolbx <https://github.com/containers/toolbox>`_ or `distrobox <https://github.com/89luca89/distrobox>`_ because the commands below are calling podman under root which is hard to achieve from inside of other container.
+
+Follow these steps to build the ISO you need.
+
+**First build Anaconda RPM files with our container**::
+
+  make -f ./Makefile.am container-rpms-scratch
+
+Then build an image containing those RPMs.
+
+**NOTE: Do not run this in the Anaconda toolbox - it will not work due to the need for root privileges.**
+
+To build a regular boot.iso from these RPMs use (loop device mounting requires root privileges)::
+
+  make -f ./Makefile.am anaconda-iso-creator-build # to build the container if it doesn't exists already
+  make -f ./Makefile.am container-iso-build
+
+To build a Web UI boot.iso run::
+
+  make -f ./Makefile.am anaconda-iso-creator-build # to build the container if it doesn't exists already
+  make -f ./Makefile.am container-webui-iso-build
+
+To build a Web UI in Live image run::
+
+  make -f ./Makefile.am anaconda-live-iso-creator-build # to build the container if it doesn't exists already
+  make -f ./Makefile.am container-live-iso-build
+
+The resulting ISO will be stored in ``./result/iso`` directory.
+
+Note: You can put additional RPMs to ``./result/build/01-rpm-build`` and these will be automatically used for the ISO build.
+
+Local development workflow
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This workflow makes it possible to test changes to the Anaconda source code locally on your machine without any dependencies
+on external infrastructure. It uses two scripts, one called ``scripts/testing/rebuild_iso`` to build a fresh bootable installation image
+from Anaconda source code on the given branch and corresponding Fedora/CentOS Stream packages. The second script, called ``scripts/testing/update_iso``
+uses the Anaconda updates image mechanism together with the ``mkksiso`` command provided by the Lorax project to very quickly
+create an updated version of the boot.iso when Anaconda code is changed. The updated boot.iso can then be booted on a VM or bare metal.
+
+The ``rebuild_iso`` script
+"""""""""""""""""""""""""""""""
+
+This is just a simple script that rebuilds the boot.iso from Anaconda source code on the current branch & corresponding Fedora
+(on Fedora branches) or CentoOS Stream (on RHEL branches) packages. The script makes sure to remove the old images first
+and also records Anaconda Git revision that was used to build the image.
+
+This should take about 15 minutes on modern hardware.
+
+See --help for further information.
+
+The ``update_iso`` script
+""""""""""""""""""""""""""""""
+
+This is the main script that enables local development by quickly updating a boot iso with local changes.
+This should take a couple seconds on modern hardware.
+
+For the most common use case ("I have changed the Anaconda source and want to see what it does.") just do this:
+
+1. run ``scripts/testing/rebuild_iso`` first, this creates ``result/iso/boot.iso``
+2. change the Anaconda source code
+3. run ``scripts/testing/update_iso`` which creates the ``result/iso/updated_boot.iso``
+4. start the ``result/iso/updated_boot.iso`` in a VM or on bare metal
+
+The script also has a few command line options that might come handy:
+
+* ``-b, --boot-options`` makes it possible to add additional boot options to the boot.iso boot menu
+* ``-k, --ks-file`` add the specified kickstart file to the updated boot.iso and use it for installation
+* ``-v, --virt-install`` boot the updated iso in a temporary VM for super fast & simple debugging
+* ``-t, --tag`` use a specific Git revision when generating the updates image
+* You can specify custom ISO image (requirement for Live ISO usage) as optional positional parameter.
+
+Running the updated boot.iso
+""""""""""""""""""""""""""""
+
+The ``updated_boot.iso`` is just a regular bootable image, but there are a couple things to note:
+
+* Due to how ``mkksiso`` works the image will fail the image checksum test - so always use the first option
+  in the image boot menu that skips the checksum verification.
+* Make sure to shut down VMs before booting them again after re-generating the ``updated_boot.iso`` file.
+  Otherwise the VM software might continue using the previous file version & your changes might not be visible.
+  There is also a dummy boot options added to ``updated_boot.iso`` called ``build_time`` that records when the
+  currently running image has been updated. You can check this boot option either in the image boot menu
+  or by checking ``/proc/cmdline`` on a running system.
 
 Anaconda Installer Branching Policy (the long version)
 -------------------------------------------------------
@@ -93,55 +206,50 @@ Anaconda Installer Branching Policy (the long version)
 The basic premise is that there are the following branches:
 
 - master
-- <next fedora number>-release
-- <next fedora number>-devel
+- fedora-<next fedora number>
 
-``Master`` branch never waits for any release-related processes to take place and is used for Fedora Rawhide Anaconda builds.
+The ``master`` branch never waits for any release-related processes to take place and is used for Fedora Rawhide Anaconda builds.
 
 Concerning current RHEL branches, they are too divergent to integrate into this scheme. Thus, commits are merged onto, and builds are done on the RHEL branches.
-In this case, two pull requests will very likely be needed:
+In this case, multiple pull requests will very likely be needed:
 
 - one for the ``rhel<number>-branch``
-- one for the ``master`` or ``<fedora number>-devel`` branch (if the change is not RHEL only)
+- one for the ``master`` branch, if the change is not RHEL only
+- one for the ``fedora-<number>`` branch, if change should apply to branched Fedora too
 
 Releases
 ---------
 
-For specific Fedora version, the release process is as follows:
+The release process is as follows, for both Fedora Rawhide and branched Fedora versions:
 
-- ``<next Fedora number>-devel`` is merged onto ``<next Fedora number>-release``
-- a release commit is made (which bumps version in spec file) & tagged
-
-Concerning Fedora Rawhide, the release process is slightly different:
-
-- a release commit is made (which bumps version in spec file) & tagged
+- a release commit is made (which bumps version in spec file) & tagged on the ``fedora-XX`` or ``master`` branch
 
 Concerning the ``<next Fedora number>`` branches (which could also be called ``next stable release`` if we wanted to decouple our versioning from Fedora in the future):
 
-- work which goes into the next Fedora goes to ``<next Fedora number>-devel``, which is periodically merged back to ``master``
-- this way we can easily see what was developed in which Fedora timeframe and possibly due to given Fedora testing phase feedback (bugfixes, etc.)
+- work which goes into the next Fedora goes to ``fedora-<next Fedora number>`` and must have another PR for ``master``, too
 - stuff we *don't* want to go to the next Fedora (too cutting edge, etc.) goes only to ``master`` branch
-- commits specific to a given Fedora release (temporary fixes, etc.) go only to the ``<next Fedora number>-release`` branch
-- the ``<next Fedora number>-release`` branch also contains release commits
+- commits specific to a given Fedora release (temporary fixes, etc.) go only to the ``fedora-<next Fedora number>`` branch
+- this way we can easily see what was developed in which Fedora timeframe and possibly due to given Fedora testing phase feedback (bugfixes, etc.)
 
-Example for the F25 cycle
---------------------------
+Example for the F38 and F39 cycle
+----------------------------------
 
-- master
-- f25-devel
-- f25-release
+Once Fedora 38 is branched, we have these branches in the repository:
 
-This would continue until F25 is released, after which we:
+- ``master``
+- ``fedora-38``
 
-- drop the f25-devel branch
-- keep f25-release as an inactive record of the f25 cycle
-- branch f26-devel and f26-release from the master branch
+This would continue until f38 is released, after which we:
 
-This will result in the following branches for the F26 cycle:
+- keep the ``fedora-38`` branch as an inactive record of the f38 cycle
+- work on the ``master`` branch only
 
-- master
-- f26-devel
-- f26-release
+After a while, Fedora 39 is branched and we start the ``fedora-39`` branch off the ``master`` branch.
+
+This will result in the following branches for the f39 cycle:
+
+- ``master``
+- ``fedora-39``
 
 Guidelines for Commits
 -----------------------
@@ -149,7 +257,7 @@ Guidelines for Commits
 Commit Messages
 ^^^^^^^^^^^^^^^^
 
-The first line should be a succinct description of what the commit does, starting with capital and ending without a period ('.'). If your commit is fixing a bug in Red Hat's bugzilla instance, you should add `` (#123456)`` to the end of the first line of the commit message. The next line should be blank, followed (optionally) by a more in-depth description of your changes. Here's an example:
+The first line should be a succinct description of what the commit does, starting with capital and ending without a period ('.'). If your commit is fixing a bug in Red Hat's bugzilla instance, you should add ``(#123456)`` to the end of the first line of the commit message. The next line should be blank, followed (optionally) by a more in-depth description of your changes. Here's an example:
 
     Stop kickstart when space check fails
 
@@ -160,15 +268,20 @@ The first line should be a succinct description of what the commit does, startin
 Commits for RHEL Branches
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you are submitting a patch for any rhel-branch, the last line of your commit must identify the bugzilla bug id it fixes, using the ``Resolves`` or ``Related`` keyword, e.g.:
-``Resolves: rhbz#111111``
+If you are submitting a patch for any rhel-branch, the last line of your commit must identify the `JIRA issue <https://issues.redhat.com/projects/RHEL/issues/>`_ id it fixes, using the ``Resolves``, ``Related`` or ``Reverts`` keyword, e.g.:
+``Resolves: RHEL-11111``
 
 or
 
-``Related: rhbz#1234567``
+``Related: RHEL-12345``
+
+or
+
+``Reverts: RHEL-22222``
 
 Use ``Resolves`` if the patch fixes the core issue which caused the bug.
 Use ``Related`` if the patch fixes an ancillary issue that is related to, but might not actually fix the bug.
+Use ``Reverts`` if this patch reverts changes introduced by linked bug.
 
 Release Notes
 ^^^^^^^^^^^^^
@@ -177,14 +290,9 @@ If you are submitting a patch that should be documented in the release notes, cr
 ``docs/release-notes/template.rst`` file, modify its content and add the new file to your patch, so
 it can be reviewed and merged together with your changes.
 
-The template has the following content:
-
-.. include:: ./docs/release-notes/template.rst
-    :literal:
-
 After a final release (for example, Fedora GA), we will remove all release notes from
-``docs/release-notes/`` of the release branch and create a new file in ``docs/releases/``
-with their content.
+``docs/release-notes/`` of the release branch and add the content into the ``docs/release-notes.rst``
+file.
 
 This change will be ported to upstream to remove the already documented release notes from
 ``docs/release-notes/`` of the upstream branch. In a case of RHEL, port only the new release file.
@@ -201,15 +309,29 @@ Code conventions
 
 It is important to have consistency across the codebase. This won't necessarily make your code work better, but it might help to make the codebase more understandable, easier to work with, and more pleasant to go through when doing a code review.
 
-In general we are trying to be as close as possible to `PEP8 <https://www.python.org/dev/peps/pep-0008/>`_ but also extending or modifying minor PEP8 rules when it seems suitable in the context of our project. See list of the conventions below:
+Automated Linting and Code Checks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* Limit all lines to a maximum of 99 characters.
+We use a set of linters (e.g., `ruff`, `pylint`) to automatically enforce code quality and style guidelines. These tools are used to gate changes, so **it is highly recommended that you run the linters locally before submitting a pull request (PR)** to catch any issues early.
+
+You can run the `ruff` checks locally with::
+
+    make TESTS=ruff/run_ruff.sh check
+
+You can run the `pylint` checks locally with::
+
+    make TESTS=pylint/runpylint.py check
+
+Additional Code Conventions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In general, we aim to stay as close as possible to `PEP8 <https://www.python.org/dev/peps/pep-0008/>`_, while extending or adjusting minor rules to suit the context of our project. The following conventions supplement the rules enforced by our linters:
+
 * Format strings with `.format() <https://docs.python.org/3/library/stdtypes.html#str.format>`_ instead of ``%`` (https://pyformat.info/)
     * Exception: Use ``%`` formatting in logging functions and pass the ``%`` as arguments. See `logging format interpolation <https://stackoverflow.com/questions/34619790/pylint-message-logging-format-interpolation>`_ for the reasons.
 * Follow docstring conventions. See `PEP257 <https://www.python.org/dev/peps/pep-0257>`_.
 * Use `Enum <https://docs.python.org/3/library/enum.html>`_ instead of constants is recommended.
 * Use ``super()`` instead of ``super(ParentClass, self)``.
-* Use only absolute imports (instead of relative ones).
 * Use ``ParentClass.method(self)`` only in case of multiple inheritance.
 * Instance variables are preferred, class variables should be used only with a good reason.
 * Global instances and singletons should be used only with a good reason.
@@ -223,43 +345,17 @@ In general we are trying to be as close as possible to `PEP8 <https://www.python
 Merging examples
 ----------------
 
-Merging the Fedora ``devel`` branch back to the ``master`` branch
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Fedora 25 is used as an example, don't forget to use appropriate Fedora version.)
-
-Checkout and pull the master branch::
-
-    git checkout master
-    git pull
-
-Merge the Fedora devel branch to the master branch::
-
-    git merge --no-ff f25-devel
-
-Push the merge to the remote::
-
-    git push origin master
-
 Merging a GitHub pull request
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Fedora 25 is used as an example, don't forget to use appropriate Fedora version.)
+(Fedora 38 is used as an example, don't forget to use appropriate Fedora version.)
 
 Press the green *Merge pull request* button on the pull request page.
 
-If the pull request has been opened for:
-
-- master
-- f25-release
-- rhel7-branch
-
 Then you are done.
-
-If the pull request has been opened for the ``f25-devel`` branch, then you also need to merge the ``f25-devel``
-branch back to ``master`` once you merge your pull request (see "Merging the Fedora devel branch back to the master branch" above).
 
 Merging a topic branch manually
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Fedora 25 is used as an example, don't forget to use appropriate Fedora version.)
+(Fedora 38 is used as an example, don't forget to use appropriate Fedora version.)
 
 Let's say that there is a topic branch called "fix_foo_with_bar" that should be merged to a given Anaconda non-topic branch.
 
@@ -273,16 +369,7 @@ Then push the merge to the remote::
 
     git push origin <target branch>
 
-If the <target branch> was one of:
-
-- master
-- f25-release
-- rhel7-branch
-
-Then you are done.
-
-If the pull request has been opened for the ``f25-devel`` branch, then you also need to merge the ``f25-devel``
-branch back to ``master`` once you merge your pull request (see "Merging the Fedora devel branch back to the master branch" above).
+If the pull request has been opened for the ``fedora-38`` branch, then you also need to check if the same change should go to the ``master`` branch in another PR.
 
 .. _pure-community-features:
 
@@ -304,3 +391,13 @@ Below is a list of pure community features, their community maintainers, and mai
 * Description:
 
 ``Enable boot of the installed system from a BTRFS subvolume.``
+
+systemd-boot as a bootloader
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* Origin: https://github.com/rhinstaller/anaconda/pull/4368
+* Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=2135531
+* Maintainer: Jeremy Linton <jeremy.linton@arm.com>
+* Description:
+
+``Enable boot using systemd-boot rather than grub2.``

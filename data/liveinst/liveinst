@@ -18,20 +18,51 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-LIVE_INSTALL=0
-IMAGE_INSTALL=0
+BACKEND_READY_FLAG=/run/anaconda/backend_ready
 
-if [ -z "$LIVECMD" ]; then
-    LIVE_INSTALL=1
+WAYLAND_DISPLAY_SOCKET=/tmp/anaconda-wldisplay
+
+# Detect and save the wayland socket before re-exec
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    if [ -e "$WAYLAND_DISPLAY_SOCKET" ]; then
+        rm -f "${WAYLAND_DISPLAY_SOCKET}"
+    fi
+    touch "${WAYLAND_DISPLAY_SOCKET}"
+    echo "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" > ${WAYLAND_DISPLAY_SOCKET}
 fi
 
-if [[ "$LIVECMD $*" =~ "--image" ]]; then
-    IMAGE_INSTALL=1
+# The command needs to be run with root privileges, so if it was started
+# unprivileged, restart running as root.
+if [ "$(id -u)" -ne 0 ]; then
+    if [ -z "$WAYLAND_DISPLAY" ]; then
+        xhost +si:localuser:root
+    fi
+    pkexec "$0" "$@"
+    exit $?
 fi
 
-if [[ "$LIVECMD $*" =~ "--liveinst" ]]; then
-    LIVE_INSTALL=1
+# pkexec clears the environment, so get it back
+if [ -n "${PKEXEC_UID}" ]; then
+    INSTALLER_USER=$(id -n -u "${PKEXEC_UID}")
+    readarray -t user_environment < <(pkexec --user "${INSTALLER_USER}" env XDG_RUNTIME_DIR="/run/user/${PKEXEC_UID}" systemctl --user show-environment)
+
+    for variable in "${user_environment[@]}"; do
+      export "${variable?}"
+    done
 fi
+
+# pkexec clears WAYLAND_DISPLAY from environment
+if [ -z "$WAYLAND_DISPLAY" ] && [ -e "$WAYLAND_DISPLAY_SOCKET" ]; then
+    WAYLAND_DISPLAY=$(cat "${WAYLAND_DISPLAY_SOCKET}")
+    export WAYLAND_DISPLAY
+fi
+
+# use the correct home and config directories for system settings
+PKEXEC_USER=$(id -un "${PKEXEC_UID}")
+HOME=$(bash -c "cd ~${PKEXEC_USER} && pwd")
+export HOME
+XDG_CONFIG_HOME="${HOME}/.config"
+export XDG_CONFIG_HOME
 
 # Allow running another command in the place of anaconda, but in this same
 # environment.  This allows storage testing to make use of all the module
@@ -42,12 +73,10 @@ ANACONDA="${LIVECMD:=anaconda --liveinst --graphical}"
 for i in raid0 raid1 raid5 raid6 raid456 raid10 dm-mod dm-zero dm-mirror dm-snapshot dm-multipath dm-round-robin vfat dm-crypt cbc sha256 lrw xts iscsi_tcp iscsi_ibft; do /sbin/modprobe $i 2>/dev/null ; done
 
 if [ -f /etc/system-release ]; then
-    export ANACONDA_PRODUCTNAME=$( cat /etc/system-release | sed -r -e 's/ *release.*//' )
-    export ANACONDA_PRODUCTVERSION=$( cat /etc/system-release | sed -r -e 's/^.* ([0-9\.]+).*$/\1/' )
-fi
-
-if [ $IMAGE_INSTALL = 1 ]; then
-    export ANACONDA_PRODUCTVERSION=$(rpmquery -q --qf '%{VERSION}' anaconda | cut -d. -f1)
+    export ANACONDA_PRODUCTNAME
+    ANACONDA_PRODUCTNAME=$(sed -r -e 's/ *release.*//' /etc/system-release)
+    export ANACONDA_PRODUCTVERSION
+    ANACONDA_PRODUCTVERSION=$(sed -r -e 's/^.* ([0-9\.]+).*$/\1/' /etc/system-release)
 fi
 
 RELEASE=$(rpm -q --qf '%{Release}' --whatprovides system-release)
@@ -64,16 +93,13 @@ if [ -x /usr/sbin/getenforce ]; then
     /usr/sbin/setenforce 0
 fi
 
-if [ -z "$(sestatus | grep enabled)" ]; then
+if (! sestatus | grep -q enabled) then
     ANACONDA="$ANACONDA --noselinux"
 fi
 
 # Process cmdline args
-for opt in `cat /proc/cmdline` $*; do
+for opt in $(cat /proc/cmdline) "$@"; do
     case $opt in
-    xdriver=*)
-        ANACONDA="$ANACONDA --$opt"
-        ;;
     updates=*)
         UPDATES="${opt#updates=}"
         ;;
@@ -118,19 +144,30 @@ for opt in `cat /proc/cmdline` $*; do
          fi
          exit 1
         ;;
+    rdp|rdp.username|rdp.password|--rdp|--rdp.username|--rdp.password)
+        title="Configuration not supported"
+        text="RDP is not supported on live media."
+        if which zenity &> /dev/null; then
+            zenity --warning --title="$title" --text="$text"
+         else
+            echo "$title" >&2
+            echo "$text" >&2
+         fi
+         exit 1
+        ;;
     esac
 done
 
 # unmount anything that shouldn't be mounted prior to install
-anaconda-cleanup $ANACONDA $*
+anaconda-cleanup "$ANACONDA" "$@"
 
 # Set up the updates, if provided.
-if [ ! -z "$UPDATES" ]; then
-    curl -o /tmp/updates.img $UPDATES
+if [ -n "$UPDATES" ]; then
+    curl -o /tmp/updates.img "$UPDATES"
 
     # We officially support two updates.img formats:  a filesystem image, and
     # a compressed cpio blob.
-    if [ ! -z "$(file /tmp/updates.img | grep 'gzip compressed data')" ]; then
+    if (file /tmp/updates.img | grep -q 'gzip compressed data'); then
         ( cd / ; gzip -dc /tmp/updates.img | cpio -idu )
     else
         mkdir /tmp/updates.disk
@@ -142,30 +179,43 @@ if [ ! -z "$UPDATES" ]; then
 
 fi
 
-if [ -z $LC_ALL ]; then
-    # LC_ALL not set, set it to $LANG to make Python's default encoding
-    # detection work
-    export LC_ALL=$LANG
+start_anaconda_web_ui() {
+    # remove flag file about initialized backend it shouldn't exists
+    # if the file existed before it might be a broken cleanup
+    if [ -e "$BACKEND_READY_FLAG" ]; then
+        echo "Anaconda backend flag file still exists! Probably a problem with cleanup. Removing now!" >&2
+        rm -f "$BACKEND_READY_FLAG" 2>/dev/null
+    fi
+    # early execution of Firefox to reduce starting time
+    mkdir -p /run/anaconda
+    /usr/libexec/anaconda/webui-desktop -t live /cockpit/@localhost/anaconda-webui/index.html &
+    echo -n "$!" > /run/anaconda/webui_script.pid
+}
+
+start_anaconda() {
+    # start Firefox to use Anaconda Web UI if it is installed
+    if [ -e "/usr/share/cockpit/anaconda-webui" ]; then
+        start_anaconda_web_ui
+    fi
+    # start Anaconda main process
+    $ANACONDA "$@"
+}
+
+# If no wayland socket is set, force x11 so that it loads correctly
+if [ -z "$WAYLAND_DISPLAY" ]; then
+    export GDK_BACKEND=x11
 fi
 
-# Force the X11 backend since sudo and wayland do not mix
-export GDK_BACKEND=x11
-
 if [ -x /usr/bin/udisks ]; then
-    /usr/bin/udisks --inhibit -- $ANACONDA $*
+    /usr/bin/udisks --inhibit -- start_anaconda "$@"
 else
-    $ANACONDA $*
+    start_anaconda "$@"
 fi
 
 if [ -e /tmp/updates.img ]; then rm /tmp/updates.img; fi
 
-# try to teardown the filesystems if this was an image install
-if [ $IMAGE_INSTALL = 1 ]; then
-    anaconda-cleanup
-fi
-
 rm -f /dev/.in_sysinit 2>/dev/null
 
 if [ -n "$current" ]; then
-    /usr/sbin/setenforce $current
+    /usr/sbin/setenforce "$current"
 fi

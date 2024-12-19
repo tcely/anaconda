@@ -18,12 +18,13 @@
 # Red Hat, Inc.
 #
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.dbus import DBus
 from pyanaconda.modules.boss.boss_interface import BossInterface
-from pyanaconda.modules.boss.module_manager import ModuleManager
 from pyanaconda.modules.boss.install_manager import InstallManager
+from pyanaconda.modules.boss.installation import CopyLogsTask, SetContextsTask
 from pyanaconda.modules.boss.kickstart_manager import KickstartManager
-from pyanaconda.modules.boss.user_interface import UIModule
+from pyanaconda.modules.boss.module_manager import ModuleManager
 from pyanaconda.modules.common.base import Service
 from pyanaconda.modules.common.constants.services import BOSS
 from pyanaconda.modules.common.containers import TaskContainer
@@ -41,7 +42,6 @@ class Boss(Service):
         self._module_manager = ModuleManager()
         self._kickstart_manager = KickstartManager()
         self._install_manager = InstallManager()
-        self._ui_module = UIModule()
 
         self._module_manager.module_observers_changed.connect(
             self._kickstart_manager.on_module_observers_changed
@@ -54,10 +54,6 @@ class Boss(Service):
     def publish(self):
         """Publish the boss."""
         TaskContainer.set_namespace(BOSS.namespace)
-
-        # Publish submodules.
-        self._ui_module.publish()
-
         DBus.publish_object(BOSS.object_path, BossInterface(self))
         DBus.register_service(BOSS.service_name)
 
@@ -104,10 +100,28 @@ class Boss(Service):
         """
         return self._install_manager.collect_requirements()
 
+    def install_with_tasks(self):
+        """Return installation tasks of this module.
+
+        FIXME: This is a temporary workaround for the Web UI.
+
+        :return: a list of DBus paths of the installation tasks
+        """
+        from pyanaconda.installation import RunInstallationTask
+        from pyanaconda.kickstart import superclass
+        from pyanaconda.payload.migrated import ActiveDBusPayload
+
+        return [
+            RunInstallationTask(
+                payload=ActiveDBusPayload(),
+                ksdata=superclass(),
+            )
+        ]
+
     def collect_configure_runtime_tasks(self):
         """Collect tasks for configuration of the runtime environment.
 
-        FIXME: This method temporarily uses only addons.
+        FIXME: This is a temporary workaround for add-ons.
 
         :return: a list of task proxies
         """
@@ -116,8 +130,7 @@ class Boss(Service):
     def collect_configure_bootloader_tasks(self, kernel_versions):
         """Collect tasks for configuration of the bootloader.
 
-        FIXME: This method temporarily uses only addons.
-        FIXME: This is a temporary workaround. The method might change.
+        FIXME: This is a temporary workaround for add-ons.
 
         :param kernel_versions: a list of kernel versions
         :return: a list of task proxies
@@ -127,7 +140,7 @@ class Boss(Service):
     def collect_install_system_tasks(self):
         """Collect tasks for installation of the system.
 
-        FIXME: This method temporarily uses only addons.
+        FIXME: This is a temporary workaround for add-ons.
 
         :return: a list of task proxies
         """
@@ -141,3 +154,15 @@ class Boss(Service):
         log.info("Setting locale of all modules to %s.", locale)
         super().set_locale(locale)
         self._module_manager.set_modules_locale(locale)
+
+    def finish_installation_with_tasks(self):
+        """Finish installation with tasks.
+
+        FIXME: This is a temporary workaround for the Boss module.
+
+        :return: a list of installation tasks
+        """
+        return [
+            SetContextsTask(conf.target.system_root),
+            CopyLogsTask(conf.target.system_root)
+        ]

@@ -17,16 +17,20 @@
 # Red Hat, Inc.
 #
 
-from pyanaconda.ui import common
+from simpleline.render.adv_widgets import (
+    ErrorDialog,
+    GetInputScreen,
+    GetPasswordInputScreen,
+    YesNoDialog,
+)
+from simpleline.render.screen import Prompt, UIScreen
+from simpleline.render.screen_handler import ScreenHandler
 
-from pyanaconda.core import util, constants
 from pyanaconda import input_checking
+from pyanaconda.core import constants, util
 from pyanaconda.core.i18n import _
 from pyanaconda.core.users import crypt_password
-
-from simpleline.render.adv_widgets import ErrorDialog, GetInputScreen, GetPasswordInputScreen, YesNoDialog
-from simpleline.render.screen import UIScreen, Prompt
-from simpleline.render.screen_handler import ScreenHandler
+from pyanaconda.ui import common
 
 
 def reporting_callback(message):
@@ -82,6 +86,15 @@ def report_check_func():
 
 class IpmiErrorDialog(ErrorDialog):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # This dialog is run by the error handler. The handler
+        # might be triggered by an error from a different thread.
+        # It is possible that we are already asking for a user
+        # input when we decide to show the dialog. That would
+        # violate the concurrency check, so disable it.
+        self.input_manager.skip_concurrency_check = True
+
     def input(self, args, key):
         """Call IPMI ABORTED. Everything else will be done by original implementation."""
         util.ipmi_report(constants.IPMI_ABORTED)
@@ -92,27 +105,21 @@ class TUIObject(UIScreen, common.UIObject):
     """Base class for Anaconda specific TUI screens. Implements the
     common pyanaconda.ui.common.UIObject interface"""
 
-    helpFile = None
-
     def __init__(self, data):
         UIScreen.__init__(self)
         common.UIObject.__init__(self, data)
-        self.title = u"Default title"
+        self.title = "Default title"
 
     @property
     def showable(self):
         return True
-
-    @property
-    def has_help(self):
-        return self.helpFile is not None
 
     def refresh(self, args=None):
         """Put everything to display into self.window list."""
         UIScreen.refresh(self, args)
 
 
-class Dialog(object):
+class Dialog:
 
     def __init__(self, title, conditions=None, report_func=reporting_callback):
         """Get all required information and ask user for input.
@@ -213,6 +220,15 @@ class PasswordDialog(Dialog):
         self._secret_type = secret_type
         self._process_password = process_func
         self._dialog_message = message
+        self._username = ""
+
+    @property
+    def username(self):
+        return self._username
+
+    @username.setter
+    def username(self, new_username):
+        self._username = new_username
 
     def run(self):
         """Get password input from user and call setter callback at the end.
@@ -254,6 +270,8 @@ class PasswordDialog(Dialog):
         password_check_request.password = password
         password_check_request.password_confirmation = ""
         password_check_request.policy = self._policy
+        # configure username for checking
+        password_check_request.username = self.username
 
         # validate the password
         password_check = input_checking.PasswordValidityCheck()

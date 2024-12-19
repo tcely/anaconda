@@ -26,25 +26,17 @@ case $kickstart in
         # Construct URL for nfs:auto.
         if [ "$kickstart" = "nfs:auto" ]; then
             # Construct kickstart URL from dhcp info.
-            # Server is next_server, or the dhcp server itself if missing.
-            . /tmp/net.$netif.dhcpopts
-            server="${new_next_server:-$new_dhcp_server_identifier}"
             # Filename is dhcp 'filename' option, or '/kickstart/' if missing.
             filename="/kickstart/"
-            # Read the dhcp lease file and see if we can find 'filename'.
-            { while read line; do
-                val="${line#filename }"
-                if [ "$val" != "$line" ]; then
-                    eval "filename=$val" # Drop quoting and semicolon.
-                fi
-              done
-            } < /tmp/net.$netif.lease
+            . "/tmp/net.$netif.dhcpopts"
+            # Server is next_server, or the dhcp server itself if missing.
+            server="${new_next_server:-$new_dhcp_server_identifier}"
             kickstart="nfs:$server:$filename"
         fi
 
         # URLs that end in '/' get '$IP_ADDR-kickstart' appended.
         if [[ $kickstart == nfs*/ ]]; then
-            kickstart="${kickstart}${new_ip_address:=$(ip -4 addr show ${netif} | sed -n -e '/^ *inet / s|^ *inet \([^/]\+\)/.*$|\1|p')}-kickstart"
+            kickstart="${kickstart}${new_ip_address:=$(ip -4 addr show "${netif}" | sed -n -e '/^ *inet / s|^ *inet \([^/]\+\)/.*$|\1|p')}-kickstart"
         fi
 
         # Use the prepared url.
@@ -59,8 +51,13 @@ case $kickstart in
         # We will try them one by one until we succeed.
         locations="$(</tmp/ks_urls)"
     ;;
+    cdrom*|hd*)
+        # do not print the unknown network kickstart in case the local kickstart file
+        # is processed in the fetch-kickstart-disk script
+        return 0
+    ;;
     *)
-        warn "unknown network kickstart URL: $kickstart"
+        warn_critical "unknown network kickstart URL: $kickstart"
         return 1
     ;;
 esac
@@ -73,7 +70,7 @@ else
 fi
 
 # Create a new job.
-cat > $newjob <<__EOT__
+cat > "$newjob" <<__EOT__
 . /lib/url-lib.sh
 . /lib/anaconda-lib.sh
 locations="$locations"
@@ -89,7 +86,7 @@ for kickstart in \$locations; do
         run_kickstart
         break
     else
-        warn "anaconda: failed to fetch kickstart from \$kickstart"
+        warn_critical "anaconda: failed to fetch kickstart from \$kickstart"
     fi
 done
 rm \$job # remove self from initqueue

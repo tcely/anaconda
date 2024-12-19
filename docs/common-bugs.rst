@@ -24,6 +24,11 @@ Missing logs
     You can find them during the installation in ``/tmp`` or on the installed system in
     ``/var/log/anaconda/``.
 
+    If you are gathering the log files manually - outside of the automatic bug reporter - please
+    make sure that either the file ``syslog`` or ``journal.log`` is included. If you are in the
+    Live CD environment, and neither file exists, please create the journal dump manually
+    by running ``journalctl > journal.log`` and attach the file.
+
 DBus issues
 -----------
 
@@ -113,7 +118,8 @@ Changes in package groups and environments
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 :Issue: The reporter wants a new package to be installed by default.
-:Solution: Reassigning to comps.
+:Solution: The package groups and environments are defined by comps (see
+    https://pagure.io/fedora-comps/). Reassigning to distribution.
 :Example: `rhbz#1787018 <https://bugzilla.redhat.com/show_bug.cgi?id=1787018>`_
 
 Corrupted ISO
@@ -151,6 +157,18 @@ System upgrades
 :Issue: The system was upgraded, not installed.
 :Solution: Anaconda is not doing system upgrades. That is done by dnf-system-upgrade.
     Reassigning to dnf.
+
+Missing ``systemd-machine-id-setup`` on Live
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: The installation from Live media stopped with traceback about
+    ``[Errno 2] No such file or directory: systemd-machine-id-setup``.
+:Solution: None known yet. Try checking the hardware, downloading the Live ISO again and
+    then re-run the installation.
+
+    This is probably the first program to run from the installed system. The error can be caused
+    by a corrupted media or failing hardware, although other causes are possible too.
+:Example: `rhbz#1963778 <https://bugzilla.redhat.com/show_bug.cgi?id=1963778>`_
 
 Storage issues
 --------------
@@ -203,7 +221,7 @@ Unlocked LUKS
 :Issue: The storage configuration fails with a message "luks device not configured".
 :Solution: Anaconda doesn't support LUKS devices that are unlocked outside the installer. The
     device has to be unlocked in Anaconda.
-:Example: `rhbz#1624856 <https://bugzilla.redhat.com/show_bug.cgi?id=1624856>`_
+:Example: `rhbz#2019455 <https://bugzilla.redhat.com/show_bug.cgi?id=2019455>`_
 
 Undetected partitions
 ^^^^^^^^^^^^^^^^^^^^^
@@ -267,6 +285,18 @@ Bug in bootloader
     or ``storage.log`` for more information.
 :Solution: Could the bootloader team have a look at this bug, please?
 
+GRUB2 does not detect MD raid (level 1) 1.0 superblocks on 4k block devices
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: Installation failed on ``grub2-mkconfig`` command, with actual error
+    like: ``grub2-probe error disk mduuid/4589a761dde10c78a204bcfd705df061 not found.``
+    on block device with 4096 bytes sector size.
+:Solution: use workaround.
+:Workaround: make your EFI partitions as second disk partitions, i.e.
+  ``nvme0n1p1`` is for ``/`` RAID, and ``nvme0n1p2`` is partition for the
+  ``/boot/efi`` RAID.
+:Example: `rhbz#1443144 <https://bugzilla.redhat.com/show_bug.cgi?id=1443144>`_
+
 Disable ``rhgb quiet``
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -288,6 +318,22 @@ Invalid environment block
 
 :Solution: Duplicate of the bug 1814690.
 :Example: `rhbz#1823104 <https://bugzilla.redhat.com/show_bug.cgi?id=1823104>`_
+
+'utf-8' codec can't decode byte
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: Installing the boot loader fails with an exception UnicodeDecodeError. Logs contain a
+    message along these lines:
+
+        UnicodeDecodeError: 'utf-8' codec can't decode byte 0x?? in position ??: invalid start byte
+
+    Actual byte, position, and byte type (start, continuation, ???) vary.
+
+    This is caused by ``efibootmgr`` which prints raw non-UTF-8 data to output.
+
+:Solution: Duplicate of bug `2148480 <https://bugzilla.redhat.com/show_bug.cgi?id=2148480>`_.
+:Example: `rhbz#2238691 <https://bugzilla.redhat.com/show_bug.cgi?id=2238691>`_
+
 
 User interface issues
 ---------------------
@@ -322,6 +368,16 @@ Rotated screen
 :Solution: It seems to be a problem with drivers. Reassigning to kernel.
 :Contact: kernel or iio-sensor-proxy
 
+No video output with the MGA G200e graphics card
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: There is no video output with MGA G200e graphic card and a 1920x1080 monitor.
+:Solution: Add ``vga=795`` to the boot options before installation.
+    Alternatively it is also possible to select "Troubleshooting"  in the installation image
+    boot menu and install using the basic graphics mode.
+    Please note that the installed system will boot into text mode if installed in basic graphics mode.
+:Example: `rhbz#2000537 <https://bugzilla.redhat.com/show_bug.cgi?id=2000537>`_
+
 Localization issues
 -------------------
 
@@ -333,6 +389,49 @@ Changes in localization data
 :Issue: Languages, locales, keyboard layouts or territories are not correct.
 :Solution: This content is provided by langtable. Reassigning.
 :Example: `rhbz#1698984 <https://bugzilla.redhat.com/show_bug.cgi?id=1698984>`_
+
+Network issues
+--------------
+
+/mnt/sysroot/etc/resolv.conf issue in Fedora 35
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: Due to systemd update Fedora 35 installation tracebacks with ``dasbus.error.DBusError: [Errno 2] No such file or directory: '/mnt/sysroot/etc/resolv.conf'``.
+Happens since systemd-249.10-1.fc35, present also in systemd-249.11-1.fc35, systemd-249.12-1.fc35, ... ?
+
+:Solution: Reassign to systemd https://bugzilla.redhat.com/show_bug.cgi?id=2074083.
+
+:Workaround: https://bugzilla.redhat.com/show_bug.cgi?id=2074083#c63. Other option could be: install without updates and update after new system boot.
+
+:Example: `rhbz#2083411 <https://bugzilla.redhat.com/show_bug.cgi?id=2083411>`_
+
+Missing /etc/resolv.conf for %post scripts
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:Issue: In case ``systemd-resolved`` package is not installed to target system the ``/etc/resolv.conf`` symlink is not created in installed system root during packages installation and therefore name resolution in ``%post`` kickstart scripts does not work. This should not be a problem for the installed system where ``NetworkManager`` would handle the ``/etc/resolv.conf`` file when ``systemd-resolved`` is not present.
+
+:Solution: Anaconda should try hard to avoid handling ``/etc/resolv.conf`` file on its own so that it does not interfere with services responsible for it - ``systemd-resolved`` or ``NetworkManager``. In case ``systemd-resolved`` is not installed there needs to be another mechanism provided by the origin of such a choice, for example a ``%post`` script copying the ``resolv.conf`` to the chroot environment as suggested in the workaround.
+
+:Workaround: Copy the symlink created by ``systemd-resolved`` in installer environment to the chroot in a ``%post --nochroot`` script.
+
+    For example::
+
+        %post --nochroot
+        if [ ! -e /mnt/sysimage/etc/resolf.conf ]; then
+          cp -P /etc/resolv.conf /mnt/sysimage/etc/resolv.conf
+        fi
+        %end
+
+    The ``resolv.conf`` file should be removed after the work in ``%post`` scripts requiring it is finished, so that ``NetworkManager`` can take care of ``/etc/resolv.conf`` management when booting into installed system.
+
+    For example in a ``%post`` script run in chroot::
+
+        %post
+        # do some stuff
+        rm /etc/resolv.conf
+        %end
+
+:Example: `rhbz#2101527 <https://bugzilla.redhat.com/show_bug.cgi?id=2101527>`_
 
 Kickstart issues
 ----------------
@@ -365,8 +464,8 @@ Invalid partitioning in the output kickstart file
     Reassigning to blivet.
 :Example: `rhbz#1851230 <https://bugzilla.redhat.com/show_bug.cgi?id=1851230>`_
 
-The `ignoredisk --only-use` command hides installation sources
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The ``ignoredisk --only-use`` command hides installation sources
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 :Issue: The installer fails to find an installation media on the USB drive if the `ignoredisk
     --only-use=` command is specified in a kickstart file.
@@ -380,8 +479,8 @@ The `ignoredisk --only-use` command hides installation sources
 
 :Example: `rhbz#1945779 <https://bugzilla.redhat.com/show_bug.cgi?id=1945779>`_
 
-Missing options of the `repo` command
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Missing options of the ``repo`` command
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 :Issue: The `repo` kickstart command doesn't support the requested configuration options.
 :Workaround: We get a lot of feature requests for the `repo` command, but we don't really want
@@ -405,49 +504,28 @@ Missing options of the `repo` command
         EOF
         %end
 
-Enabling root password SSH login via password.
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The ``autopart --nohome`` command doesn't fill available space
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-:Issue: There is no kickstart command or option to enable password based root login via SSH.
+:Issue: The partitioning layout generated by the ``autopart --nohome`` kickstart command doesn't
+    have to fill all available space on the selected disks unlike the ``autopart`` command. The
+    default partitioning (used by autopart) is defined in the Anaconda configuration files, for
+    example like this::
 
-:Solution: It's really not good practice to enable password based SSH root login on a machine
-    as the attacker only needs to guess a password for root and then gets full access to the machine.
-    For a user account the attacker needs to guess both the username and password and might only get to
-    a non-admin user, making such an attack much harder and less worthwhile.
+        default_partitioning =
+          /     (min 1 GiB, max 70 GiB)
+          /home (min 500 MiB, free 50 GiB)
 
-    This was the reasoning for the OpenSSH project `disabling password logins for root back in 2015
-    <http://www.openssh.com/txt/release-7.0>`_.
-    Fedora patched this out temporarily but in 2019 it was decided to `drop this downstream patch and respect
-    the upstream behavior <https://fedoraproject.org/wiki/Changes/DisableRootPasswordLoginInSshd>`_
-    of not allowing password based root login over SSH by default.
-    Anaconda accommodated this change by adding and override checkbox in the root password GUI to make the transition
-    easier for users still needing SSH login via root during the transition period.
+    It means that the size of the / partition can be at most 70 GiB, but the size of /home is
+    unlimited. The ``--nohome`` option just skips the request for the /home partition without any
+    other changes. It is the same as running autopart with the following definition::
 
-    While there is currently no set deadline for removing the checkbox from the GUI, it is still considered a temporary
-    element helping users during the transition to future where no use cases requiring password based root login exist.
-    The option will most likely be dropped in the longer term, when it is considered no longer necessary
-    - of course with a proper heads-up and feedback period for the Anaconda user community.
+        default_partitioning =
+          /     (min 1 GiB, max 70 GiB)
 
-    This is also the reason why we did not add any kickstart support for the SSH root password login override
-    - dropping something from the GUI is certainly not without impact, but doing the same for a kickstart
-    command or option is much harder.
+    Since the / partition has a limited size, it cannot grow more than that. This behaviour cannot
+    be changed without breaking backward compatibility. Please, use partitioning commands (like
+    ``part --grow``) to create this kind of partitioning.
 
-    Also as already mentioned above, enabling password based root login over SSH can quite significantly compromise
-    the security of a system and should be an explicit and easy to spot action performed by the user during the installation.
-    Clicking a checkbox satisfies this condition in the GUI.
-
-    A kickstart command option on the other hand could be easily missed during the common practice of reusing kickstarts
-    and kickstart snippets - there are already quite a few options even just for the rootpw command and one more option copy pasted
-    from a test-run kickstart could easily by missed & turn all production image installs vulnerable to remote password guessing attack.
-
-:Workaround: If you really need to enable password based SSH root login, you can just easily use the following two line
-    %post script (one line without comments)::
-
-        %post
-        # permit root login via SSH with password authetication
-        echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/01-permitrootlogin.conf
-        %end
-
-    This does 100% the same as a rootpw command option would, but unlike the option is quite explicit about what it does
-    and easy to spot in a kickstart file. Or even better, use the sshkey command to use a key instead of password,
-    making a remote guessing attack essentially impossible.
+:Solution: Close as NOTABUG.
+:Example: `rhbz#1832570 <https://bugzilla.redhat.com/show_bug.cgi?id=1832570>`_

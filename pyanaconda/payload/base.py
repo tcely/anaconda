@@ -29,13 +29,9 @@ __all__ = ["Payload"]
 
 class Payload(metaclass=ABCMeta):
     """Payload is an abstract class for OS install delivery methods."""
-    def __init__(self, data):
-        """Initialize Payload class
 
-        :param data: This param is a kickstart.AnacondaKSHandler class.
-        """
-        self.data = data
-
+    def __init__(self):
+        """Initialize the payload."""
         # A DBus proxy of the Payloads service.
         self._service_proxy = PAYLOADS.get_proxy()
 
@@ -91,7 +87,7 @@ class Payload(metaclass=ABCMeta):
         """Is the payload ready?"""
         return True
 
-    def setup(self):
+    def setup(self, *args, **kwargs):
         """Do any payload-specific setup."""
         pass
 
@@ -122,13 +118,14 @@ class Payload(metaclass=ABCMeta):
 
     def _progress_cb(self, step, message):
         """Callback for task progress reporting."""
-        from pyanaconda.progress import progressQ
-        progressQ.send_message(message)
+        log.info(message)
 
     def pre_install(self):
         """Perform pre-installation tasks."""
         # FIXME: Merge the pre-installation tasks with the installation tasks.
-        from pyanaconda.modules.payloads.installation import PrepareSystemForInstallationTask
+        from pyanaconda.modules.payloads.installation import (
+            PrepareSystemForInstallationTask,
+        )
         PrepareSystemForInstallationTask(conf.target.system_root).run()
 
     def install(self):

@@ -15,34 +15,88 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from collections import namedtuple
+from functools import cmp_to_key
 from urllib.parse import quote, unquote
+
+import rpm
 
 from pyanaconda.core.i18n import _
 from pyanaconda.core.regexes import URL_PARSE
-from pyanaconda.core.util import ensure_str
+from pyanaconda.core.string import split_in_two
+
+NFSUrl = namedtuple("NFSUrl", ["options", "host", "path"])
+HDDUrl = namedtuple("HDDUrl", ["device", "path"])
+
+rpm_version_key = cmp_to_key(rpm.labelCompare)  # pylint: disable=no-member
+
+
+def parse_hdd_url(url):
+    """Parse HDD URL into components.
+
+    :param str url: a raw URL, including "hd:"
+    :return HDDUrl: a tuple with a device and a path
+    """
+    # Remove the prefix.
+    url = url.removeprefix("hd:")
+
+    # Split the specified URL into two components.
+    device, path = split_in_two(url, delimiter=":")
+
+    # Return a named tuple.
+    return HDDUrl(device=device, path=path)
+
+
+def create_hdd_url(device, path=None):
+    """Compose the HDD URL from components.
+
+    :param str device: a device spec
+    :param str path: a path or None
+    """
+    if not device:
+        return ""
+
+    if path:
+        return ":".join(["hd", device, path])
+    else:
+        return ":".join(["hd", device])
 
 
 def parse_nfs_url(nfs_url):
     """Parse NFS URL into components.
 
-    :param str nfs_url: The raw URL, including "nfs:"
-    :return: Tuple with options, host, and path
-    :rtype: (str, str, str) or None
+    :param str nfs_url: a URL with the nfs: or nfs:// prefix
+    :return NFSUrl: a tuple with options, host and path
     """
-    options = ''
-    host = ''
-    path = ''
-    if nfs_url:
-        s = nfs_url.split(":")
-        s.pop(0)
-        if len(s) >= 3:
-            (options, host, path) = s[:3]
-        elif len(s) == 2:
-            (host, path) = s
-        else:
-            host = s[0]
+    host, path, options = "", "", ""
 
-    return options, host, path
+    if nfs_url.startswith("nfs://"):
+        args = nfs_url.removeprefix("nfs://").split(":")
+
+        # Parse nfs://<server>:<path>
+        if len(args) >= 2:
+            host, path = args[:2]
+
+        # Parse nfs://<server>
+        elif len(args) >= 1:
+            host = args[0]
+
+    elif nfs_url.startswith("nfs:"):
+        args = nfs_url.removeprefix("nfs:").split(":")
+
+        # Parse nfs:<options>:<server>:<path>
+        if len(args) >= 3:
+            options, host, path = args[:3]
+
+        # Parse nfs:<server>:<path>
+        elif len(args) >= 2:
+            host, path = args[:2]
+
+        # Parse nfs:<server>
+        elif len(args) >= 1:
+            host = args[0]
+
+    return NFSUrl(options=options, host=host, path=path)
 
 
 def create_nfs_url(host, path, options=None):
@@ -55,13 +109,15 @@ def create_nfs_url(host, path, options=None):
     :return: NFS url created from the components given
     :rtype: str
     """
-    if host == "":
+    if not host:
         return ""
 
     if options:
-        return "nfs:{opts}:{server}:{path}".format(opts=options, server=host, path=path)
-
-    return "nfs:{server}:{path}".format(server=host, path=path)
+        return ":".join(["nfs", options, host, path])
+    elif path:
+        return ":".join(["nfs", host, path])
+    else:
+        return ":".join(["nfs", host])
 
 
 def split_protocol(url):
@@ -97,7 +153,7 @@ class ProxyStringError(Exception):
 
 
 # TODO: Add tests
-class ProxyString(object):
+class ProxyString:
     """ Handle a proxy url."""
     def __init__(self, url=None, protocol="http://", host=None, port="3128",
                  username=None, password=None):
@@ -116,12 +172,12 @@ class ProxyString(object):
         ProxyString.url is the full url including username:password@
         ProxyString.noauth_url is the url without username:password@
         """
-        self.url = ensure_str(url, keep_none=True)
-        self.protocol = ensure_str(protocol, keep_none=True)
-        self.host = ensure_str(host, keep_none=True)
-        self.port = str(port)
-        self.username = ensure_str(username, keep_none=True)
-        self.password = ensure_str(password, keep_none=True)
+        self.url = url
+        self.protocol = protocol
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
         self.proxy_auth = ""
         self.noauth_url = None
 
@@ -155,10 +211,10 @@ class ProxyString(object):
         self.protocol = m.group("protocol") or "http://"
 
         if m.group("username"):
-            self.username = ensure_str(unquote(m.group("username")))
+            self.username = unquote(m.group("username"))
 
         if m.group("password"):
-            self.password = ensure_str(unquote(m.group("password")))
+            self.password = unquote(m.group("password"))
 
         if m.group("host"):
             self.host = m.group("host")

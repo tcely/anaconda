@@ -17,26 +17,31 @@
 #
 # Red Hat Author(s): David Lehman <dlehman@redhat.com>
 #
+import logging
 import os
 
 from blivet.blivet import Blivet
+from blivet.devicelibs.crypto import DEFAULT_LUKS_VERSION
 from blivet.devices import BTRFSSubVolumeDevice
+from blivet.flags import flags as blivet_flags
 from blivet.formats import get_format
 from blivet.formats.disklabel import DiskLabel
 from blivet.size import Size
-from blivet.devicelibs.crypto import DEFAULT_LUKS_VERSION
 
-from pyanaconda.core import util
-from pyanaconda.modules.storage.bootloader import BootLoaderFactory
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import shortProductName
-from pyanaconda.modules.storage.devicetree.fsset import FSSet
-from pyanaconda.modules.storage.devicetree.utils import download_escrow_certificate, \
-    find_live_backing_device
-from pyanaconda.modules.storage.devicetree.root import find_existing_installations
+from pyanaconda.core.constants import DRACUT_REPO_DIR, LIVE_MOUNT_POINT
+from pyanaconda.core.path import set_system_root
+from pyanaconda.core.product import get_product_short_name
 from pyanaconda.modules.common.constants.services import NETWORK
+from pyanaconda.modules.storage.bootloader import BootLoaderFactory
+from pyanaconda.modules.storage.devicetree.fsset import FSSet
+from pyanaconda.modules.storage.devicetree.root import find_existing_installations
+from pyanaconda.modules.storage.devicetree.utils import (
+    download_escrow_certificate,
+    find_backing_device,
+    find_stage2_device,
+)
 
-import logging
 log = logging.getLogger("anaconda.storage")
 
 __all__ = ["create_storage"]
@@ -55,11 +60,12 @@ class InstallerStorage(Blivet):
 
     def __init__(self):
         super().__init__()
+        self.roots = []
         self.protected_devices = []
         self._escrow_certificates = {}
         self._bootloader = None
         self.fsset = FSSet(self.devicetree)
-        self._short_product_name = shortProductName
+        self._short_product_name = get_product_short_name()
         self._default_luks_version = DEFAULT_LUKS_VERSION
 
         # Set the default filesystem type.
@@ -67,6 +73,9 @@ class InstallerStorage(Blivet):
 
         # Set the default LUKS version.
         self.set_default_luks_version(conf.storage.luks_version or self.default_luks_version)
+
+        # Enable GPT discoverable partitions
+        blivet_flags.gpt_discoverable_partitions = conf.storage.gpt_discoverable_partitions
 
     @property
     def bootloader(self):
@@ -279,6 +288,7 @@ class InstallerStorage(Blivet):
         identify protected devices.
         """
         protected = []
+        protected_with_ancestors = []
 
         # Resolve the protected device specs to devices.
         for spec in self.protected_devices:
@@ -288,29 +298,45 @@ class InstallerStorage(Blivet):
                 log.debug("Protected device spec %s resolved to %s.", spec, dev.name)
                 protected.append(dev)
 
+        # Find the stage2 backing device and its parents.
+        stage2_device = find_stage2_device(self.devicetree)
+
+        if stage2_device:
+            log.debug("Resolved stage2 device to %s.", stage2_device.name)
+            protected.append(stage2_device)
+
         # Find the live backing device and its parents.
-        live_device = find_live_backing_device(self.devicetree)
+        live_device = find_backing_device(self.devicetree, LIVE_MOUNT_POINT)
 
         if live_device:
             log.debug("Resolved live device to %s.", live_device.name)
-            protected.append(live_device)
-            protected.extend(live_device.parents)
+            protected_with_ancestors.append(live_device)
+
+        # Find the backing device of a stage2 source and its parents.
+        source_device = find_backing_device(self.devicetree, DRACUT_REPO_DIR)
+
+        if source_device:
+            log.debug("Resolved a stage2 source device to %s.", source_device.name)
+            protected.append(source_device)
 
         # For image installation setup_disk_images method marks all local
         # storage disks as ignored so they are protected from teardown.
         # Here we protect also cdrom devices from tearing down that, in case of
         # cdroms, involves unmounting which is undesirable (see bug #1671713).
-        protected.extend(dev for dev in self.devicetree.devices if dev.type == "cdrom")
+        protected_with_ancestors.extend(dev for dev in self.devicetree.devices
+                                        if dev.type == "cdrom")
 
         # Protect also all devices with an iso9660 file system. It will protect
         # NVDIMM devices that can be used only as an installation source anyway
         # (see the bug #1856264).
-        protected.extend(dev for dev in self.devicetree.devices if dev.format.type == "iso9660")
+        protected_with_ancestors.extend(dev for dev in self.devicetree.devices
+                                        if dev.format.type == "iso9660")
 
         # Mark the collected devices as protected.
         for dev in protected:
-            log.debug("Marking device %s as protected.", dev.name)
-            dev.protected = True
+            self._mark_protected_device(dev)
+        for dev in protected_with_ancestors:
+            self._mark_protected_device(dev, include_ancestors=True)
 
     def protect_devices(self, protected_names):
         """Protect given devices.
@@ -324,22 +350,42 @@ class InstallerStorage(Blivet):
         # Skip devices that should stay protected.
         for spec in unprotected - protected:
             device = self.devicetree.resolve_device(spec)
-
-            if device:
-                log.debug("Marking device %s as unprotected.", device.name)
-                device.protected = False
+            self._mark_unprotected_device(device)
 
         # Mark protected devices.
         # Skip devices that are already protected.
         for spec in protected - unprotected:
             device = self.devicetree.resolve_device(spec)
-
-            if device:
-                log.debug("Marking device %s as protected.", device.name)
-                device.protected = True
+            self._mark_protected_device(device)
 
         # Update the list.
         self.protected_devices = protected_names
+
+    def _mark_protected_device(self, device, include_ancestors=False):
+        """Mark a device and its ancestors as protected."""
+        if not device:
+            return
+
+        device.protected = True
+        log.debug("Marking device %s as protected.", device.name)
+        if include_ancestors:
+            for d in device.ancestors:
+                log.debug("Marking ancestor %s of device %s as protected.",
+                          d.name, device.name)
+                d.protected = True
+
+    def _mark_unprotected_device(self, device, include_ancestors=False):
+        """Mark a device and its ancestors as unprotected."""
+        if not device:
+            return
+
+        device.protected = False
+        log.debug("Marking device %s as unprotected.", device.name)
+        if include_ancestors:
+            for d in device.ancestors:
+                log.debug("Marking ancestor %s of device %s as unprotected.",
+                          d.name, device.name)
+                d.protected = False
 
     @property
     def usable_disks(self):
@@ -375,15 +421,15 @@ class InstallerStorage(Blivet):
         # Remove duplicate names from the list.
         return sorted(set(disks), key=lambda d: d.name)
 
-    def select_disks(self, selected_names):
+    def select_disks(self, selected_ids):
         """Select disks that should be used for the installation.
 
         Hide usable disks that are not selected.
 
-        :param selected_names: a list of disk names
+        :param selected_names: a list of disk device IDs
         """
         for disk in self.usable_disks:
-            if disk.name not in selected_names:
+            if disk.device_id not in selected_ids:
                 if disk in self.devices:
                     self.devicetree.hide(disk)
             else:
@@ -392,7 +438,7 @@ class InstallerStorage(Blivet):
 
     def _get_hostname(self):
         """Return a hostname."""
-        ignored_hostnames = {None, "", 'localhost', 'localhost.localdomain'}
+        ignored_hostnames = {None, "", 'localhost', 'localhost.localdomain', 'localhost-live'}
 
         network_proxy = NETWORK.get_proxy()
         hostname = network_proxy.Hostname
@@ -433,14 +479,14 @@ class InstallerStorage(Blivet):
         self.fsset.mount_filesystems(root_path=root_path)
 
         # Set up the sysroot.
-        util.set_system_root(root_path)
+        set_system_root(root_path)
 
     def umount_filesystems(self, swapoff=True):
         # Unmount the root and the filesystems.
         self.fsset.umount_filesystems(swapoff=swapoff)
 
         # Unmount the sysroot.
-        util.set_system_root(None)
+        set_system_root(None)
 
     def parse_fstab(self, chroot=None):
         self.fsset.parse_fstab(chroot=chroot)
@@ -485,3 +531,16 @@ class InstallerStorage(Blivet):
         """
 
         self.fsset.set_fstab_swaps(devices)
+
+    def copy(self):
+        """Create a copy of the storage model."""
+        log.debug("Creating a copy of the storage model.")
+
+        # Create a copy of the Blivet object.
+        new = super().copy()
+
+        # Create proper copies of the collected installation roots.
+        new.roots = [root.copy(storage=new) for root in new.roots]
+
+        log.debug("Finished a copy of the storage model.")
+        return new

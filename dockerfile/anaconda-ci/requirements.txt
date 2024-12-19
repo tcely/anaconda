@@ -1,0 +1,25 @@
+# pip package install list
+# storing it as an independent file enables Dependabot to bump versions with noise and attention
+# silent updates of pylint and astroid usually cause breakages
+# for format details see https://pip.pypa.io/en/stable/reference/requirements-file-format/
+
+# unit tests of all kinds
+pocketlint  # translatable strings and translations, used by pylint and glade tests
+coverage
+rpmfluff  # rpm mocking
+freezegun  # time manipulation
+pytest
+
+# jinja templates
+pyyaml
+jinja2
+
+# pylint and its supporting libs
+pylint == 3.3.2
+astroid == 3.3.6
+
+# ruff for fast linting
+ruff == 0.8.3
+
+# vulture for dead code analysis
+vulture == 2.14

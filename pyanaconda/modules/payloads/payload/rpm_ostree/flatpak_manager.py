@@ -19,21 +19,24 @@
 #
 import os
 import shutil
-import gi
-
 from abc import ABC, abstractmethod
 
+import gi
+
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.glib import Bytes, GError, Variant, VariantType
 from pyanaconda.core.i18n import _
-from pyanaconda.core.glib import GError, VariantType, Variant, Bytes
 from pyanaconda.modules.common.errors.installation import PayloadInstallationError
-from pyanaconda.progress import progressQ
 
 gi.require_version("Flatpak", "1.0")
 gi.require_version("Gio", "2.0")
 
-from gi.repository.Flatpak import Transaction, Installation, Remote, \
-    TransactionOperationType, TransactionErrorDetails
+from gi.repository.Flatpak import (
+    Installation,
+    Remote,
+    Transaction,
+    TransactionOperationType,
+)
 from gi.repository.Gio import File
 
 log = get_module_logger(__name__)
@@ -41,13 +44,13 @@ log = get_module_logger(__name__)
 __all__ = ["FlatpakManager"]
 
 
-class FlatpakManager(object):
+class FlatpakManager:
     """Main class to handle flatpak installation and management."""
 
     LOCAL_REMOTE_NAME = "Anaconda"
     LOCAL_REMOTE_PATH = "file:///flatpak/repo"
 
-    def __init__(self, sysroot):
+    def __init__(self, sysroot, callback=None):
         """Create and initialize this class.
 
         This flatpak implementation works on a repository stored in the stage2 image specifically
@@ -55,13 +58,13 @@ class FlatpakManager(object):
         This is a temporal solution for SilverBlue use-case. It will be extended as full featured
         payload in the future.
 
-        :param sysroot: path to the system root
-        :type sysroot: str
+        :param str sysroot: path to the system root
+        :param function callback: a progress reporting callback
         """
         self._sysroot = sysroot
         self._remote_refs_list = None
-
         self._transaction = None
+        self._callback = callback
 
     def initialize_with_system_path(self):
         """Create flatpak objects and set them to install to the result system.
@@ -202,17 +205,16 @@ class FlatpakManager(object):
         :type progress: Flatpak.TransactionProgress instance
         """
         self._log_operation(operation, "started")
-        progressQ.send_message(_("Installing %(flatpak_name)s") %
-                               {"flatpak_name": operation.get_ref()})
+        self._report_progress(_("Installing {}").format(operation.get_ref()))
 
-    def _operation_stopped_callback(self, transaction, operation, commit, result):
+    def _operation_stopped_callback(self, transaction, operation, _commit, result):
         """Existing operation ended.
 
         :param transaction: the main transaction object
         :type transaction: Flatpak.Transaction instance
         :param operation: object describing the operation
         :type operation: Flatpak.TransactionOperation instance
-        :param str commit: operation was committed this is a commit id
+        :param str _commit: operation was committed this is a commit id
         :param result: object containing details about the result of the operation
         :type result: Flatpak.TransactionResult instance
         """
@@ -231,11 +233,18 @@ class FlatpakManager(object):
         :type details: int value of Flatpak.TransactionErrorDetails
         """
         self._log_operation(operation, "failed")
-        log.error("Flatpak installation failed with message: '%s' -- error is fatal %s",
-                  error.message, details == TransactionErrorDetails.FATAL)
+        log.error("Flatpak operation has failed with a message: '%s'", error.message)
+
+    def _report_progress(self, message):
+        """Report a progress message."""
+        if not self._callback:
+            return
+
+        self._callback(message)
 
     @staticmethod
     def _log_operation(operation, state):
+        """Log a Flatpak operation."""
         operation_type_str = TransactionOperationType.to_string(operation.get_operation_type())
         log.debug("Flatpak operation: %s of ref %s state %s",
                   operation_type_str, operation.get_ref(), state)

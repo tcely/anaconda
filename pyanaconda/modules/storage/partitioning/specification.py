@@ -18,16 +18,19 @@
 # Red Hat Author(s): Chris Lumens <clumens@redhat.com>
 #
 
-from blivet.util import stringize, unicodeize
-from pykickstart.constants import AUTOPART_TYPE_PLAIN, AUTOPART_TYPE_BTRFS, AUTOPART_TYPE_LVM, \
-    AUTOPART_TYPE_LVM_THINP
+from pykickstart.constants import (
+    AUTOPART_TYPE_BTRFS,
+    AUTOPART_TYPE_LVM,
+    AUTOPART_TYPE_LVM_THINP,
+    AUTOPART_TYPE_PLAIN,
+)
 
 
-class PartSpec(object):
+class PartSpec:
 
     def __init__(self, mountpoint=None, fstype=None, size=None, max_size=None,
                  grow=False, btr=False, lv=False, thin=False, weight=0,
-                 required_space=0, encrypted=False):
+                 required_space=0, encrypted=False, schemes=None):
         """ Create a new storage specification.  These are used to specify
             the default partitioning layout as an object before we have the
             storage system up and running.  The attributes are obvious
@@ -55,6 +58,7 @@ class PartSpec(object):
             encrypted -- Should this request be encrypted? For logical volume
                          requests, this is satisfied if the PVs are encrypted
                          as in the case of encrypted LVM autopart.
+            schemes -- Create the mount point only for specific schemes if any.
         """
 
         self.mountpoint = mountpoint
@@ -68,6 +72,7 @@ class PartSpec(object):
         self.weight = weight
         self.required_space = required_space
         self.encrypted = encrypted
+        self.schemes = schemes or set()
 
     # Force str and unicode types in case any of the properties are unicode
     def _to_string(self):
@@ -75,12 +80,15 @@ class PartSpec(object):
              "  mountpoint = %(mountpoint)s  lv = %(lv)s"
              "  thin = %(thin)s  btrfs = %(btrfs)s\n"
              "  weight = %(weight)s  fstype = %(fstype)s  encrypted = %(enc)s\n"
-             "  size = %(size)s  max_size = %(max_size)s  grow = %(grow)s\n" %
+             "  size = %(size)s  max_size = %(max_size)s  grow = %(grow)s\n"
+             "  required_space = %(required_space)s\n"
+             "  schemes = %(schemes)s" %
              {"type": self.__class__.__name__, "id": "%#x" % id(self),
               "mountpoint": self.mountpoint, "lv": self.lv, "btrfs": self.btr,
               "weight": self.weight, "fstype": self.fstype, "size": self.size,
               "enc": self.encrypted, "max_size": self.max_size, "grow": self.grow,
-              "thin": self.thin})
+              "thin": self.thin, "required_space": self.required_space,
+              "schemes": self.schemes})
 
         return s
 
@@ -131,10 +139,10 @@ class PartSpec(object):
         return scheme == AUTOPART_TYPE_BTRFS and self.btr
 
     def __str__(self):
-        return stringize(self._to_string())
-
-    def __unicode__(self):
-        return unicodeize(self._to_string())
+        return self._to_string()
 
     def __eq__(self, other):
         return isinstance(other, PartSpec) and vars(self) == vars(other)
+
+    def __repr__(self):
+        return str(self)

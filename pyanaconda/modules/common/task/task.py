@@ -23,18 +23,21 @@
 import traceback
 from abc import abstractmethod
 
-from pyanaconda.core.constants import THREAD_DBUS_TASK
 from dasbus.server.publishable import Publishable
 
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import THREAD_DBUS_TASK
+from pyanaconda.core.threads import thread_manager
 from pyanaconda.modules.common.errors.task import NoResultError
-from pyanaconda.modules.common.task.task_interface import TaskInterface, ValidationTaskInterface
 from pyanaconda.modules.common.task.cancellable import Cancellable
 from pyanaconda.modules.common.task.progress import ProgressReporter
 from pyanaconda.modules.common.task.result import ResultProvider
 from pyanaconda.modules.common.task.runnable import Runnable
-from pyanaconda.threading import threadMgr, AnacondaThread
+from pyanaconda.modules.common.task.task_interface import (
+    TaskInterface,
+    ValidationTaskInterface,
+)
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ['AbstractTask', 'Task', 'ValidationTask']
@@ -76,19 +79,17 @@ class Task(AbstractTask):
     @property
     def is_running(self):
         """Is the task running."""
-        return threadMgr.exists(self._thread_name)
+        return thread_manager.exists(self._thread_name)
 
     def start(self):
         """Start the task in a new thread."""
-        threadMgr.add(
-            AnacondaThread(
-                name=self._thread_name,
-                target=self._thread_run_callback,
-                target_started=self._task_started_callback,
-                target_stopped=self._task_stopped_callback,
-                target_failed=self._thread_failed_callback,
-                fatal=False
-            )
+        thread_manager.add_thread(
+            name=self._thread_name,
+            target=self._thread_run_callback,
+            target_started=self._task_started_callback,
+            target_stopped=self._task_stopped_callback,
+            target_failed=self._thread_failed_callback,
+            fatal=False
         )
 
     def _thread_run_callback(self):
@@ -105,7 +106,7 @@ class Task(AbstractTask):
             log.info("'%s' is canceled.", self.name)
             return
 
-        self.report_progress(self.name, step_number=1)
+        log.info(self.name)
         self._set_result(self.run())
 
     def _task_succeeded_callback(self):
@@ -172,7 +173,7 @@ class Task(AbstractTask):
         Call this method after the task has stopped. If there was raised
         an exception during the task run, it will be raised here again.
         """
-        threadMgr.raise_if_error(self._thread_name)
+        thread_manager.raise_if_error(self._thread_name)
 
     @classmethod
     def _generate_thread_name(cls):

@@ -17,21 +17,34 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# Used for ascii_letters and digits constants
 import os
 import os.path
-import subprocess
-from contextlib import contextmanager
-from pyanaconda.core import util
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.util import strip_accents
-from pyanaconda.core.regexes import GROUPLIST_FANCY_PARSE, NAME_VALID, PORTABLE_FS_CHARS, GROUPLIST_SIMPLE_VALID
-import crypt
-from pyanaconda.core.i18n import _
 import re
+import subprocess
+from pathlib import Path
 from random import SystemRandom as sr
 
+from pyanaconda.core import util
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.i18n import _
+from pyanaconda.core.path import make_directories, open_with_perm
+from pyanaconda.core.regexes import (
+    GROUPLIST_FANCY_PARSE,
+    GROUPLIST_SIMPLE_VALID,
+    NAME_VALID,
+    PORTABLE_FS_CHARS,
+)
+from pyanaconda.core.string import strip_accents
+
+try:
+    # Use the standalone (not deprecated) package when available
+    import crypt_r
+except ImportError:
+    # Fallback to the deprecated standard library module
+    import crypt as crypt_r  # pylint: disable=deprecated-module
+
 from pyanaconda.anaconda_loggers import get_module_logger
+
 log = get_module_logger(__name__)
 
 
@@ -47,21 +60,21 @@ def crypt_password(password):
     # yescrypt is not supported by Python's crypt module,
     # so we need to generate the setting ourselves
     b64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    setting = "$y$j9T$" + "".join(sr().choice(b64) for sc in range(24))
+    setting = "$y$j9T$" + "".join(sr().choice(b64) for _sc in range(24))
 
     # and try to compute the password hash using our yescrypt setting
     try:
-        cryptpw = crypt.crypt(password, setting)
+        cryptpw = crypt_r.crypt(password, setting)
 
     # Fallback to sha512crypt, if yescrypt is not supported
     except OSError:
         log.info("yescrypt is not supported, falling back to sha512crypt")
         try:
-            cryptpw = crypt.crypt(password, crypt.METHOD_SHA512)
+            cryptpw = crypt_r.crypt(password, crypt_r.METHOD_SHA512)
         except OSError as exc:
             raise RuntimeError(_(
                 "Unable to encrypt password: unsupported "
-                "algorithm {}").format(crypt.METHOD_SHA512)
+                "algorithm {}").format(crypt_r.METHOD_SHA512)
             ) from exc
 
     return cryptpw
@@ -76,7 +89,26 @@ def check_username(name):
     """
 
     # Check reserved names.
-    if name in os.listdir("/") + ["root", "home", "daemon", "system"]:
+    reserved_names = [
+        # passwd contents from setup.rpm
+        "root",
+        "bin",
+        "daemon",
+        "adm",
+        "lp",
+        "sync",
+        "shutdown",
+        "halt",
+        "mail",
+        "operator",
+        "games",
+        "ftp",
+        "nobody",
+        # from older version of the function
+        "home",
+        "system",
+    ]
+    if name in os.listdir("/") + reserved_names:
         return False, _("User name is reserved for system: %s") % name
 
     return is_valid_name(name)
@@ -178,7 +210,7 @@ def guess_username(fullname):
     if len(fullname) > 0:
         username = fullname[-1].lower()
     else:
-        username = u""
+        username = ""
 
     # and prefix it with the first name initial
     if len(fullname) > 1:
@@ -242,30 +274,6 @@ def _getgrgid(gid, root):
     return None
 
 
-@contextmanager
-def _ensure_login_defs(root):
-    """Runs a command after creating /etc/login.defs, if necessary.
-
-    The groupadd and useradd utilities need login.defs to exist in the chroot,
-    and if someone is doing a cloud image install or some kind of --nocore thing
-    it may not. An empty one is ok, though. If it's missing, create it,
-    run the command, then clean it up.
-
-    :param str root: filesystem root for the operation
-    """
-    login_defs_path = root + '/etc/login.defs'
-    if not os.path.exists(login_defs_path):
-        open(login_defs_path, "w").close()
-        login_defs_created = True
-    else:
-        login_defs_created = False
-
-    yield
-
-    if login_defs_created:
-        os.unlink(login_defs_path)
-
-
 def create_group(group_name, gid=None, root=None):
     """Create a new user on the system with the given name.
 
@@ -285,8 +293,7 @@ def create_group(group_name, gid=None, root=None):
         args.extend(["-g", str(gid)])
 
     args.append(group_name)
-    with _ensure_login_defs(root):
-        status = util.execWithRedirect("groupadd", args)
+    status = util.execWithRedirect("groupadd", args)
 
     if status == 4:
         raise ValueError("GID %s already exists" % gid)
@@ -294,6 +301,41 @@ def create_group(group_name, gid=None, root=None):
         raise ValueError("Group %s already exists" % group_name)
     elif status != 0:
         raise OSError("Unable to create group %s: status=%s" % (group_name, status))
+
+
+def _reown_homedir(root, homedir, username):
+    """Home directory already existed, change owner of it properly.
+
+    Change owner (uid and gid) of the files and directories under the given
+    directory tree (recursively).
+
+    :param str root: path to the system root (eg. /mnt/sysroot)
+    :param str homedir: path to the user's home dir within root (eg. /home/tom)
+    :param str username: name of the user (eg. tom)
+    """
+    try:
+        # Get the UID and GID of user on previous system
+        stats = os.stat(root + homedir)
+        orig_uid = stats.st_uid
+        orig_gid = stats.st_gid
+
+        # Get the UID and GID of the created user on new system
+        pwent = _getpwnam(username, root)
+        uid = int(pwent[2])
+        gid = int(pwent[3])
+
+        # Change owner UID and GID where matching
+        from_ids = "--from={}:{}".format(orig_uid, orig_gid)
+        to_ids = "{}:{}".format(uid, gid)
+        util.execWithRedirect("chown", ["--recursive", "--no-dereference",
+                                        from_ids, to_ids, root + homedir])
+
+        # Restore also SELinux contexts
+        util.restorecon([homedir], root=root)
+
+    except OSError as e:
+        log.critical("Unable to change owner of existing home directory: %s", e.strerror)
+        raise
 
 
 def create_user(username, password=False, is_crypted=False, lock=False,
@@ -368,28 +410,28 @@ def create_user(username, password=False, is_crypted=False, lock=False,
 
     # If any requested groups do not exist, create them.
     group_list = []
-    for group_name, gid in group_gids:
+    for group_name, group_id in group_gids:
         existing_group = _getgrnam(group_name, root)
 
         # Check for a bad GID request
-        if gid and existing_group and gid != existing_group[2]:
-            raise ValueError("Group %s already exists with GID %s" % (group_name, gid))
+        if group_id and existing_group and group_id != existing_group[2]:
+            raise ValueError("Group %s already exists with GID %s" % (group_name, group_id))
 
         # Otherwise, create the group if it does not already exist
         if not existing_group:
-            create_group(group_name, gid=gid, root=root)
+            create_group(group_name, gid=group_id, root=root)
         group_list.append(group_name)
 
     if group_list:
         args.extend(['-G', ",".join(group_list)])
 
     # useradd expects the parent directory tree to exist.
-    parent_dir = util.parent_dir(root + homedir)
+    parent_dir = Path(root + homedir).resolve().parent
 
     # If root + homedir came out to "/", such as if we're creating the sshpw user,
     # parent_dir will be empty. Don't create that.
-    if parent_dir:
-        util.mkdirChain(parent_dir)
+    if parent_dir != Path("/"):
+        make_directories(str(parent_dir))
 
     args.extend(["-d", homedir])
 
@@ -410,8 +452,7 @@ def create_user(username, password=False, is_crypted=False, lock=False,
         args.extend(["-c", gecos])
 
     args.append(username)
-    with _ensure_login_defs(root):
-        status = util.execWithRedirect("useradd", args)
+    status = util.execWithRedirect("useradd", args)
 
     if status == 4:
         raise ValueError("UID %s already exists" % uid)
@@ -423,24 +464,9 @@ def create_user(username, password=False, is_crypted=False, lock=False,
         raise OSError("Unable to create user %s: status=%s" % (username, status))
 
     if not mk_homedir:
-        try:
-            stats = os.stat(root + homedir)
-            orig_uid = stats.st_uid
-            orig_gid = stats.st_gid
-
-            # Get the UID and GID of the created user
-            pwent = _getpwnam(username, root)
-
-            log.info("Home directory for the user %s already existed, "
-                     "fixing the owner and SELinux context.", username)
-            # home directory already existed, change owner of it properly
-            util.chown_dir_tree(root + homedir,
-                                int(pwent[2]), int(pwent[3]),
-                                orig_uid, orig_gid)
-            util.execWithRedirect("restorecon", ["-r", root + homedir])
-        except OSError as e:
-            log.critical("Unable to change owner of existing home directory: %s", e.strerror)
-            raise
+        log.info("Home directory for the user %s already existed, "
+                 "fixing the owner and SELinux context.", username)
+        _reown_homedir(root, homedir, username)
 
     set_user_password(username, password, is_crypted, lock, root)
 
@@ -533,10 +559,10 @@ def set_user_ssh_key(username, key, root=None):
 
     authfile = os.path.join(sshdir, "authorized_keys")
     authfile_existed = os.path.exists(authfile)
-    with util.open_with_perm(authfile, "a", 0o600) as f:
+    with open_with_perm(authfile, "a", 0o600) as f:
         f.write(key + "\n")
 
     # Only change ownership if we created it
     if not authfile_existed:
         os.chown(authfile, int(uid), int(gid))
-        util.execWithRedirect("restorecon", ["-r", sshdir])
+        util.restorecon([sshdir.removeprefix(root)], root=root)

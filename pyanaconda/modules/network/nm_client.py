@@ -1,7 +1,7 @@
 #
 # utility functions using libnm
 #
-# Copyright (C) 2018 Red Hat, Inc.
+# Copyright (C) 2018-2023 Red Hat, Inc.
 #
 # This copyrighted material is made available to anyone wishing to use,
 # modify, copy, or redistribute it subject to the terms and conditions of
@@ -19,22 +19,38 @@
 #
 
 import gi
-gi.require_version("NM", "1.0")
-from gi.repository import NM
 
+gi.require_version("NM", "1.0")
 import socket
-from queue import Queue, Empty
+from contextlib import contextmanager
+
+from blivet.arch import is_s390
+from gi.repository import NM
 from pykickstart.constants import BIND_TO_MAC
-from pyanaconda.modules.network.constants import NM_CONNECTION_UUID_LENGTH, \
-    CONNECTION_ACTIVATION_TIMEOUT, NM_CONNECTION_TYPE_WIFI, NM_CONNECTION_TYPE_ETHERNET, \
-    NM_CONNECTION_TYPE_VLAN, NM_CONNECTION_TYPE_BOND,  NM_CONNECTION_TYPE_TEAM, \
-    NM_CONNECTION_TYPE_BRIDGE, NM_CONNECTION_TYPE_INFINIBAND, CONNECTION_ADDING_TIMEOUT
-from pyanaconda.modules.network.kickstart import default_ks_vlan_interface_name
-from pyanaconda.modules.network.utils import is_s390, get_s390_settings, netmask2prefix, \
-    prefix2netmask
-from pyanaconda.modules.network.config_file import is_config_file_for_system
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import util
+from pyanaconda.core.dbus import SystemBus
+from pyanaconda.core.glib import GError, create_new_context, sync_call_glib
+from pyanaconda.modules.network.config_file import is_config_file_for_system
+from pyanaconda.modules.network.constants import (
+    CONNECTION_ADDING_TIMEOUT,
+    NM_CONNECTION_TYPE_BOND,
+    NM_CONNECTION_TYPE_BRIDGE,
+    NM_CONNECTION_TYPE_ETHERNET,
+    NM_CONNECTION_TYPE_INFINIBAND,
+    NM_CONNECTION_TYPE_TEAM,
+    NM_CONNECTION_TYPE_VLAN,
+    NM_CONNECTION_TYPE_WIFI,
+    NM_CONNECTION_UUID_LENGTH,
+)
+from pyanaconda.modules.network.kickstart import default_ks_vlan_interface_name
+from pyanaconda.modules.network.utils import (
+    get_s390_settings,
+    netmask2prefix,
+    prefix2netmask,
+)
+
 log = get_module_logger(__name__)
 
 
@@ -49,6 +65,51 @@ NM_BRIDGE_DUMPED_SETTINGS_DEFAULTS = {
     NM.SETTING_BRIDGE_GROUP_FORWARD_MASK: 0,
     NM.SETTING_BRIDGE_MULTICAST_SNOOPING: True
 }
+
+
+@contextmanager
+def nm_client_in_thread():
+    """Create NM Client with new GMainContext to be run in thread.
+
+    Expected to be used only in installer environment for a few
+    one-shot isolated network configuration tasks.
+    Destroying of the created NM Client instance and release of
+    related resources is not implemented.
+
+    For more information see NetworkManager example examples/python/gi/gmaincontext.py
+    """
+    mainctx = create_new_context()
+    mainctx.push_thread_default()
+
+    try:
+        yield get_new_nm_client()
+    finally:
+        mainctx.pop_thread_default()
+
+
+def get_new_nm_client():
+    """Get new instance of NMClient.
+
+    :returns: an instance of NetworkManager NMClient or None if system bus
+              is not available or NM is not running
+    :rtype: NM.NMClient
+    """
+    if not SystemBus.check_connection():
+        log.debug("get new NM Client failed: SystemBus connection check failed.")
+        return None
+
+    try:
+        nm_client = NM.Client.new(None)
+    except GError as e:
+        log.debug("get new NM Client constructor failed: %s", e)
+        return None
+
+    if not nm_client.get_nm_running():
+        log.debug("get new NM Client failed: NetworkManager is not running.")
+        return None
+
+    log.debug("get new NM Client succeeded.")
+    return nm_client
 
 
 def get_iface_from_connection(nm_client, uuid):
@@ -268,7 +329,7 @@ def _add_existing_virtual_device_to_bridge(nm_client, device_name, bridge_spec):
              bridge_spec),
         ]
     )
-    commit_changes_with_autoconnection_blocked(port_connection)
+    commit_changes_with_autoconnection_blocked(port_connection, nm_client)
     return port_connection.get_uuid()
 
 
@@ -390,12 +451,6 @@ def _update_wired_connection_with_s390_settings(connection, s390cfg):
     if s390cfg['SUBCHANNELS']:
         subchannels = s390cfg['SUBCHANNELS'].split(",")
         s_wired.props.s390_subchannels = subchannels
-    if s390cfg['NETTYPE']:
-        s_wired.props.s390_nettype = s390cfg['NETTYPE']
-    if s390cfg['OPTIONS']:
-        opts = s390cfg['OPTIONS'].split(" ")
-        opts_dict = {k: v for k, v in (o.split("=") for o in opts)}
-        s_wired.props.s390_options = opts_dict
 
 
 def _create_new_connection(network_data, device_name):
@@ -498,6 +553,8 @@ def create_connections_from_ksdata(nm_client, network_data, device_name, ifname_
             s390cfg = get_s390_settings(device_name)
             _update_wired_connection_with_s390_settings(con, s390cfg)
 
+    update_connection_wired_settings_from_ksdata(con, network_data)
+
     connections.append((con, device_to_activate))
     connections.extend(port_connections)
 
@@ -524,26 +581,26 @@ def add_connection_from_ksdata(nm_client, network_data, device_name, activate=Fa
         ifname_option_values
     )
 
-    for connection, device_name in connections:
+    for connection, dev_name in connections:
         log.debug("add connection (activate=%s): %s for %s\n%s",
-                  activate, connection.get_uuid(), device_name,
+                  activate, connection.get_uuid(), dev_name,
                   connection.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS))
         added_connection = add_connection_sync(
             nm_client,
-            connection,
+            connection
         )
 
         if not added_connection:
             continue
 
         if activate:
-            if device_name:
-                device = nm_client.get_device_by_iface(device_name)
+            if dev_name:
+                device = nm_client.get_device_by_iface(dev_name)
                 if device:
                     log.debug("activating with device %s", device.get_iface())
                 else:
                     log.debug("activating without device specified - device %s not found",
-                              device_name)
+                              dev_name)
             else:
                 device = None
                 log.debug("activating without device specified")
@@ -553,39 +610,41 @@ def add_connection_from_ksdata(nm_client, network_data, device_name, activate=Fa
 
 
 def add_connection_sync(nm_client, connection):
-    """Add a connection synchronously and optionally activate asynchronously.
+    """Add a connection synchronously.
 
+    Synchronous run is implemented by running a blocking GMainLoop with
+    GMainContext belonging to the nm_client created for the calling Task.
+
+    :param nm_client: NetoworkManager client
+    :type nm_client: NM.NMClient
     :param connection: connection to be added
     :type connection: NM.SimpleConnection
     :return: added connection or None on timeout
     :rtype: NM.RemoteConnection
     """
-    sync_queue = Queue()
-
-    def finish_callback(nm_client, result, sync_queue):
-        con, result = nm_client.add_connection2_finish(result)
-        log.debug("connection %s added:\n%s", con.get_uuid(),
-                  con.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS))
-        sync_queue.put(con)
-
-    nm_client.add_connection2(
+    result = sync_call_glib(
+        nm_client.get_main_context(),
+        nm_client.add_connection2,
+        nm_client.add_connection2_finish,
+        CONNECTION_ADDING_TIMEOUT,
         connection.to_dbus(NM.ConnectionSerializationFlags.ALL),
         (NM.SettingsAddConnection2Flags.TO_DISK |
          NM.SettingsAddConnection2Flags.BLOCK_AUTOCONNECT),
         None,
-        False,
-        None,
-        finish_callback,
-        sync_queue
+        False
     )
 
-    try:
-        ret = sync_queue.get(timeout=CONNECTION_ADDING_TIMEOUT)
-    except Empty:
-        log.error("Adding of connection %s timed out.", connection.get_uuid())
-        ret = None
+    if result.failed:
+        log.error("adding of a connection %s failed: %s",
+                  connection.get_uuid(),
+                  result.error_message)
+        return None
 
-    return ret
+    con, _res = result.received_data
+    log.debug("connection %s added:\n%s", connection.get_uuid(),
+              connection.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS))
+
+    return con
 
 
 def create_port_connection(port_type, port_idx, port, controller, autoconnect, settings=None):
@@ -645,11 +704,6 @@ def is_ethernet_device(nm_client, device_name):
     return False
 
 
-def is_ibft_connection(connection):
-    """Is the connection generated by NM from iBFT?"""
-    return connection.get_id().startswith("iBFT Connection")
-
-
 def bound_hwaddr_of_device(nm_client, device_name, ifname_option_values):
     """Check and return mac address of device bound by device renaming.
 
@@ -697,6 +751,8 @@ def update_connection_from_ksdata(nm_client, connection, network_data, device_na
     # IP configuration
     update_connection_ip_settings_from_ksdata(connection, network_data)
 
+    update_connection_wired_settings_from_ksdata(connection, network_data)
+
     s_con = connection.get_setting_connection()
     s_con.set_property(NM.SETTING_CONNECTION_AUTOCONNECT, network_data.onboot)
 
@@ -714,7 +770,7 @@ def update_connection_from_ksdata(nm_client, connection, network_data, device_na
         else:
             bind_connection(nm_client, connection, network_data.bindto, device_name)
 
-    commit_changes_with_autoconnection_blocked(connection)
+    commit_changes_with_autoconnection_blocked(connection, nm_client)
 
     log.debug("updated connection %s:\n%s", connection.get_uuid(),
               connection.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS))
@@ -748,6 +804,9 @@ def update_connection_ip_settings_from_ksdata(connection, network_data):
             s_ip4.props.gateway = network_data.gateway
     if network_data.nodefroute:
         s_ip4.props.never_default = True
+    if network_data.dhcpclass:
+        s_ip4.set_property(NM.SETTING_IP4_CONFIG_DHCP_VENDOR_CLASS_IDENTIFIER,
+                           network_data.dhcpclass)
     connection.add_setting(s_ip4)
 
     # ipv6 settings
@@ -786,6 +845,41 @@ def update_connection_ip_settings_from_ksdata(connection, network_data):
                 s_ip4.add_dns(ns)
             else:
                 log.error("IP address %s is not valid", ns)
+
+    # DNS search domains
+    if network_data.ipv4_dns_search:
+        for domain in [str.strip(i) for i in network_data.ipv4_dns_search.split(",")]:
+            s_ip4.add_dns_search(domain)
+    if network_data.ipv6_dns_search:
+        for domain in [str.strip(i) for i in network_data.ipv6_dns_search.split(",")]:
+            s_ip6.add_dns_search(domain)
+
+    # ignore auto DNS
+    if network_data.ipv4_ignore_auto_dns:
+        s_ip4.props.ignore_auto_dns = network_data.ipv4_ignore_auto_dns
+    if network_data.ipv6_ignore_auto_dns:
+        s_ip6.props.ignore_auto_dns = network_data.ipv6_ignore_auto_dns
+
+
+def update_connection_wired_settings_from_ksdata(connection, network_data):
+    """Update NM connection wired settings from kickstart in place.
+
+    :param connection: existing NetworkManager connection to be updated
+    :type connection: NM.RemoteConnection
+    :param network_data: kickstart configuation to be applied to the connection
+    :type network_data: pykickstart NetworkData
+    """
+    if network_data.mtu:
+        try:
+            mtu = int(network_data.mtu)
+        except ValueError:
+            log.error("Value of network --mtu option is not valid: %s", network_data.mtu)
+        else:
+            s_wired = connection.get_setting_wired()
+            if not s_wired:
+                s_wired = NM.SettingWired.new()
+                connection.add_setting(s_wired)
+            s_wired.props.mtu = mtu
 
 
 def bind_settings_to_mac(nm_client, s_connection, s_wired, device_name=None, bind_exclusively=True):
@@ -975,8 +1069,13 @@ def get_first_iface_with_link(nm_client, ifaces):
     """Find first iface having link (in lexicographical order)."""
     for iface in sorted(ifaces):
         device = nm_client.get_device_by_iface(iface)
-        if device and device.get_carrier():
-            return device.get_iface()
+        if device:
+            try:
+                carrier = device.get_carrier()
+            except AttributeError:
+                carrier = None
+            if carrier:
+                return device.get_iface()
     return None
 
 
@@ -988,42 +1087,47 @@ def get_connections_dump(nm_client):
     return "\n".join(con_dumps)
 
 
-def commit_changes_with_autoconnection_blocked(connection, save_to_disk=True):
+def commit_changes_with_autoconnection_blocked(connection, nm_client, save_to_disk=True):
     """Implementation of NM CommitChanges() method with blocked autoconnection.
 
-    Update2() API is used to implement the functionality (called synchronously).
-
+    Update2() API is used to implement the functionality.
     Prevents autoactivation of the connection on its update which would happen
     with CommitChanges if "autoconnect" is set True.
 
+    Synchronous run is implemented by running a blocking GMainLoop with
+    GMainContext belonging to the nm_client created for the calling Task.
+
     :param connection: NetworkManager connection
     :type connection: NM.RemoteConnection
+    :param nm_client: NetoworkManager client
+    :type nm_client: NM.NMClient
     :param save_to_disk: should the changes be written also to disk?
     :type save_to_disk: bool
     :return: on success result of the Update2() call, None of failure
     :rtype: GVariant of type "a{sv}" or None
     """
-    sync_queue = Queue()
-
-    def finish_callback(connection, result, sync_queue):
-        ret = connection.update2_finish(result)
-        sync_queue.put(ret)
-
     flags = NM.SettingsUpdate2Flags.BLOCK_AUTOCONNECT
     if save_to_disk:
         flags |= NM.SettingsUpdate2Flags.TO_DISK
-
     con2 = NM.SimpleConnection.new_clone(connection)
-    connection.update2(
+
+    result = sync_call_glib(
+        nm_client.get_main_context(),
+        connection.update2,
+        connection.update2_finish,
+        CONNECTION_ADDING_TIMEOUT,
         con2.to_dbus(NM.ConnectionSerializationFlags.ALL),
         flags,
-        None,
-        None,
-        finish_callback,
-        sync_queue
+        None
     )
 
-    return sync_queue.get()
+    if result.failed:
+        log.error("comitting changes of connection %s failed: %s",
+                  connection.get_uuid(),
+                  result.error_message)
+        return None
+
+    return result.received_data
 
 
 def clone_connection_sync(nm_client, connection, con_id=None, uuid=None):
@@ -1038,40 +1142,23 @@ def clone_connection_sync(nm_client, connection, con_id=None, uuid=None):
     :return: NetworkManager connection or None on timeout
     :rtype: NM.RemoteConnection
     """
-    sync_queue = Queue()
-
-    def finish_callback(nm_client, result, sync_queue):
-        con, result = nm_client.add_connection2_finish(result)
-        log.debug("connection %s cloned:\n%s", con.get_uuid(),
-                  con.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS))
-        sync_queue.put(con)
-
     cloned_connection = NM.SimpleConnection.new_clone(connection)
     s_con = cloned_connection.get_setting_connection()
     s_con.props.uuid = uuid or NM.utils_uuid_generate()
     s_con.props.id = con_id or "{}-clone".format(connection.get_id())
-    nm_client.add_connection2(
-        cloned_connection.to_dbus(NM.ConnectionSerializationFlags.ALL),
-        (NM.SettingsAddConnection2Flags.TO_DISK |
-         NM.SettingsAddConnection2Flags.BLOCK_AUTOCONNECT),
-        None,
-        False,
-        None,
-        finish_callback,
-        sync_queue
-    )
 
-    try:
-        ret = sync_queue.get(timeout=CONNECTION_ACTIVATION_TIMEOUT)
-    except Empty:
-        log.error("Cloning of a connection timed out.")
-        ret = None
+    log.debug("cloning connection %s", connection.get_uuid())
+    added_connection = add_connection_sync(nm_client, cloned_connection)
 
-    return ret
+    if added_connection:
+        log.debug("connection was cloned into %s", added_connection.get_uuid())
+    else:
+        log.debug("connection cloning failed")
+    return added_connection
 
 
 def get_dracut_arguments_from_connection(nm_client, connection, iface, target_ip,
-                                         hostname, ibft=False):
+                                         hostname):
     """Get dracut arguments for the iface and SAN target from NM connection.
 
     Examples of SAN: iSCSI, FCoE
@@ -1084,22 +1171,17 @@ def get_dracut_arguments_from_connection(nm_client, connection, iface, target_ip
     :param connection: NetworkManager connection
     :type connection: NM.RemoteConnection
     :param iface: network interface used to connect to the target
-                  (can be none if ibft is used)
     :type iface: str
     :param target_ip: IP of the SAN target
     :type target_ip: str
     :param hostname: static hostname to be configured
     :type hostname: str
-    :param ibft: network should be configured from ibft
-    :type ibft: bool
     :returns: dracut arguments
     :rtype: set(str)
     """
     netargs = set()
 
-    if ibft:
-        netargs.add("rd.iscsi.ibft")
-    elif target_ip:
+    if target_ip:
         if hostname is None:
             hostname = ""
         if ':' in target_ip:
@@ -1305,14 +1387,10 @@ def _get_dracut_znet_argument_from_connection(connection):
     argument = ""
     wired_setting = connection.get_setting_wired()
     if wired_setting and is_s390():
-        nettype = wired_setting.get_s390_nettype()
-        subchannels = wired_setting.get_s390_subchannels()
-        if nettype and subchannels:
-            argument = "rd.znet={},{}".format(nettype, subchannels)
-            options = wired_setting.get_property(NM.SETTING_WIRED_S390_OPTIONS)
-            if options:
-                options_string = ','.join("{}={}".format(key, val) for key, val in options.items())
-                argument += ",{}".format(options_string)
+        devspec = util.execWithCapture("/lib/s390-tools/zdev-to-rd.znet",
+                                       ["persistent",
+                                        connection.get_interface_name()]).strip()
+        argument = "rd.znet={}".format(devspec)
     return argument
 
 
@@ -1331,9 +1409,9 @@ def get_ports_from_connections(nm_client, port_types, controller_specs):
     """
     ports = set()
     for con in nm_client.get_connections():
-        if not con.get_setting_connection().get_slave_type() in port_types:
+        if con.get_setting_connection().get_port_type() not in port_types:
             continue
-        if con.get_setting_connection().get_master() in controller_specs:
+        if con.get_setting_connection().get_controller() in controller_specs:
             iface = get_iface_from_connection(nm_client, con.get_uuid())
             name = con.get_id()
             ports.add((name, iface, con.get_uuid()))
@@ -1366,7 +1444,7 @@ def get_config_file_connection_of_device(nm_client, device_name, device_hwaddr=N
         if con_type == NM_CONNECTION_TYPE_ETHERNET:
 
             # Ignore ports
-            if con.get_setting_connection().get_master():
+            if con.get_setting_connection().get_controller():
                 continue
 
             interface_name = con.get_interface_name()
@@ -1427,7 +1505,7 @@ def get_kickstart_network_data(connection, nm_client, network_data_class):
     """
     # no network command for non-virtual device ports
     if connection.get_connection_type() not in (NM_CONNECTION_TYPE_BOND, NM_CONNECTION_TYPE_TEAM):
-        if connection.get_setting_connection().get_master():
+        if connection.get_setting_connection().get_controller():
             return None
 
     # no support for wireless
@@ -1527,6 +1605,18 @@ def _update_ip4_config_kickstart_network_data(connection, network_data):
     if ip4_dhcp_hostname:
         network_data.hostname = ip4_dhcp_hostname
 
+    # dns
+    network_data.ipv4_ignore_auto_dns = s_ip4_config.get_ignore_auto_dns()
+    ip4_num_domains = s_ip4_config.get_num_dns_searches()
+    ip4_domains = [s_ip4_config.get_dns_search(i) for i in range(ip4_num_domains)]
+    ip4_dns_search = ",".join(ip4_domains)
+    if ip4_dns_search:
+        network_data.ipv4_dns_search = ip4_dns_search
+
+    ip4_dhcpclass = s_ip4_config.get_dhcp_vendor_class_identifier()
+    if ip4_dhcpclass:
+        network_data.dhcpclass = ip4_dhcpclass
+
 
 def _update_ip6_config_kickstart_network_data(connection, network_data):
     """Update IPv6 configuration of network data from connection.
@@ -1553,6 +1643,14 @@ def _update_ip6_config_kickstart_network_data(connection, network_data):
         gateway = s_ip6_config.get_gateway()
         if gateway:
             network_data.ipv6gateway = gateway
+
+    # dns
+    network_data.ipv6_ignore_auto_dns = s_ip6_config.get_ignore_auto_dns()
+    ip6_num_domains = s_ip6_config.get_num_dns_searches()
+    ip6_domains = [s_ip6_config.get_dns_search(i) for i in range(ip6_num_domains)]
+    ip6_dns_search = ",".join(ip6_domains)
+    if ip6_dns_search:
+        network_data.ipv6_dns_search = ip6_dns_search
 
 
 def _update_vlan_kickstart_network_data(nm_client, connection, network_data):
@@ -1657,3 +1755,7 @@ def _update_team_kickstart_network_data(nm_client, iface, connection, network_da
         teamconfig = s_team.get_config()
         if teamconfig:
             network_data.teamconfig = teamconfig.replace("\n", "").replace(" ", "")
+
+
+def is_bootif_connection(con):
+    return con.get_id().startswith("BOOTIF Connection")

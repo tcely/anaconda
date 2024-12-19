@@ -20,12 +20,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from pyanaconda.modules.common.errors.payload import SourceSetupError, SourceTearDownError
+import pytest
+
+from pyanaconda.modules.common.errors.payload import (
+    SourceSetupError,
+    SourceTearDownError,
+)
 from pyanaconda.modules.payloads.constants import SourceType
-from pyanaconda.modules.payloads.source.mount_tasks import SetUpMountTask, TearDownMountTask
+from pyanaconda.modules.payloads.source.mount_tasks import (
+    SetUpMountTask,
+    TearDownMountTask,
+)
 from pyanaconda.modules.payloads.source.source_base import MountingSourceMixin
-from pyanaconda.modules.payloads.source.utils import find_and_mount_iso_image, \
-    verify_valid_repository
+from pyanaconda.modules.payloads.source.utils import (
+    find_and_mount_iso_image,
+    verify_valid_repository,
+)
 
 mount_location = "/some/dir"
 
@@ -54,25 +64,25 @@ class MountingSourceMixinTestCase(unittest.TestCase):
     def test_counter(self):
         """Mount path in mount source base gets incremental numbers."""
         module = DummyMountingSourceSubclass()
-        self.assertTrue(module.mount_point.startswith("/run/install/sources/mount-"))
+        assert module.mount_point.startswith("/run/install/sources/mount-")
         first_counter = int(module.mount_point.split("-")[1])
 
         module = DummyMountingSourceSubclass()
         second_counter = int(module.mount_point.split("-")[1])
 
-        self.assertEqual(first_counter, second_counter - 1)
+        assert first_counter == second_counter - 1
 
     @patch("os.path.ismount")
     def test_mount_state(self, ismount_mock):
         """Mount source state for set up."""
         ismount_mock.return_value = False
         module = DummyMountingSourceSubclass()
-        self.assertEqual(False, module.get_mount_state())
+        assert module.get_mount_state() is False
 
         ismount_mock.reset_mock()
         ismount_mock.return_value = True
 
-        self.assertEqual(True, module.get_mount_state())
+        assert module.get_mount_state() is True
 
         ismount_mock.assert_called_once_with(module.mount_point)
 
@@ -82,7 +92,7 @@ class TearDownMountTaskTestCase(unittest.TestCase):
     def test_name(self):
         """Tear down mount source task name."""
         task = TearDownMountTask(mount_location)
-        self.assertEqual(task.name, "Tear down mount installation source")
+        assert task.name == "Unmount an installation source"
 
     @patch("pyanaconda.modules.payloads.source.mount_tasks.os.path.ismount", return_value=False)
     @patch("pyanaconda.modules.payloads.source.mount_tasks.unmount", return_value=True)
@@ -98,10 +108,10 @@ class TearDownMountTaskTestCase(unittest.TestCase):
     def test_run_failure(self, unmount_mock, ismount_mock):
         """Tear down mount source task failure."""
         task = TearDownMountTask(mount_location)
-        with self.assertRaises(SourceTearDownError) as cm:
+        with pytest.raises(SourceTearDownError) as cm:
             task.run()
 
-        self.assertEqual(str(cm.exception), "The mount point /some/dir is still in use.")
+        assert str(cm.value) == "The mount point /some/dir is still in use."
         unmount_mock.assert_called_once_with(mount_location)
         ismount_mock.assert_called_once_with(mount_location)
 
@@ -119,16 +129,16 @@ class SetUpMountTaskTestCase(unittest.TestCase):
     def test_run_failure(self, ismount_mock):
         """Set up mount base task when already mounted."""
         task = DummySetUpMountTaskSubclass(mount_location)
-        with self.assertRaises(SourceSetupError) as cm:
+        with pytest.raises(SourceSetupError) as cm:
             task.run()
 
-        self.assertEqual(str(cm.exception), "The mount point /some/dir is already in use.")
+        assert str(cm.value) == "The mount point /some/dir is already in use."
         ismount_mock.assert_called_once_with(mount_location)
 
 
 class UtilitiesTestCase(unittest.TestCase):
 
-    @patch("pyanaconda.modules.payloads.source.utils.find_first_iso_image",
+    @patch("pyanaconda.modules.payloads.source.utils._find_first_iso_image",
            return_value="skynet.iso")
     @patch("pyanaconda.modules.payloads.source.utils.mount")
     def test_find_and_mount_iso_image(self,
@@ -148,9 +158,9 @@ class UtilitiesTestCase(unittest.TestCase):
             options="ro"
         )
 
-        self.assertEqual(iso_name, "skynet.iso")
+        assert iso_name == "skynet.iso"
 
-    @patch("pyanaconda.modules.payloads.source.utils.find_first_iso_image",
+    @patch("pyanaconda.modules.payloads.source.utils._find_first_iso_image",
            return_value="")
     def test_find_and_mount_iso_image_fail_find(self,
                                                 find_first_iso_image_mock,):
@@ -162,9 +172,9 @@ class UtilitiesTestCase(unittest.TestCase):
 
         find_first_iso_image_mock.assert_called_once_with(source_path)
 
-        self.assertEqual(iso_name, "")
+        assert iso_name == ""
 
-    @patch("pyanaconda.modules.payloads.source.utils.find_first_iso_image",
+    @patch("pyanaconda.modules.payloads.source.utils._find_first_iso_image",
            return_value="skynet.iso")
     @patch("pyanaconda.modules.payloads.source.utils.mount",
            side_effect=OSError)
@@ -185,7 +195,7 @@ class UtilitiesTestCase(unittest.TestCase):
             options="ro"
         )
 
-        self.assertEqual(iso_name, "")
+        assert iso_name == ""
 
     def test_verify_valid_repository_repo_success(self):
         """Test verify_valid_repository functionality success."""
@@ -195,7 +205,7 @@ class UtilitiesTestCase(unittest.TestCase):
             repomd_path = Path(repodir_path, "repomd.xml")
             repomd_path.write_text("This is a cool repomd file!")
 
-            self.assertTrue(verify_valid_repository(tmp))
+            assert verify_valid_repository(tmp)
 
     def test_verify_valid_repository_installtree_success(self):
         """Test verify_valid_repository functionality for installation tree success."""
@@ -203,13 +213,13 @@ class UtilitiesTestCase(unittest.TestCase):
             treeinfo_path = Path(tmp, ".treeinfo")
             treeinfo_path.write_text("This is a cool .treeinfo file!")
 
-            self.assertTrue(verify_valid_repository(tmp))
+            assert verify_valid_repository(tmp)
 
         with TemporaryDirectory() as tmp:
             treeinfo_path = Path(tmp, "treeinfo")
             treeinfo_path.write_text("This is a cool treeinfo file!")
 
-            self.assertTrue(verify_valid_repository(tmp))
+            assert verify_valid_repository(tmp)
 
     def test_verify_valid_repository_failed(self):
         """Test verify_valid_repository functionality failed."""
@@ -217,4 +227,4 @@ class UtilitiesTestCase(unittest.TestCase):
             repodir_path = Path(tmp, "repodata")
             repodir_path.mkdir()
 
-            self.assertFalse(verify_valid_repository(tmp))
+            assert not verify_valid_repository(tmp)

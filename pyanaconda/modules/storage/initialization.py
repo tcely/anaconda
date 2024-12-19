@@ -15,7 +15,8 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from blivet import util as blivet_util, udev, arch
+from blivet import arch, blockdev, udev
+from blivet import util as blivet_util
 from blivet.devicelibs import crypto
 from blivet.flags import flags as blivet_flags
 from blivet.formats import get_device_format_class
@@ -24,10 +25,6 @@ from blivet.static_data import luks_data
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.anaconda_logging import program_log_lock
 from pyanaconda.core.configuration.anaconda import conf
-
-import gi
-gi.require_version("BlockDev", "2.0")
-from gi.repository import BlockDev as blockdev
 
 __all__ = ["enable_installer_mode"]
 
@@ -44,8 +41,11 @@ def enable_installer_mode():
 
     # We don't want image installs writing backups of the *image* metadata
     # into the *host's* /etc/lvm. This can get real messy on build systems.
+    # Same applies to system.devices file that shouldn't be populated with
+    # PV names from the system that creates the image
     if conf.target.is_image:
         blivet_flags.lvm_metadata_backup = False
+        blivet_flags.lvm_devices_file = False
 
     # Set the flags.
     blivet_flags.auto_dev_updates = True
@@ -53,7 +53,6 @@ def enable_installer_mode():
     blivet_flags.keep_empty_ext_partitions = False
     blivet_flags.discard_new = True
     blivet_flags.selinux = conf.security.selinux
-    blivet_flags.dmraid = conf.storage.dmraid
     blivet_flags.ibft = conf.storage.ibft
     blivet_flags.multipath_friendly_names = conf.storage.multipath_friendly_names
     blivet_flags.allow_imperfect_devices = conf.storage.allow_imperfect_devices
@@ -70,7 +69,14 @@ def enable_installer_mode():
         _load_plugin_s390()
 
     # Set the device name regexes to ignore.
-    udev.ignored_device_names = [r'^mtd', r'^mmcblk.+boot', r'^mmcblk.+rpmb', r'^zram', '^ndblk']
+    udev.ignored_device_names = [
+        r'^mtd',
+        r'^mmcblk.+boot',
+        r'^mmcblk.+rpmb',
+        r'^zram',
+        r'^ndblk',
+        r'^pmem[0-9]+$',
+    ]
 
     # We need this so all the /dev/disk/* stuff is set up.
     udev.trigger(subsystem="block", action="change")
@@ -78,18 +84,25 @@ def enable_installer_mode():
 
 def _set_default_label_type():
     """Set up the default label type."""
-    if not conf.storage.gpt:
+    if not conf.storage.disk_label_type:
         return
 
     disklabel_class = get_device_format_class("disklabel")
-    disklabel_types = disklabel_class.get_platform_label_types()
+    supported_types = disklabel_class.get_platform_label_types()
+    default_type = supported_types[0] if supported_types else None
+    requested_type = conf.storage.disk_label_type
 
-    if "gpt" not in disklabel_types:
-        log.warning("GPT is not a supported disklabel on this platform. "
-                    "Using default disklabel %s instead.", disklabel_types[0])
-        return
+    if requested_type == "mbr":
+        requested_type = "msdos"
 
-    disklabel_class.set_default_label_type("gpt")
+    if requested_type in supported_types:
+        disklabel_class.set_default_label_type(requested_type)
+    else:
+        log.warning(
+            "The requested disk label type '%s' is not supported on "
+            "this platform. Using the default disk label '%s' instead.",
+            conf.storage.disk_label_type, default_type
+        )
 
 
 def _load_plugin_s390():

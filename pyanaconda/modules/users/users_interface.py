@@ -18,15 +18,16 @@
 # Red Hat, Inc.
 #
 
-from pyanaconda.modules.common.constants.services import USERS
+from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.base import KickstartModuleInterface
+from pyanaconda.modules.common.constants.services import USERS
 from pyanaconda.modules.common.containers import TaskContainer
-from pyanaconda.modules.common.structures.user import UserData
 from pyanaconda.modules.common.structures.group import GroupData
 from pyanaconda.modules.common.structures.sshkey import SshKeyData
-from dasbus.server.interface import dbus_interface
+from pyanaconda.modules.common.structures.user import UserData
 
 
 @dbus_interface(USERS.interface_name)
@@ -100,11 +101,6 @@ class UsersInterface(KickstartModuleInterface):
         """
         return self.implementation.root_password_is_set
 
-    @emits_properties_changed
-    def SetRootAccountLocked(self, root_account_locked: Bool):
-        """Lock or unlock the root account."""
-        self.implementation.set_root_account_locked(root_account_locked)
-
     @property
     def IsRootAccountLocked(self) -> Bool:
         """Is the root account locked ?
@@ -113,10 +109,11 @@ class UsersInterface(KickstartModuleInterface):
         """
         return self.implementation.root_account_locked
 
+    @IsRootAccountLocked.setter
     @emits_properties_changed
-    def SetRootPasswordSSHLoginAllowed(self, root_password_ssh_login_allowed: Bool):
-        """Allow or disallow the root from logging in via SSH with password authetication."""
-        self.implementation.set_root_password_ssh_login_allowed(root_password_ssh_login_allowed)
+    def IsRootAccountLocked(self, root_account_locked: Bool):
+        """Lock or unlock the root account."""
+        self.implementation.set_root_account_locked(root_account_locked)
 
     @property
     def RootPasswordSSHLoginAllowed(self) -> Bool:
@@ -126,23 +123,23 @@ class UsersInterface(KickstartModuleInterface):
         """
         return self.implementation.root_password_ssh_login_allowed
 
+    @RootPasswordSSHLoginAllowed.setter
+    @emits_properties_changed
+    def RootPasswordSSHLoginAllowed(self, root_password_ssh_login_allowed: Bool):
+        """Allow or disallow the root from logging in via SSH with password authetication."""
+        self.implementation.set_root_password_ssh_login_allowed(root_password_ssh_login_allowed)
+
     @property
     def Users(self) -> List[Structure]:
         """List of users, each describing a single user.
 
         :return: a list of user describing DBus Structures
         """
-        # internally we hold the data about users as a list of structures,
-        # which we need to turn into a list of dicts before returning it
-        # over DBus
-        user_dicts = []
+        return UserData.to_structure_list(self.implementation.users)
 
-        for user_data in self.implementation.users:
-            user_dicts.append(UserData.to_structure(user_data))
-        return user_dicts
-
+    @Users.setter
     @emits_properties_changed
-    def SetUsers(self, users: List[Structure]):
+    def Users(self, users: List[Structure]):
         """Set a list of users, each corresponding to a single user.
 
         :param users: a list of user describing DBus structures
@@ -155,17 +152,11 @@ class UsersInterface(KickstartModuleInterface):
 
         :return: a list of group describing DBus Structures
         """
-        # internally we hold the data about groups as a list of structures,
-        # which we need to turn into a list of dicts before returning it
-        # over DBus
-        group_dicts = []
+        return GroupData.to_structure_list(self.implementation.groups)
 
-        for group_data in self.implementation.groups:
-            group_dicts.append(GroupData.to_structure(group_data))
-        return group_dicts
-
+    @Groups.setter
     @emits_properties_changed
-    def SetGroups(self, groups: List[Structure]):
+    def Groups(self, groups: List[Structure]):
         """Set a list of groups, each corresponding to a single group.
 
         :param groups: a list of group describing DBus structures
@@ -178,17 +169,11 @@ class UsersInterface(KickstartModuleInterface):
 
         :return: a list of SSH key describing DBus Structures
         """
-        # internally we hold the data about SSH keys as a list of structures,
-        # which we need to turn into a list of dicts before returning it
-        # over DBus
-        ssh_key_dicts = []
+        return SshKeyData.to_structure_list(self.implementation.ssh_keys)
 
-        for ssh_key_data in self.implementation.ssh_keys:
-            ssh_key_dicts.append(SshKeyData.to_structure(ssh_key_data))
-        return ssh_key_dicts
-
+    @SshKeys.setter
     @emits_properties_changed
-    def SetSshKeys(self, ssh_keys: List[Structure]):
+    def SshKeys(self, ssh_keys: List[Structure]):
         """Set a list of DBus structures, each corresponding to a single SSH key.
 
         :param ssh_keys: a list of SSH key describing DBus structures

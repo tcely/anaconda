@@ -15,28 +15,34 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import gi
-gi.require_version("BlockDev", "2.0")
-from gi.repository import BlockDev as blockdev
-
 from collections import defaultdict
 
-from blivet import arch, util
+from blivet import arch, blockdev, util
 from blivet.devicefactory import get_device_type
 from blivet.size import Size
 
-from pyanaconda import isys
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import productName, STORAGE_REFORMAT_BLOCKLIST, \
-    STORAGE_REFORMAT_ALLOWLIST, STORAGE_MIN_PARTITION_SIZES, STORAGE_MIN_RAM, \
-    STORAGE_SWAP_IS_RECOMMENDED, STORAGE_MUST_BE_ON_ROOT, STORAGE_MUST_BE_ON_LINUXFS, \
-    STORAGE_LUKS2_MIN_RAM, STORAGE_ROOT_DEVICE_TYPES, STORAGE_REQ_PARTITION_SIZES, \
-    STORAGE_MUST_NOT_BE_ON_ROOT
+from pyanaconda.core.constants import (
+    STORAGE_LUKS2_MIN_RAM,
+    STORAGE_MIN_PARTITION_SIZES,
+    STORAGE_MIN_RAM,
+    STORAGE_MUST_BE_ON_LINUXFS,
+    STORAGE_MUST_BE_ON_ROOT,
+    STORAGE_MUST_NOT_BE_ON_ROOT,
+    STORAGE_REFORMAT_ALLOWLIST,
+    STORAGE_REFORMAT_BLOCKLIST,
+    STORAGE_REQ_PARTITION_SIZES,
+    STORAGE_ROOT_DEVICE_TYPES,
+    STORAGE_SWAP_IS_RECOMMENDED,
+)
+from pyanaconda.core.hw import NO_SWAP_EXTRA_RAM
 from pyanaconda.core.i18n import _
+from pyanaconda.core.payload import rpm_version_key
+from pyanaconda.core.product import get_product_name
 from pyanaconda.core.storage import DEVICE_TEXT_MAP
 from pyanaconda.modules.storage.platform import platform
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
@@ -53,9 +59,10 @@ def verify_root(storage, constraints, report_error, report_warning):
     if not root:
         report_error(_("You have not defined a root partition (/), "
                        "which is required for installation of %s"
-                       " to continue.") % (productName,))
+                       " to continue.") % (get_product_name(),))
 
-    if root and root.format.exists and root.format.mountable and root.format.mountpoint == "/":
+    if root and root.format.exists and root.format.mountable and root.format.mountpoint == "/" \
+       and not root.format.is_empty:
         report_error(_("You must create a new file system on the root device."))
 
     if storage.root_device and constraints[STORAGE_ROOT_DEVICE_TYPES]:
@@ -123,7 +130,7 @@ def verify_partition_sizes(storage, constraints, report_error, report_warning):
                              "%(size)s which is lower than recommended "
                              "for a normal %(productName)s install.")
                            % {'mount': mount, 'size': size,
-                              'productName': productName})
+                              'productName': get_product_name()})
 
     for (mount, size) in constraints[STORAGE_REQ_PARTITION_SIZES].items():
         if mount in filesystems and filesystems[mount].size < size:
@@ -206,9 +213,10 @@ def verify_gpt_biosboot(storage, constraints, report_error, report_warning):
     :param report_error: a function for error reporting
     :param report_warning: a function for warning reporting
     """
-    if storage.bootloader and not storage.bootloader.skip_bootloader:
-        stage1 = storage.bootloader.stage1_device
+    if not storage.bootloader or storage.bootloader.skip_bootloader:
+        return
 
+    for stage1, _stage2 in storage.bootloader.install_targets:
         if arch.is_x86() and not arch.is_efi() and stage1 and stage1.is_disk \
                 and getattr(stage1.format, "label_type", None) == "gpt":
 
@@ -219,10 +227,72 @@ def verify_gpt_biosboot(storage, constraints, report_error, report_warning):
                     break
 
             if missing:
-                report_error(_("Your BIOS-based system needs a special "
-                               "partition to boot from a GPT disk label. "
-                               "To continue, please create a 1MiB "
-                               "'biosboot' type partition."))
+                report_error(_(
+                    "Your BIOS-based system needs a special "
+                    "partition to boot from a GPT disk label. "
+                    "To continue, please create a 1MiB "
+                    "'biosboot' type partition on the {} disk."
+                ).format(stage1.name))
+
+
+def verify_opal_compatibility(storage, constraints, report_error, report_warning):
+    """ Verify the OPAL compatibility.
+
+    :param storage: a storage to check
+    :param constraints: a dictionary of constraints
+    :param report_error: a function for error reporting
+    :param report_warning: a function for warning reporting
+    """
+    if arch.get_arch() == "ppc64le" and arch.is_powernv():
+        # Check the kernel version.
+        version = _get_opal_firmware_kernel_version()
+        if _check_opal_firmware_kernel_version(version, "5.10"):
+            return
+
+        # Is /boot on XFS?
+        dev = storage.mountpoints.get("/boot") or storage.mountpoints.get("/")
+        if dev and dev.format and dev.format.type == "xfs":
+            report_error(_(
+                "The system will not be bootable. The firmware does not "
+                "support XFS file system features on the boot file system. "
+                "Upgrade the firmware or change the file system type."
+            ))
+
+
+def _check_opal_firmware_kernel_version(detected_version, required_version):
+    """Check the firmware kernel version for OPAL systems.
+
+    :param detected_version: a string with the detected kernel version or None
+    :param required_version: a string with the required kernel version or None
+    :return: True or False
+    """
+    try:
+        if detected_version and required_version:
+            return rpm_version_key(detected_version) >= rpm_version_key(required_version)
+    except Exception as e:  # pylint: disable=broad-except
+        log.warning("Couldn't check the firmware kernel version: %s", str(e))
+
+    return False
+
+
+def _get_opal_firmware_kernel_version():
+    """Get the firmware kernel version for OPAL systems.
+
+    For example: 5.10.50-openpower1-p59fd803
+
+    :return: a string with the kernel version or None
+    """
+    version = None
+
+    try:
+        with open("/proc/device-tree/ibm,firmware-versions/linux") as f:
+            version = f.read().strip().removeprefix("v")
+            log.debug("The firmware kernel version is '%s'.", version)
+
+    except IOError as e:
+        log.warning("Couldn't get the firmware kernel version: %s", str(e))
+
+    return version
 
 
 def verify_swap(storage, constraints, report_error, report_warning):
@@ -237,7 +307,7 @@ def verify_swap(storage, constraints, report_error, report_warning):
 
     if not swaps:
         installed = util.total_memory()
-        required = constraints[STORAGE_MIN_RAM] + Size("{} MiB".format(isys.NO_SWAP_EXTRA_RAM))
+        required = constraints[STORAGE_MIN_RAM] + Size("{} MiB".format(NO_SWAP_EXTRA_RAM))
 
         if not constraints[STORAGE_SWAP_IS_RECOMMENDED]:
             if installed < required:
@@ -254,10 +324,11 @@ def verify_swap(storage, constraints, report_error, report_warning):
                                "have %(installedMem)s.")
                              % {"requiredMem": required, "installedMem": installed})
             else:
-                report_warning(_("You have not specified a swap partition. "
-                                 "Although not strictly required in all cases, "
-                                 "it will significantly improve performance "
-                                 "for most installations."))
+                report_warning(_(
+                    "A swap partition has not been specified. To significantly "
+                    "improve performance for most installations, it is recommended "
+                    "to specify a swap partition."
+                ))
 
 
 def verify_swap_uuid(storage, constraints, report_error, report_warning):
@@ -474,13 +545,13 @@ def verify_lvm_destruction(storage, constraints, report_error, report_warning):
             ))
 
 
-class StorageCheckerReport(object):
+class StorageCheckerReport:
     """Class for results of the storage checking."""
 
     def __init__(self):
-        self.info = list()
-        self.errors = list()
-        self.warnings = list()
+        self.info = []
+        self.errors = []
+        self.warnings = []
 
     @property
     def success(self):
@@ -536,12 +607,12 @@ class StorageCheckerReport(object):
                 logger.warning(msg)
 
 
-class StorageChecker(object):
+class StorageChecker:
     """Class for advanced storage checking."""
 
     def __init__(self):
-        self.checks = list()
-        self.constraints = dict()
+        self.checks = []
+        self.constraints = {}
 
     def add_check(self, callback):
         """ Add a callback for storage checking.
@@ -553,14 +624,6 @@ class StorageChecker(object):
         report_error and report_warning are functions for reporting messages.
         """
         self.checks.append(callback)
-
-    def remove_check(self, callback):
-        """ Remove a callback for storage checking.
-
-        :param callback: a check for the storage checking
-        """
-        if callback in self.checks:
-            self.checks.remove(callback)
 
     def add_constraint(self, name, value):
         """ Add a new constraint for storage checking.
@@ -646,14 +709,14 @@ class StorageChecker(object):
 
     def set_default_constraints(self):
         """Set the default constraints needed by default checks."""
-        self.constraints = dict()
+        self.constraints = {}
 
         for name in self.get_default_constraint_names():
             self.add_constraint(name, getattr(conf.storage_constraints, name))
 
     def set_default_checks(self):
         """Set the default checks."""
-        self.checks = list()
+        self.checks = []
         self.add_check(verify_root)
         self.add_check(verify_s390_constraints)
         self.add_check(verify_partition_formatting)
@@ -661,6 +724,7 @@ class StorageChecker(object):
         self.add_check(verify_partition_format_sizes)
         self.add_check(verify_bootloader)
         self.add_check(verify_gpt_biosboot)
+        self.add_check(verify_opal_compatibility)
         self.add_check(verify_swap)
         self.add_check(verify_swap_uuid)
         self.add_check(verify_mountpoints_on_linuxfs)

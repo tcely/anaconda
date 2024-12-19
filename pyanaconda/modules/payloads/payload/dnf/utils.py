@@ -18,20 +18,24 @@
 import fnmatch
 import hashlib
 import os
-import rpm
 
+import rpm
 from blivet.size import Size
+from libdnf.transaction import TransactionItemState_ERROR
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.core import util
 from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.hw import is_lpae_available
+from pyanaconda.core.path import join_paths
+from pyanaconda.core.payload import parse_hdd_url
+from pyanaconda.core.product import get_product_name, get_product_version
 from pyanaconda.core.regexes import VERSION_DIGITS
-from pyanaconda.core.util import is_lpae_available, decode_bytes, join_paths, execWithCapture
-from pyanaconda.modules.common.constants.objects import DEVICE_TREE
+from pyanaconda.core.util import execWithCapture
+from pyanaconda.modules.common.constants.objects import DEVICE_TREE, DISK_SELECTION
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.structures.packages import PackagesSelectionData
-from pyanaconda.product import productName, productVersion
 from pyanaconda.modules.payloads.base.utils import sort_kernel_version_list
+from pyanaconda.modules.payloads.constants import SourceType
 
 log = get_module_logger(__name__)
 
@@ -86,11 +90,11 @@ def get_product_release_version():
     :return: a string with the release version
     """
     try:
-        release_version = VERSION_DIGITS.match(productVersion).group(1)
+        release_version = VERSION_DIGITS.match(get_product_version()).group(1)
     except AttributeError:
         release_version = "rawhide"
 
-    log.debug("Release version of %s is %s.", productName, release_version)
+    log.debug("Release version of %s is %s.", get_product_name(), release_version)
     return release_version
 
 
@@ -166,11 +170,9 @@ def get_kernel_version_list():
     mi = ts.dbMatch('providename', 'kernel')
 
     for hdr in mi:
-        unicode_fnames = (decode_bytes(f) for f in hdr.filenames)
-
         # Find all /boot/vmlinuz- files and strip off vmlinuz-.
         files.extend((
-            f.split("/")[-1][8:] for f in unicode_fnames
+            f.split("/")[-1][8:] for f in hdr.filenames
             if fnmatch.fnmatch(f, "/boot/vmlinuz-*") or
             fnmatch.fnmatch(f, "/boot/efi/EFI/%s/vmlinuz-*" % efi_dir)
         ))
@@ -328,7 +330,7 @@ def pick_download_location(dnf_manager):
     mount_point = _get_biggest_mount_point(mount_points, sufficient)
 
     log.info("Mount point %s picked as download location", mount_point)
-    location = util.join_paths(mount_point, DNF_PACKAGE_CACHE_DIR_SUFFIX)
+    location = join_paths(mount_point, DNF_PACKAGE_CACHE_DIR_SUFFIX)
 
     return location
 
@@ -363,3 +365,64 @@ def calculate_required_space(dnf_manager):
 
     log.debug("The package installation requires %s.", required_space)
     return required_space
+
+
+def collect_installation_devices(sources, repositories):
+    """Collect devices of installation sources.
+
+    :return: a list of device specifications
+    """
+    devices = set()
+
+    configurations = [
+        s.configuration
+        for s in sources
+        if s.type == SourceType.HDD
+    ]
+
+    for repository in configurations + repositories:
+        if repository.url.startswith("hd:"):
+            device, _path = parse_hdd_url(repository.url)
+            devices.add(device)
+
+    return devices
+
+
+def protect_installation_devices(previous_devices, current_devices):
+    """Protect installation devices.
+
+    :param previous_devices: a list of device specifications
+    :param current_devices: a list of device specifications
+    """
+    # Nothing has changed.
+    if previous_devices == current_devices:
+        return
+
+    disk_selection_proxy = STORAGE.get_proxy(DISK_SELECTION)
+    protected_devices = disk_selection_proxy.ProtectedDevices
+
+    # Remove previous devices from the list.
+    for spec in previous_devices:
+        if spec in protected_devices:
+            protected_devices.remove(spec)
+
+    # Add current devices from the list.
+    for spec in sorted(current_devices):
+        if spec not in protected_devices:
+            protected_devices.append(spec)
+
+    disk_selection_proxy.ProtectedDevices = protected_devices
+
+
+def transaction_has_errors(transaction):
+    """Detect if finished DNF transaction has any errors.
+
+    :param transaction: the DNF transaction
+    :return: True if the transaction has any error, otherwise False
+    """
+    has_errors = False
+    for tsi in transaction:
+        if tsi.state == TransactionItemState_ERROR:
+            log.error("The transaction contains item %s in error state.", tsi)
+            has_errors = True
+    return has_errors

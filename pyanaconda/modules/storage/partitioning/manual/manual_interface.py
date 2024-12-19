@@ -20,6 +20,7 @@
 from dasbus.server.interface import dbus_interface
 from dasbus.server.property import emits_properties_changed
 from dasbus.typing import *  # pylint: disable=wildcard-import
+
 from pyanaconda.modules.common.constants.objects import MANUAL_PARTITIONING
 from pyanaconda.modules.common.structures.partitioning import MountPointRequest
 from pyanaconda.modules.storage.partitioning.base_interface import PartitioningInterface
@@ -39,8 +40,9 @@ class ManualPartitioningInterface(PartitioningInterface):
         """List of mount point requests."""
         return MountPointRequest.to_structure_list(self.implementation.requests)
 
+    @Requests.setter
     @emits_properties_changed
-    def SetRequests(self, requests: List[Structure]):
+    def Requests(self, requests: List[Structure]):
         """Set the mount point requests.
 
         :param requests: a list of requests

@@ -21,21 +21,20 @@
 import os
 import sys
 
-from dasbus.typing import get_variant, Str
-from pyanaconda.core.configuration.anaconda import conf
-
-from pyanaconda.core import util
-from pyanaconda.core.constants import RHSM_SERVICE_TIMEOUT
-from pyanaconda.modules.common.constants.objects import RHSM_CONFIG
-from pyanaconda.modules.common.constants.services import RHSM
-from pyanaconda.threading import threadMgr
-from pyanaconda.modules.common.task import Task
-from pyanaconda.modules.common.errors.task import NoResultError
+from dasbus.typing import Str, get_variant
 
 from pyanaconda.anaconda_loggers import get_module_logger
-log = get_module_logger(__name__)
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import RHSM_SERVICE_TIMEOUT
+from pyanaconda.core.service import is_service_installed, start_service
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.modules.common.constants.objects import RHSM_CONFIG
+from pyanaconda.modules.common.constants.services import RHSM
+from pyanaconda.modules.common.errors.task import NoResultError
+from pyanaconda.modules.common.task import Task
+from pyanaconda.modules.subscription.constants import RHSM_SERVICE_NAME
 
-RHSM_SYSTEMD_UNIT_NAME = "rhsm.service"
+log = get_module_logger(__name__)
 
 
 def check_initial_conditions():
@@ -50,7 +49,7 @@ def check_initial_conditions():
         sys.exit(1)
 
     # Exclude environments without the rhsm service.
-    if not util.is_service_installed(RHSM_SYSTEMD_UNIT_NAME, root="/"):
+    if not is_service_installed(RHSM_SERVICE_NAME):
         log.debug(
             "subscription: The required rhsm systemd service is not available. "
             "The Subscription module won't be started."
@@ -94,7 +93,7 @@ class StartRHSMTask(Task):
         # - this is blocking, but as we are effectively running in a thread
         # it should not be an issue
         # - if the return code is non-zero, return False immediately
-        rc = util.start_service(RHSM_SYSTEMD_UNIT_NAME)
+        rc = start_service(RHSM_SERVICE_NAME)
         if rc:
             log.warning(
                 "subscription: RHSM systemd service failed to start with error code: %s",
@@ -127,7 +126,7 @@ class StartRHSMTask(Task):
             # Wait up to defined timeout for the service to startup
             # by joining the thread running the task. We specify a timeout when
             # joining to prevent a deadlocked task blocking this method forever.
-            thread = threadMgr.get(self._thread_name)
+            thread = thread_manager.get(self._thread_name)
             if thread:
                 log.debug("subscription: waiting for RHSM service to start for up to %f seconds.",
                           timeout)

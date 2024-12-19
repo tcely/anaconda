@@ -17,13 +17,19 @@
 #
 from unittest.case import TestCase
 
-from pyanaconda.core.kickstart.specification import KickstartSpecificationHandler, \
-    KickstartSpecificationParser
+import pytest
+
+from pyanaconda.core.kickstart.specification import (
+    KickstartSpecificationHandler,
+    KickstartSpecificationParser,
+)
 from pyanaconda.modules.payloads.constants import PayloadType
 from pyanaconda.modules.payloads.kickstart import PayloadKickstartSpecification
 from pyanaconda.modules.payloads.payload.factory import PayloadFactory
 from pyanaconda.modules.payloads.payload.payload_base import PayloadBase
-from pyanaconda.modules.payloads.payload.payload_base_interface import PayloadBaseInterface
+from pyanaconda.modules.payloads.payload.payload_base_interface import (
+    PayloadBaseInterface,
+)
 
 
 class PayloadFactoryTestCase(TestCase):
@@ -33,13 +39,13 @@ class PayloadFactoryTestCase(TestCase):
         """Test PayloadFactory create method."""
         for payload_type in PayloadType:
             module = PayloadFactory.create_payload(payload_type)
-            self.assertIsInstance(module, PayloadBase)
-            self.assertIsInstance(module.for_publication(), PayloadBaseInterface)
-            self.assertEqual(module.type, payload_type)
+            assert isinstance(module, PayloadBase)
+            assert isinstance(module.for_publication(), PayloadBaseInterface)
+            assert module.type == payload_type
 
     def test_failed_create_payload(self):
         """Test failed create method of the payload factory."""
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             PayloadFactory.create_payload("INVALID")
 
     def test_create_payload_from_ks(self):
@@ -95,4 +101,4 @@ class PayloadFactoryTestCase(TestCase):
         handler = KickstartSpecificationHandler(specification)
         parser = KickstartSpecificationParser(handler, specification)
         parser.readKickstartFromString(kickstart)
-        self.assertEqual(payload_type, PayloadFactory.get_type_for_kickstart(handler))
+        assert payload_type == PayloadFactory.get_type_for_kickstart(handler)

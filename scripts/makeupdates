@@ -25,7 +25,6 @@ import subprocess
 import sys
 import re
 import glob
-import multiprocessing
 import argparse
 import tempfile
 
@@ -33,11 +32,14 @@ RPM_FOLDER_NAME = os.path.expanduser("~/.anaconda_updates_rpm_cache")
 RPM_RELEASE_DIR_TEMPLATE = "for_%s"
 
 # The Python site-packages path for pyanaconda.
-SITE_PACKAGES_PATH = "./usr/lib64/python3.10/site-packages/"
+SITE_PACKAGES_PATH = "./usr/lib64/python3.13/site-packages/"
 
 # Anaconda scripts that should be installed into the libexec folder
-LIBEXEC_SCRIPTS = ["log-capture", "start-module", "apply-updates"]
+LIBEXEC_SCRIPTS = ["log-capture", "start-module", "apply-updates", "anaconda-pre-log-gen",
+                   "run-in-new-session"]
 
+# Anaconda scripts that should be installed into /usr/bin
+USR_BIN_SCRIPTS = ["anaconda-disable-nm-ibft-plugin", "anaconda-nm-disable-autocons"]
 
 def get_archive_tag(configure, spec):
     tag = ""
@@ -55,9 +57,7 @@ def get_archive_tag(configure, spec):
         for line in f:
             if line.startswith('Release:'):
                 release = '-' + line.split()[1].split('%')[0]
-                if "@PACKAGE_RELEASE@" in release:
-                    tag += "-1"
-                else:
+                if "@PACKAGE_RELEASE@" not in release:
                     tag += release
             else:
                 continue
@@ -159,7 +159,10 @@ def copy_updated_files(tag, updates, cwd, builddir):
         outdir = os.path.join(updates, relpath)
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
-        shutil.copy2(fname, outdir)
+        if os.path.isdir(fname):
+            shutil.copytree(fname, outdir, dirs_exist_ok=True)
+        else:
+            shutil.copy2(fname, outdir)
 
     def install_gschema():
         # Run make install to a temp directory and pull the compiled file out
@@ -227,6 +230,7 @@ def copy_updated_files(tag, updates, cwd, builddir):
             install_to_dir(gitfile, dirname)
         elif gitfile == 'anaconda.py':
             # Install it as /usr/sbin/anaconda
+            sys.stdout.write("Including %s\n" % gitfile)
             if not os.path.isdir(os.path.join(updates, "usr/sbin")):
                 os.makedirs(os.path.join(updates, "usr/sbin"))
             shutil.copy2(gitfile, os.path.join(updates, "usr/sbin/anaconda"))
@@ -235,9 +239,9 @@ def copy_updated_files(tag, updates, cwd, builddir):
             if gitfile.endswith('.service') or gitfile.endswith(".target"):
                 # same for systemd services
                 install_to_dir(gitfile, "usr/lib/systemd/system")
-        elif gitfile.endswith('/anaconda-generator'):
-            # yeah, this should probably be more clever..
-            install_to_dir(gitfile, "usr/lib/systemd/system-generators")
+            elif gitfile.endswith('/anaconda-generator'):
+                # yeah, this should probably be more clever..
+                install_to_dir(gitfile, "usr/lib/systemd/system-generators")
         elif gitfile == "data/tmux.conf":
             install_to_dir(gitfile, "usr/share/anaconda")
         elif gitfile == "data/anaconda-gtk.css":
@@ -253,7 +257,7 @@ def copy_updated_files(tag, updates, cwd, builddir):
         elif gitfile.startswith("data/profile.d"):
             install_to_dir(gitfile, "etc/anaconda/profile.d")
         elif gitfile == "data/liveinst/liveinst":
-            install_to_dir(gitfile, "usr/sbin")
+            install_to_dir(gitfile, "usr/bin")
         elif gitfile.startswith("data/liveinst/gnome"):
             install_to_dir(gitfile, "usr/share/anaconda/gnome")
         elif gitfile.startswith("data/pixmaps"):
@@ -266,10 +270,12 @@ def copy_updated_files(tag, updates, cwd, builddir):
             install_gschema()
         elif gitfile.startswith("data/post-scripts/"):
             install_to_dir(gitfile, "usr/share/anaconda/post-scripts")
-        elif gitfile == "utils/handle-sshpw":
+        elif gitfile == "scripts/handle-sshpw":
             install_to_dir(gitfile, "usr/sbin")
         elif any(gitfile.endswith(libexec_script) for libexec_script in LIBEXEC_SCRIPTS):
             install_to_dir(gitfile, "usr/libexec/anaconda")
+        elif any(gitfile.endswith(usr_bin_script) for usr_bin_script in USR_BIN_SCRIPTS):
+            install_to_dir(gitfile, "usr/bin")
         elif gitfile.endswith("AnacondaWidgets.py"):
             import gi
             install_to_dir(gitfile, gi._overridesdir[1:])
@@ -308,15 +314,8 @@ def _compilableChanged(tag, compilable):
 
     return False
 
-def isys_changed(tag):
-    return _compilableChanged(tag, 'pyanaconda/isys')
-
 def widgets_changed(tag):
     return _compilableChanged(tag, 'widgets')
-
-def auditd_changed(tag):
-    return _compilableChanged(tag, 'pyanaconda/isys/auditd.c') or \
-            _compilableChanged(tag, 'pyanaconda/isys/auditd.h')
 
 def check_autotools(srcdir, builddir):
     # Assumes that cwd is srcdir
@@ -327,40 +326,14 @@ def check_autotools(srcdir, builddir):
         os.system(os.path.join(srcdir, 'configure') + ' --prefix=`rpm --eval %_prefix`')
         os.chdir(srcdir)
 
-def copy_updated_isys(updates, srcdir, builddir):
-    os.chdir(srcdir)
-    print("copy_updated_isys BUILDDIR %s" % builddir)
-
-    check_autotools(srcdir, builddir)
-
-    os.system('make -C %s -j %d' % (builddir, multiprocessing.cpu_count()))
-
-    outdir = os.path.join(updates, SITE_PACKAGES_PATH, "pyanaconda")
-    if not os.path.isdir(outdir):
-        os.makedirs(outdir)
-
-    isysmodule = os.path.realpath(os.path.join(builddir, 'pyanaconda/isys/.libs/_isys.so'))
-
-    if os.path.isfile(isysmodule):
-        sys.stdout.write("Including %s\n" % isysmodule)
-        shutil.copy2(isysmodule, outdir)
-
-def copy_updated_auditd(updates, srcdir, builddir):
-    os.chdir(srcdir)
-    print("copy_updated_isys BUILLDIR %s" % builddir)
-    auditdir = updates + '/usr/sbin'
-
-    check_autotools(srcdir, builddir)
-
-    os.system('make -C %s -j %d auditd' % (builddir + '/pyanaconda/isys', multiprocessing.cpu_count()))
-
-    # Copy the auditd binary to /usr/sbin
-    if not os.path.isdir(auditdir):
-        os.makedirs(auditdir)
-
-    auditd = builddir + '/pyanaconda/isys/auditd'
-    if os.path.isfile(auditd):
-        shutil.copy2(auditd, auditdir)
+def generate_dbus_code(srcdir):
+    os.system('gdbus-codegen '
+              '--interface-prefix org.fedoraproject.Anaconda.Modules. '
+              '--c-namespace An '
+              '--generate-c-code an-localization '
+              '--output-directory %s/widgets/src '
+              '%s/widgets/src/dbus/org.fedoraproject.Anaconda.Modules.Localization.xml'
+              % (srcdir, srcdir))
 
 def copy_updated_widgets(updates, srcdir, builddir):
     os.chdir(srcdir)
@@ -439,7 +412,10 @@ def add_rpms(updates_path, rpms):
     for rpm in resolved_rpms:
         cmd = "cd %s && rpm2cpio %s | cpio -dium" % (updates_path, rpm)
         sys.stdout.write(cmd+"\n")
-        os.system(cmd)
+        ret = os.system(cmd)
+
+        if ret != 0:
+            raise RuntimeError(f"RPM {rpm} can't be added to the updates image!")
 
 def create_updates_image(cwd, updates):
     os.chdir(updates)
@@ -467,7 +443,7 @@ def main():
                         help='do not delete updates subdirectory')
 
     parser.add_argument('-c', '--compile', action='store_true',
-                        help='compile code if there are isys changes')
+                        help='compile code if there are changes in widgets')
 
     parser.add_argument('-t', '--tag', action='store', type=str,
                         help='make updates image from TAG to HEAD')
@@ -515,14 +491,9 @@ def main():
     copy_updated_files(args.tag, updates, cwd, builddir)
 
     if args.compile:
-        if isys_changed(args.tag):
-            copy_updated_isys(updates, cwd, builddir)
-
+        generate_dbus_code(cwd)
         if widgets_changed(args.tag):
             copy_updated_widgets(updates, cwd, builddir)
-
-        if auditd_changed(args.tag):
-            copy_updated_auditd(updates, cwd, builddir)
 
     if args.po:
         copy_translations(updates, cwd, builddir)

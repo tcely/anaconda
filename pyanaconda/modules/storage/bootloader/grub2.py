@@ -17,23 +17,24 @@
 #
 import os
 import re
-from _ped import PARTITION_BIOS_GRUB
 
+from _ped import PARTITION_BIOS_GRUB  # pylint: disable=no-name-in-module
 from blivet.devicelibs import raid
 
-from pyanaconda.modules.storage.bootloader.base import BootLoader, BootLoaderError
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core import util
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.i18n import _
-from pyanaconda.product import productName
+from pyanaconda.core.path import open_with_perm
+from pyanaconda.core.product import get_product_name
+from pyanaconda.modules.storage.bootloader.base import BootLoader, BootLoaderError
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ["GRUB2", "IPSeriesGRUB2"]
 
 
-class SerialConsoleOptions(object):
+class SerialConsoleOptions:
     """The serial console options."""
 
     def __init__(self):
@@ -183,7 +184,7 @@ class GRUB2(BootLoader):
 
     @property
     def stage2_format_types(self):
-        if productName.startswith("Red Hat "): # pylint: disable=no-member
+        if get_product_name().startswith("Red Hat "): # pylint: disable=no-member
             return ["xfs", "ext4", "ext3", "ext2"]
         else:
             return ["ext4", "ext3", "ext2", "btrfs", "xfs"]
@@ -310,7 +311,7 @@ class GRUB2(BootLoader):
             return
 
         users_file = "%s%s/%s" % (conf.target.system_root, self.config_dir, self._passwd_file)
-        header = util.open_with_perm(users_file, "w", 0o600)
+        header = open_with_perm(users_file, "w", 0o600)
         # XXX FIXME: document somewhere that the username is "root"
         self._encrypt_password()
         password_line = "GRUB2_PASSWORD=" + self.encrypted_password
@@ -343,22 +344,31 @@ class GRUB2(BootLoader):
                 machine_id = fd.readline().strip()
 
             default_entry = "%s-%s" % (machine_id, self.default.version)
-            rc = util.execInSysroot("grub2-set-default", [default_entry])
+            rc = util.execWithRedirect(
+                "grub2-set-default",
+                [default_entry],
+                root=conf.target.system_root
+            )
             if rc:
-                log.error("failed to set default menu entry to %s", productName)
+                log.error("failed to set default menu entry to %s", get_product_name())
 
         # set menu_auto_hide grubenv variable if we should enable menu_auto_hide
         # set boot_success so that the menu is hidden on the boot after install
         if conf.bootloader.menu_auto_hide:
-            rc = util.execInSysroot("grub2-editenv",
-                                    ["-", "set", "menu_auto_hide=1",
-                                     "boot_success=1"])
+            rc = util.execWithRedirect(
+                "grub2-editenv",
+                ["-", "set", "menu_auto_hide=1", "boot_success=1"],
+                root=conf.target.system_root
+            )
             if rc:
                 log.error("failed to set menu_auto_hide=1")
 
         # now tell grub2 to generate the main configuration file
-        rc = util.execInSysroot("grub2-mkconfig",
-                                ["-o", self.config_file])
+        rc = util.execWithRedirect(
+            "grub2-mkconfig",
+            ["-o", self.config_file],
+            root=conf.target.system_root
+        )
         if rc:
             raise BootLoaderError("failed to write boot loader configuration")
 
@@ -369,8 +379,6 @@ class GRUB2(BootLoader):
     @property
     def install_targets(self):
         """ List of (stage1, stage2) tuples representing install targets. """
-        targets = []
-
         # make sure we have stage1 and stage2 installed with redundancy
         # so that boot can succeed even in the event of failure or removal
         # of some of the disks containing the member partitions of the
@@ -378,33 +386,30 @@ class GRUB2(BootLoader):
         # be a partition on a particular disk (biosboot, prepboot), so only
         # add the redundant targets if installing stage1 to a disk that is
         # a member of the stage2 array.
+        stage2_parents = []
 
-        # Look for both mdraid and btrfs raid
-        if self.stage2_device.type == "mdarray" and \
-           self.stage2_device.level in self.stage2_raid_levels:
-            stage2_raid = True
-            # Set parents to the list of partitions in the RAID
-            stage2_parents = self.stage2_device.parents
-        elif self.stage2_device.type == "btrfs subvolume" and \
-           self.stage2_device.parents[0].data_level in self.stage2_raid_levels:
-            stage2_raid = True
-            # Set parents to the list of partitions in the parent volume
-            stage2_parents = self.stage2_device.parents[0].parents
-        else:
-            stage2_raid = False
+        if self.stage1_device \
+                and self.stage2_device \
+                and self.stage1_device.is_disk \
+                and self.stage2_device.depends_on(self.stage1_device):
 
-        if stage2_raid and \
-           self.stage1_device.is_disk and \
-           self.stage2_device.depends_on(self.stage1_device):
-            for stage2dev in stage2_parents:
-                # if target disk contains any of /boot array's member
-                # partitions, set up stage1 on each member's disk
-                stage1dev = stage2dev.disk
-                targets.append((stage1dev, self.stage2_device))
-        else:
-            targets.append((self.stage1_device, self.stage2_device))
+            # Look for both mdraid and btrfs raid
+            if self.stage2_device.type == "mdarray" and \
+                    self.stage2_device.level in self.stage2_raid_levels:
+                # Set parents to the list of partitions in the RAID
+                stage2_parents = self.stage2_device.parents
 
-        return targets
+            elif self.stage2_device.type == "btrfs subvolume" and \
+                    self.stage2_device.parents[0].data_level in self.stage2_raid_levels:
+                # Set parents to the list of partitions in the parent volume
+                stage2_parents = self.stage2_device.parents[0].parents
+
+        if stage2_parents:
+            # If target disk contains any of /boot array's member
+            # partitions, set up stage1 on each member's disk.
+            return [(d.disk, self.stage2_device) for d in stage2_parents]
+
+        return super().install_targets
 
     def install(self, args=None):
         if args is None:
@@ -475,13 +480,12 @@ class GRUB2(BootLoader):
         # If the first partition starts too low and there is no biosboot partition show an error.
         error_msg = None
         biosboot = False
-        parts = self.stage1_disk.format.parted_disk.partitions
-        for p in parts:
-            if p.getFlag(PARTITION_BIOS_GRUB):
+        for p in self.stage1_disk.children:
+            if p.format.type == "biosboot" or p.parted_partition.getFlag(PARTITION_BIOS_GRUB):
                 biosboot = True
                 break
 
-            start = p.geometry.start * p.disk.device.sectorSize
+            start = p.parted_partition.geometry.start * p.parted_partition.disk.device.sectorSize
             if start < min_start:
                 error_msg = _("%(deviceName)s may not have enough space for grub2 to embed "
                               "core.img when using the %(fsType)s file system on %(deviceType)s") \

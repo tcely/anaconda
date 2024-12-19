@@ -18,42 +18,66 @@
 #
 from collections import OrderedDict
 
-from pyanaconda.modules.common.constants.objects import DISK_SELECTION, DISK_INITIALIZATION, \
-    BOOTLOADER, DEVICE_TREE
-from pyanaconda.modules.common.constants.services import STORAGE
-from pyanaconda.modules.common.structures.partitioning import MountPointRequest, \
-    PartitioningRequest
-from pyanaconda.modules.common.structures.storage import DeviceFormatData, DeviceData
-from pyanaconda.modules.common.structures.validation import ValidationReport
-from pyanaconda.ui.categories.system import SystemCategory
-from pyanaconda.ui.lib.storage import find_partitioning, reset_storage, \
-    select_default_disks, apply_disk_selection, get_disks_summary, apply_partitioning, \
-    create_partitioning, filter_disks_by_names
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.tui.tuiobject import Dialog, PasswordDialog
-from pyanaconda.core.storage import get_supported_autopart_choices
-from pyanaconda.ui.lib.format_dasd import DasdFormatting
-
 from blivet.size import Size
-from pyanaconda.flags import flags
-from pyanaconda.threading import threadMgr, AnacondaThread
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import THREAD_STORAGE, THREAD_STORAGE_WATCHER, \
-    PAYLOAD_STATUS_PROBING_STORAGE, CLEAR_PARTITIONS_ALL, \
-    CLEAR_PARTITIONS_LINUX, CLEAR_PARTITIONS_NONE, CLEAR_PARTITIONS_DEFAULT, \
-    BOOTLOADER_LOCATION_MBR, SecretType, WARNING_NO_DISKS_DETECTED, WARNING_NO_DISKS_SELECTED, \
-    PARTITIONING_METHOD_AUTOMATIC, PARTITIONING_METHOD_CUSTOM, PARTITIONING_METHOD_MANUAL, \
-    PASSWORD_POLICY_LUKS
-from pyanaconda.core.i18n import _, N_
-
+from simpleline.render.adv_widgets import YesNoDialog
 from simpleline.render.containers import ListColumnContainer
 from simpleline.render.prompt import Prompt
 from simpleline.render.screen import InputState
 from simpleline.render.screen_handler import ScreenHandler
-from simpleline.render.widgets import TextWidget, CheckboxWidget, EntryWidget
-from simpleline.render.adv_widgets import YesNoDialog
+from simpleline.render.widgets import CheckboxWidget, EntryWidget, TextWidget
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import (
+    BOOTLOADER_LOCATION_MBR,
+    CLEAR_PARTITIONS_ALL,
+    CLEAR_PARTITIONS_DEFAULT,
+    CLEAR_PARTITIONS_LINUX,
+    CLEAR_PARTITIONS_NONE,
+    PARTITIONING_METHOD_AUTOMATIC,
+    PARTITIONING_METHOD_MANUAL,
+    PASSWORD_POLICY_LUKS,
+    PAYLOAD_STATUS_PROBING_STORAGE,
+    THREAD_STORAGE,
+    THREAD_STORAGE_WATCHER,
+    WARNING_NO_DISKS_DETECTED,
+    WARNING_NO_DISKS_SELECTED,
+    SecretType,
+)
+from pyanaconda.core.i18n import N_, _
+from pyanaconda.core.storage import get_supported_autopart_choices
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.flags import flags
+from pyanaconda.modules.common.constants.objects import (
+    BOOTLOADER,
+    DEVICE_TREE,
+    DISK_INITIALIZATION,
+    DISK_SELECTION,
+)
+from pyanaconda.modules.common.constants.services import STORAGE
+from pyanaconda.modules.common.structures.partitioning import (
+    MountPointRequest,
+    PartitioningRequest,
+)
+from pyanaconda.modules.common.structures.storage import DeviceData, DeviceFormatData
+from pyanaconda.modules.common.structures.validation import ValidationReport
+from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.lib.format_dasd import DasdFormatting
+from pyanaconda.ui.lib.storage import (
+    apply_disk_selection,
+    apply_partitioning,
+    create_partitioning,
+    filter_disks_by_names,
+    find_partitioning,
+    get_disks_summary,
+    is_passphrase_required,
+    reset_storage,
+    select_default_disks,
+    set_required_passphrase,
+)
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
+from pyanaconda.ui.tui.tuiobject import Dialog, PasswordDialog
+
 log = get_module_logger(__name__)
 
 __all__ = ["StorageSpoke"]
@@ -77,8 +101,12 @@ class StorageSpoke(NormalTUISpoke):
        .. inheritance-diagram:: StorageSpoke
           :parts: 3
     """
-    helpFile = "StorageSpoke.txt"
     category = SystemCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "storage-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -122,8 +150,8 @@ class StorageSpoke(NormalTUISpoke):
         # By default, the storage spoke is not ready.  We have to wait until
         # storageInitialize is done.
         return self._ready \
-            and not threadMgr.get(THREAD_STORAGE) \
-            and not threadMgr.get(THREAD_STORAGE_WATCHER)
+            and not thread_manager.get(THREAD_STORAGE) \
+            and not thread_manager.get(THREAD_STORAGE_WATCHER)
 
     @property
     def mandatory(self):
@@ -180,7 +208,7 @@ class StorageSpoke(NormalTUISpoke):
         # Join the initialization thread to block on it
         # This print is foul.  Need a better message display
         print(_(PAYLOAD_STATUS_PROBING_STORAGE))
-        threadMgr.wait(THREAD_STORAGE_WATCHER)
+        thread_manager.wait(THREAD_STORAGE_WATCHER)
 
         self._available_disks = self._disk_select_module.GetUsableDisks()
         self._selected_disks = self._disk_select_module.SelectedDisks
@@ -267,11 +295,11 @@ class StorageSpoke(NormalTUISpoke):
                     # Is DASD formatting supported?
                     if DasdFormatting.is_supported():
                         # Wait for storage.
-                        threadMgr.wait(THREAD_STORAGE)
+                        thread_manager.wait(THREAD_STORAGE)
 
                         # Allow to format DASDs.
-                        self._disk_init_module.SetFormatUnrecognizedEnabled(True)
-                        self._disk_init_module.SetFormatLDLEnabled(True)
+                        self._disk_init_module.FormatUnrecognizedEnabled = True
+                        self._disk_init_module.FormatLDLEnabled = True
 
                         # Get selected disks.
                         disks = filter_disks_by_names(self._available_disks, self._selected_disks)
@@ -345,7 +373,7 @@ class StorageSpoke(NormalTUISpoke):
 
     def run_passphrase_dialog(self):
         """Ask user for a default passphrase."""
-        if not self._is_passphrase_required():
+        if not is_passphrase_required(self._partitioning):
             return
 
         dialog = PasswordDialog(
@@ -361,21 +389,10 @@ class StorageSpoke(NormalTUISpoke):
         while passphrase is None:
             passphrase = dialog.run()
 
-        self._set_required_passphrase(passphrase)
-
-    def _is_passphrase_required(self):
-        """Is the default passphrase required?"""
-        return self._partitioning.PartitioningMethod in (
-            PARTITIONING_METHOD_AUTOMATIC,
-            PARTITIONING_METHOD_CUSTOM
-        ) and self._partitioning.RequiresPassphrase()
-
-    def _set_required_passphrase(self, passphrase):
-        """Set the required passphrase."""
-        self._partitioning.SetPassphrase(passphrase)
+        set_required_passphrase(self._partitioning, passphrase)
 
     def apply(self):
-        self._bootloader_module.SetPreferredLocation(BOOTLOADER_LOCATION_MBR)
+        self._bootloader_module.PreferredLocation = BOOTLOADER_LOCATION_MBR
         apply_disk_selection(self._selected_disks, reset_boot_drive=True)
 
     def execute(self):
@@ -406,8 +423,10 @@ class StorageSpoke(NormalTUISpoke):
         if flags.automatedInstall and flags.ksprompt:
             self.run_passphrase_dialog()
 
-        threadMgr.add(AnacondaThread(name=THREAD_STORAGE_WATCHER,
-                                     target=self._initialize))
+        thread_manager.add_thread(
+            name=THREAD_STORAGE_WATCHER,
+            target=self._initialize
+        )
 
     def _initialize(self):
         """
@@ -415,7 +434,7 @@ class StorageSpoke(NormalTUISpoke):
         populating our disk list
         """
         # Wait for storage.
-        threadMgr.wait(THREAD_STORAGE)
+        thread_manager.wait(THREAD_STORAGE)
 
         # Automatically format DASDs if allowed.
         disks = self._disk_select_module.GetUsableDisks()
@@ -523,10 +542,9 @@ class PartTypeSpoke(NormalTUISpoke):
         # True. In the case of ks installs which may not have defined any
         # partition options, autopart was never set to True, causing some
         # issues. (rhbz#1001061)
-        self._disk_init_proxy.SetInitializationMode(self._init_mode)
-        self._disk_init_proxy.SetInitializeLabelsEnabled(
+        self._disk_init_proxy.InitializationMode = self._init_mode
+        self._disk_init_proxy.InitializeLabelsEnabled = \
             self._part_method == PARTITIONING_METHOD_AUTOMATIC
-        )
 
         if self._orig_part_method != self._part_method:
             self._partitioning = create_partitioning(self._part_method)
@@ -635,9 +653,8 @@ class PartitionSchemeSpoke(NormalTUISpoke):
 
     def apply(self):
         """ Apply our selections. """
-        self._partitioning.SetRequest(
+        self._partitioning.Request = \
             PartitioningRequest.to_structure(self._request)
-        )
 
 
 class MountPointAssignSpoke(NormalTUISpoke):
@@ -704,9 +721,8 @@ class MountPointAssignSpoke(NormalTUISpoke):
 
                 mount_points.append(request)
 
-        self._partitioning.SetRequests(
+        self._partitioning.Requests = \
             MountPointRequest.to_structure_list(mount_points)
-        )
 
     def _gather_requests(self):
         """Gather info about mount points."""
@@ -717,13 +733,12 @@ class MountPointAssignSpoke(NormalTUISpoke):
     def _get_request_description(self, request):
         """Get description of the given mount info."""
         # Get the device data.
-        device_name = self._device_tree.ResolveDevice(request.device_spec)
         device_data = DeviceData.from_structure(
-            self._device_tree.GetDeviceData(device_name)
+            self._device_tree.GetDeviceData(request.device_spec)
         )
 
         # Generate the description.
-        description = "{} ({})".format(request.device_spec, Size(device_data.size))
+        description = "{} ({})".format(device_data.name, Size(device_data.size))
 
         if request.format_type:
             description += "\n {}".format(request.format_type)
@@ -758,7 +773,7 @@ class MountPointAssignSpoke(NormalTUISpoke):
         reset_storage(scan_all=True)
 
         # Forget the mount point requests.
-        self._partitioning.SetRequests([])
+        self._partitioning.Requests = []
         self._requests = self._gather_requests()
 
 
@@ -768,7 +783,12 @@ class ConfigureDeviceSpoke(NormalTUISpoke):
 
     def __init__(self, data, storage, payload, device_tree, request):
         super().__init__(data, storage, payload)
-        self.title = N_("Configure device: %s") % request.device_spec
+
+        device_data = DeviceData.from_structure(
+            device_tree.GetDeviceData(request.device_spec)
+        )
+
+        self.title = N_("Configure device: %s") % device_data.name
         self._container = None
         self._device_tree = device_tree
         self._request = request
@@ -883,11 +903,8 @@ class ConfigureDeviceSpoke(NormalTUISpoke):
 
     def _switch_reformat(self, data):
         """Change value of reformat."""
-        device_name = self._device_tree.ResolveDevice(
-            self._request.device_spec
-        )
         format_data = DeviceFormatData.from_structure(
-            self._device_tree.GetFormatData(device_name)
+            self._device_tree.GetFormatData(self._request.device_spec)
         )
         device_format = format_data.type
 

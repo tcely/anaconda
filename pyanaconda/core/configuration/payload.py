@@ -18,7 +18,7 @@
 #  Author(s):  Vendula Poncova <vponcova@redhat.com>
 #
 from pyanaconda.core.configuration.base import Section
-from pyanaconda.core.constants import SOURCE_TYPE_CLOSEST_MIRROR, SOURCE_TYPE_CDN
+from pyanaconda.core.constants import SOURCE_TYPE_CDN, SOURCE_TYPE_CLOSEST_MIRROR
 
 
 class PayloadSection(Section):
@@ -52,6 +52,22 @@ class PayloadSection(Section):
         the closest mirror is selected, and the "updates" repo is enabled.
         """
         return self._get_option("updates_repositories", str).split()
+
+    @property
+    def disabled_repositories(self):
+        """List of names of repositories that should be disabled by default.
+
+        The following patterns are supported:
+
+            REPO-NAME   Match the full name.
+            PREFIX*     The name should start with PREFIX.
+            *SUFFIX     The name should end with SUFFIX.
+            *INFIX*     The name should contain INFIX.
+
+        The installer will disable system repositories with IDs, that match
+        at least one of the specified patterns, by default.
+        """
+        return self._get_option("disabled_repositories", str).split()
 
     @property
     def enabled_repositories_from_treeinfo(self):
@@ -90,17 +106,26 @@ class PayloadSection(Section):
         return value
 
     @property
-    def enable_ignore_broken_packages(self):
-        """Enable possibility to skip packages with conflicts and broken dependencies.
+    def flatpak_remote(self):
+        """Default remote source after deployment of local Flatpaks from the ISO.
 
-        This enables --ignorebroken parameter of the packages section and related DBus API.
+        Only one value can be set.
+        Supported format:
+            remote-name  remote-flatpak-repository
 
-        If this feature is disabled Anaconda won't start the installation when
-        --ignorebroken paramater is used. Instead print error message to user
-        when Anaconda is started and quit the installation process.
-        It will also block use of related DBus API.
+        :return: a tuple with (name, URL)
         """
-        return self._get_option("enable_ignore_broken_packages", bool)
+        return self._get_option("flatpak_remote", self._convert_flatpak_remote)
+
+    @classmethod
+    def _convert_flatpak_remote(cls, value):
+        """Convert flatpak remote from string to tuple."""
+        value = value.split()
+        if len(value) != 2:
+            raise ValueError("Flatpak remote needs to be in format 'name URL': {}".format(value))
+
+        return tuple(value)
+
 
     @property
     def verify_ssl(self):

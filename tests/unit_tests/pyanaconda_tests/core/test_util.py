@@ -16,74 +16,26 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 
-import unittest
 import os
-import tempfile
 import signal
-import shutil
 import sys
-
+import tempfile
+import unittest
 from io import StringIO
 from textwrap import dedent
 from threading import Lock
 from unittest.mock import Mock, patch
 
-from pyanaconda.errors import ExitError
-from pyanaconda.core.process_watchers import WatchProcesses
-from pyanaconda.core import util
-from pyanaconda.core.util import synchronized, LazyObject
-from pyanaconda.core.configuration.anaconda import conf
-
+import pytest
 from timer import timer
 
-ANACONDA_TEST_DIR = '/tmp/anaconda_tests_dir'
-
-
-class UpcaseFirstLetterTests(unittest.TestCase):
-
-    def test_upcase_first_letter(self):
-        """Upcasing first letter should work as expected."""
-
-        # no change
-        self.assertEqual(util.upcase_first_letter("Czech RePuBliC"),
-                         "Czech RePuBliC")
-
-        # simple case
-        self.assertEqual(util.upcase_first_letter("czech"), "Czech")
-
-        # first letter only
-        self.assertEqual(util.upcase_first_letter("czech republic"),
-                         "Czech republic")
-
-        # no lowercase
-        self.assertEqual(util.upcase_first_letter("czech Republic"),
-                         "Czech Republic")
-
-
-class RunSystemctlTests(unittest.TestCase):
-
-    def test_is_service_installed(self):
-        """Test the is_service_installed function."""
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.return_value = "fake.service enabled enabled"
-            self.assertEqual(util.is_service_installed("fake"), True)
-            execute.assert_called_once_with("systemctl", [
-                "list-unit-files", "fake.service", "--no-legend", "--root", "/mnt/sysroot"
-            ])
-
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.return_value = "fake.service enabled enabled"
-            self.assertEqual(util.is_service_installed("fake.service", root="/"), True)
-            execute.assert_called_once_with("systemctl", [
-                "list-unit-files", "fake.service", "--no-legend"
-            ])
-
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.return_value = ""
-            self.assertEqual(util.is_service_installed("fake", root="/"), False)
-            execute.assert_called_once_with("systemctl", [
-                "list-unit-files", "fake.service", "--no-legend"
-            ])
+from pyanaconda.core import util
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.live_user import User
+from pyanaconda.core.path import make_directories
+from pyanaconda.core.process_watchers import WatchProcesses
+from pyanaconda.core.util import LazyObject, is_stage2_on_nfs, synchronized
+from pyanaconda.errors import ExitError
 
 
 class RunProgramTests(unittest.TestCase):
@@ -91,17 +43,17 @@ class RunProgramTests(unittest.TestCase):
         """Test the _run_program method."""
 
         # correct calling should return rc==0
-        self.assertEqual(util._run_program(['ls'])[0], 0)
+        assert util._run_program(['ls'])[0] == 0
 
         # incorrect calling should return rc!=0
-        self.assertNotEqual(util._run_program(['ls', '--asdasd'])[0], 0)
+        assert util._run_program(['ls', '--asdasd'])[0] != 0
 
         # check if an int is returned for bot success and error
-        self.assertIsInstance(util._run_program(['ls'])[0], int)
-        self.assertIsInstance(util._run_program(['ls', '--asdasd'])[0], int)
+        assert isinstance(util._run_program(['ls'])[0], int)
+        assert isinstance(util._run_program(['ls', '--asdasd'])[0], int)
 
         # error should raise OSError
-        with self.assertRaises(OSError):
+        with pytest.raises(OSError):
             util._run_program(['asdasdadasd'])
 
     def test_run_program_binary(self):
@@ -110,25 +62,25 @@ class RunProgramTests(unittest.TestCase):
         # Echo something that cannot be decoded as utf-8
         retcode, output = util._run_program(['echo', '-en', r'\xa0\xa1\xa2'], binary_output=True)
 
-        self.assertEqual(retcode, 0)
-        self.assertEqual(output, b'\xa0\xa1\xa2')
+        assert retcode == 0
+        assert output == b'\xa0\xa1\xa2'
 
     def test_exec_with_redirect(self):
         """Test execWithRedirect."""
         # correct calling should return rc==0
-        self.assertEqual(util.execWithRedirect('ls', []), 0)
+        assert util.execWithRedirect('ls', []) == 0
 
         # incorrect calling should return rc!=0
-        self.assertNotEqual(util.execWithRedirect('ls', ['--asdasd']), 0)
+        assert util.execWithRedirect('ls', ['--asdasd']) != 0
 
     def test_exec_with_capture(self):
         """Test execWithCapture."""
 
         # check some output is returned
-        self.assertGreater(len(util.execWithCapture('ls', ['--help'])), 0)
+        assert len(util.execWithCapture('ls', ['--help'])) > 0
 
         # check no output is returned
-        self.assertEqual(len(util.execWithCapture('true', [])), 0)
+        assert len(util.execWithCapture('true', [])) == 0
 
     def test_exec_with_capture_no_stderr(self):
         """Test execWithCapture with no stderr"""
@@ -141,32 +93,49 @@ echo "error" >&2
             testscript.flush()
 
             # check that only the output is captured
-            self.assertEqual(
-                    util.execWithCapture("/bin/sh", [testscript.name], filter_stderr=True),
-                    "output\n")
+            assert util.execWithCapture("/bin/sh", [testscript.name], filter_stderr=True) == \
+                    "output\n"
 
             # check that both output and error are captured
-            self.assertEqual(util.execWithCapture("/bin/sh", [testscript.name]), "output\nerror\n")
+            assert util.execWithCapture("/bin/sh", [testscript.name]) == "output\nerror\n"
 
     def test_exec_with_capture_empty(self):
         """Test execWithCapture with no output"""
 
         # check that the output is an empty string
-        self.assertEqual(util.execWithCapture("/bin/sh", ["-c", "exit 0"]), "")
+        assert util.execWithCapture("/bin/sh", ["-c", "exit 0"]) == ""
+
+    @patch("pyanaconda.core.util.startProgram")
+    @patch("pyanaconda.core.util.get_live_user")
+    def test_exec_with_capture_as_live_user(self, mock_get_live_user, mock_start_program):
+        """Test execWithCaptureAsLiveUser."""
+        mock_get_live_user.return_value = User(name="testlive",
+                                               uid=1000,
+                                               env_add={"TEST": "test"},
+                                               env_prune=("TEST_PRUNE",)
+                                               )
+        mock_start_program.return_value.communicate.return_value = (b"", b"")
+
+        util.execWithCaptureAsLiveUser('ls', [])
+
+        mock_start_program.assert_called_once()
+        assert mock_start_program.call_args.kwargs["user"] == 1000
+        assert mock_start_program.call_args.kwargs["env_add"] == {"TEST": "test"}
+        assert mock_start_program.call_args.kwargs["env_prune"] == ("TEST_PRUNE",)
 
     def test_exec_readlines(self):
         """Test execReadlines."""
 
         # test no lines are returned
-        self.assertEqual(list(util.execReadlines("true", [])), [])
+        assert list(util.execReadlines("true", [])) == []
 
         # test some lines are returned
-        self.assertGreater(len(list(util.execReadlines("ls", ["--help"]))), 0)
+        assert len(list(util.execReadlines("ls", ["--help"]))) > 0
 
         # check that it always returns an iterator for both
         # if there is some output and if there isn't any
-        self.assertTrue(hasattr(util.execReadlines("ls", ["--help"]), "__iter__"))
-        self.assertTrue(hasattr(util.execReadlines("true", []), "__iter__"))
+        assert hasattr(util.execReadlines("ls", ["--help"]), "__iter__")
+        assert hasattr(util.execReadlines("true", []), "__iter__")
 
     def test_exec_readlines_normal_output(self):
         """Test the output of execReadlines."""
@@ -183,10 +152,11 @@ exit 0
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(StopIteration, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
 
         # Test output with no end of line
         with tempfile.NamedTemporaryFile(mode="w+t") as testscript:
@@ -200,10 +170,11 @@ exit 0
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(StopIteration, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
 
     def test_exec_readlines_exits(self):
         """Test execReadlines in different child exit situations."""
@@ -223,10 +194,11 @@ exit 1
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(OSError, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(OSError):
+                    rl_iterator.__next__()
 
         # Test exit on signal
         with tempfile.NamedTemporaryFile(mode="wt") as testscript:
@@ -240,10 +212,11 @@ kill -TERM $$
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(OSError, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(OSError):
+                    rl_iterator.__next__()
 
         # Repeat the above two tests, but exit before a final newline
         with tempfile.NamedTemporaryFile(mode="wt") as testscript:
@@ -257,10 +230,11 @@ exit 1
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(OSError, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(OSError):
+                    rl_iterator.__next__()
 
         with tempfile.NamedTemporaryFile(mode="wt") as testscript:
             testscript.write("""#!/bin/sh
@@ -273,10 +247,111 @@ kill -TERM $$
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(OSError, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(OSError):
+                    rl_iterator.__next__()
+
+    def test_exec_readlines_exits_noraise(self):
+        """Test execReadlines in different child exit situations without raising errors."""
+
+        # No tests should raise anything.
+
+        # Test a normal, non-0 exit
+        with tempfile.NamedTemporaryFile(mode="wt") as testscript:
+            testscript.write("""#!/bin/sh
+        echo "one"
+        echo "two"
+        echo "three"
+        exit 1
+        """)
+            testscript.flush()
+
+            with timer(5):
+                rl_iterator = util.execReadlines(
+                    "/bin/sh",
+                    [testscript.name],
+                    raise_on_nozero=False
+                )
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
+
+                assert rl_iterator.rc == 1
+
+        # Test with signal
+        with tempfile.NamedTemporaryFile(mode="wt") as testscript:
+            testscript.write("""#!/bin/sh
+echo "one"
+echo "two"
+echo "three"
+kill -TERM $$
+""")
+            testscript.flush()
+
+            with timer(5):
+                rl_iterator = util.execReadlines(
+                    "/bin/sh",
+                    [testscript.name],
+                    raise_on_nozero=False
+                )
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
+
+                assert rl_iterator.rc == -15
+
+        # Same as above but exit before a final newline
+        with tempfile.NamedTemporaryFile(mode="wt") as testscript:
+            testscript.write("""#!/bin/sh
+echo "one"
+echo "two"
+echo -n "three"
+exit 1
+""")
+            testscript.flush()
+
+            with timer(5):
+                rl_iterator = util.execReadlines(
+                    "/bin/sh",
+                    [testscript.name],
+                    raise_on_nozero=False
+                )
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
+
+                assert rl_iterator.rc == 1
+
+        with tempfile.NamedTemporaryFile(mode="wt") as testscript:
+            testscript.write("""#!/bin/sh
+echo "one"
+echo "two"
+echo -n "three"
+kill -TERM $$
+""")
+            testscript.flush()
+
+            with timer(5):
+                rl_iterator = util.execReadlines(
+                    "/bin/sh",
+                    [testscript.name],
+                    raise_on_nozero=False
+                )
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
+
+                assert rl_iterator.rc == -15
 
     def test_exec_readlines_signals(self):
         """Test execReadlines and signal receipt."""
@@ -296,10 +371,11 @@ exit 0
 
                 with timer(5):
                     rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                    self.assertEqual(next(rl_iterator), "one")
-                    self.assertEqual(next(rl_iterator), "two")
-                    self.assertEqual(next(rl_iterator), "three")
-                    self.assertRaises(StopIteration, rl_iterator.__next__)
+                    assert next(rl_iterator) == "one"
+                    assert next(rl_iterator) == "two"
+                    assert next(rl_iterator) == "three"
+                    with pytest.raises(StopIteration):
+                        rl_iterator.__next__()
         finally:
             signal.signal(signal.SIGHUP, old_HUP_handler)
 
@@ -320,10 +396,11 @@ exit 0
 
                 with timer(5):
                     rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                    self.assertEqual(next(rl_iterator), "one")
-                    self.assertEqual(next(rl_iterator), "two")
-                    self.assertEqual(next(rl_iterator), "three")
-                    self.assertRaises(StopIteration, rl_iterator.__next__)
+                    assert next(rl_iterator) == "one"
+                    assert next(rl_iterator) == "two"
+                    assert next(rl_iterator) == "three"
+                    with pytest.raises(StopIteration):
+                        rl_iterator.__next__()
         finally:
             signal.signal(signal.SIGHUP, old_HUP_handler)
 
@@ -342,10 +419,11 @@ exit 0
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name])
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "two")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(StopIteration, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "two"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
 
         # Test that filter stderr removes the middle line
         with tempfile.NamedTemporaryFile(mode="w+t") as testscript:
@@ -359,9 +437,10 @@ exit 0
 
             with timer(5):
                 rl_iterator = util.execReadlines("/bin/sh", [testscript.name], filter_stderr=True)
-                self.assertEqual(next(rl_iterator), "one")
-                self.assertEqual(next(rl_iterator), "three")
-                self.assertRaises(StopIteration, rl_iterator.__next__)
+                assert next(rl_iterator) == "one"
+                assert next(rl_iterator) == "three"
+                with pytest.raises(StopIteration):
+                    rl_iterator.__next__()
 
     def test_start_program_preexec_fn(self):
         """Test passing preexec_fn to startProgram."""
@@ -384,7 +463,7 @@ exit 0
 
             # Rewind testfile and look for the text
             testfile.seek(0, os.SEEK_SET)
-            self.assertEqual(testfile.read(), marker_text)
+            assert testfile.read() == marker_text
 
     def test_start_program_stdout(self):
         """Test redirecting stdout with startProgram."""
@@ -401,7 +480,7 @@ exit 0
 
             # Rewind testfile and look for the text
             testfile.seek(0, os.SEEK_SET)
-            self.assertEqual(testfile.read().strip(), marker_text)
+            assert testfile.read().strip() == marker_text
 
     def test_start_program_reset_handlers(self):
         """Test the reset_handlers parameter of startProgram."""
@@ -421,7 +500,7 @@ while true ; do sleep 1 ; done
                 # The process should die on the signal.
                 proc.send_signal(signal.SIGPIPE)
                 proc.communicate()
-                self.assertEqual(proc.returncode, -(signal.SIGPIPE))
+                assert proc.returncode == -(signal.SIGPIPE)
 
             # Start another copy without reset_handlers
             proc = util.startProgram(["/bin/sh", testscript.name], reset_handlers=False)
@@ -432,7 +511,7 @@ while true ; do sleep 1 ; done
                 proc.send_signal(signal.SIGPIPE)
                 proc.terminate()
                 proc.communicate()
-                self.assertEqual(proc.returncode, -(signal.SIGTERM))
+                assert proc.returncode == -(signal.SIGTERM)
 
     def test_exec_readlines_auto_kill(self):
         """Test execReadlines with reading only part of the output"""
@@ -453,15 +532,15 @@ done
                 proc = rl_iterator._proc
 
                 # Read two lines worth
-                self.assertEqual(next(rl_iterator), "hey")
-                self.assertEqual(next(rl_iterator), "hey")
+                assert next(rl_iterator) == "hey"
+                assert next(rl_iterator) == "hey"
 
                 # Delete the iterator and wait for the process to be killed
                 del rl_iterator
                 proc.communicate()
 
             # Check that the process is gone
-            self.assertIsNotNone(proc.poll())
+            assert proc.poll() is not None
 
     def test_watch_process(self):
         """Test watchProcess"""
@@ -474,296 +553,87 @@ done
                 proc.kill()
                 # Wait for the SIGCHLD
                 signal.pause()
-        self.assertRaises(ExitError, test_still_running)
+        with pytest.raises(ExitError):
+            test_still_running()
 
         # Make sure watchProcess checks that the process has not already exited
         with timer(5):
             proc = util.startProgram(["true"])
             proc.communicate()
-        self.assertRaises(ExitError, WatchProcesses.watch_process, proc, "test2")
+        with pytest.raises(ExitError):
+            WatchProcesses.watch_process(proc, "test2")
+
+    @patch("pyanaconda.core.util.startProgram")
+    def test_do_preexec(self, mock_start_program):
+        """Test the do_preexec option of exec*** functions."""
+        mock_start_program.return_value.communicate.return_value = (b"", b"")
+
+        util.execWithRedirect("ls", [])
+        mock_start_program.assert_called_once()
+        assert mock_start_program.call_args.kwargs["do_preexec"] is True
+        mock_start_program.reset_mock()
+
+        util.execWithRedirect("ls", [], do_preexec=False)
+        mock_start_program.assert_called_once()
+        assert mock_start_program.call_args.kwargs["do_preexec"] is False
+        mock_start_program.reset_mock()
+
+        util.execWithCapture("ls", [], do_preexec=True)
+        mock_start_program.assert_called_once()
+        assert mock_start_program.call_args.kwargs["do_preexec"] is True
+        mock_start_program.reset_mock()
+
+        util.execWithCapture("ls", [], do_preexec=False)
+        mock_start_program.assert_called_once()
+        assert mock_start_program.call_args.kwargs["do_preexec"] is False
+        mock_start_program.reset_mock()
 
 
 class MiscTests(unittest.TestCase):
-
-    def setUp(self):
-        # create the directory used for file/folder tests
-        if not os.path.exists(ANACONDA_TEST_DIR):
-            os.makedirs(ANACONDA_TEST_DIR)
-
-    def tearDown(self):
-        # remove the testing directory
-        shutil.rmtree(ANACONDA_TEST_DIR)
-
-    def test_mkdir_chain(self):
-        """Test mkdirChain."""
-
-        # don't fail if directory path already exists
-        util.mkdirChain('/')
-        util.mkdirChain('/tmp')
-
-        # create a path and test it exists
-        test_folder = "test_mkdir_chain"
-        test_paths = [
-            "foo",
-            "foo/bar/baz",
-            u"foo/bar/baz",
-            "",
-            "čřščščřščř",
-            u"čřščščřščř",
-            "asdasd asdasd",
-            "! spam"
-        ]
-
-        # join with the toplevel test folder and the folder for this
-        # test
-        test_paths = [os.path.join(ANACONDA_TEST_DIR, test_folder, p)
-                      for p in test_paths]
-
-        def create_return(path):
-            util.mkdirChain(path)
-            return path
-
-        # create the folders and check that they exist
-        for p in test_paths:
-            self.assertTrue(os.path.exists(create_return(p)))
-
-        # try to create them again - all the paths should already exist
-        # and the mkdirChain function needs to handle that
-        # without a traceback
-        for p in test_paths:
-            util.mkdirChain(p)
 
     def test_get_active_console(self):
         """Test get_active_console."""
 
         # at least check if a string is returned
-        self.assertIsInstance(util.get_active_console(), str)
+        assert isinstance(util.get_active_console(), str)
 
     def test_is_console_on_vt(self):
         """Test isConsoleOnVirtualTerminal."""
 
         # at least check if a bool is returned
-        self.assertIsInstance(util.isConsoleOnVirtualTerminal(), bool)
+        assert isinstance(util.isConsoleOnVirtualTerminal(), bool)
 
-    def test_vt_activate(self):
+    @patch("pyanaconda.core.util.execWithRedirect")
+    def test_vt_activate(self, exec_mock):
         """Test vtActivate."""
+        exec_mock.return_value = 0
+        assert util.vtActivate(2) is True
 
-        # pylint: disable=no-member
-
-        def raise_os_error(*args, **kwargs):
-            raise OSError
-
-        _execWithRedirect = util.vtActivate.__globals__['execWithRedirect']
-
-        try:
-            # chvt does not exist on all platforms
-            # and the function needs to correctly survie that
-            util.vtActivate.__globals__['execWithRedirect'] = raise_os_error
-
-            self.assertEqual(util.vtActivate(2), False)
-        finally:
-            util.vtActivate.__globals__['execWithRedirect'] = _execWithRedirect
-
-    def test_strip_accents(self):
-        """Test strip_accents."""
-
-        # empty string
-        self.assertEqual(util.strip_accents(u""), u"")
-        self.assertEqual(util.strip_accents(""), "")
-
-        # some Czech accents
-        self.assertEqual(util.strip_accents(u"ěščřžýáíéúů"), u"escrzyaieuu")
-        self.assertEqual(util.strip_accents(u"v češtině"), u"v cestine")
-        self.assertEqual(util.strip_accents(u"měšťánek rozšíří HÁČKY"), u"mestanek rozsiri HACKY")
-        self.assertEqual(util.strip_accents(u"nejneobhospodařovávatelnějšímu"),
-                         u"nejneobhospodarovavatelnejsimu")
-
-        # some German umlauts
-        self.assertEqual(util.strip_accents(u"Lärmüberhörer"), u"Larmuberhorer")
-        self.assertEqual(util.strip_accents(u"Heizölrückstoßabdämpfung"),
-                         u"Heizolrucksto\xdfabdampfung")
-
-        # some Japanese
-        self.assertEqual(util.strip_accents(u"日本語"), u"\u65e5\u672c\u8a9e")
-        self.assertEqual(util.strip_accents(u"アナコンダ"),  # Anaconda
-                         u"\u30a2\u30ca\u30b3\u30f3\u30bf")
-
-        # combined
-        input_string = u"ASCI měšťánek アナコンダ Heizölrückstoßabdämpfung"
-        output_string = u"ASCI mestanek \u30a2\u30ca\u30b3\u30f3\u30bf Heizolrucksto\xdfabdampfung"
-        self.assertEqual(util.strip_accents(input_string), output_string)
-
-    def test_cmp_obj_attrs(self):
-        """Test cmp_obj_attrs."""
-
-        # pylint: disable=attribute-defined-outside-init
-
-        class O(object):
-            pass
-
-        a = O()
-        a.b = 1
-        a.c = 2
-
-        a1 = O()
-        a1.b = 1
-        a1.c = 2
-
-        b = O()
-        b.b = 1
-        b.c = 3
-
-        # a class should have it's own attributes
-        self.assertTrue(util.cmp_obj_attrs(a, a, ["b", "c"]))
-        self.assertTrue(util.cmp_obj_attrs(a1, a1, ["b", "c"]))
-        self.assertTrue(util.cmp_obj_attrs(b, b, ["b", "c"]))
-
-        # a and a1 should have the same attributes
-        self.assertTrue(util.cmp_obj_attrs(a, a1, ["b", "c"]))
-        self.assertTrue(util.cmp_obj_attrs(a1, a, ["b", "c"]))
-        self.assertTrue(util.cmp_obj_attrs(a1, a, ["c", "b"]))
-
-        # missing attributes are considered a mismatch
-        self.assertFalse(util.cmp_obj_attrs(a, a1, ["b", "c", "d"]))
-
-        # empty attribute list is not a mismatch
-        self.assertTrue(util.cmp_obj_attrs(a, b, []))
-
-        # attributes of a and b differ
-        self.assertFalse(util.cmp_obj_attrs(a, b, ["b", "c"]))
-        self.assertFalse(util.cmp_obj_attrs(b, a, ["b", "c"]))
-        self.assertFalse(util.cmp_obj_attrs(b, a, ["c", "b"]))
-
-    def test_to_ascii(self):
-        """Test _toASCII."""
-
-        # check some conversions
-        self.assertEqual(util._toASCII(""), "")
-        self.assertEqual(util._toASCII(" "), " ")
-        self.assertEqual(util._toASCII("&@`'łŁ!@#$%^&*{}[]$'<>*"),
-                         "&@`'!@#$%^&*{}[]$'<>*")
-        self.assertEqual(util._toASCII("ABC"), "ABC")
-        self.assertEqual(util._toASCII("aBC"), "aBC")
-        _out = "Heizolruckstoabdampfung"
-        self.assertEqual(util._toASCII("Heizölrückstoßabdämpfung"), _out)
-
-    def test_upper_ascii(self):
-        """Test upperASCII."""
-
-        self.assertEqual(util.upperASCII(""), "")
-        self.assertEqual(util.upperASCII("a"), "A")
-        self.assertEqual(util.upperASCII("A"), "A")
-        self.assertEqual(util.upperASCII("aBc"), "ABC")
-        self.assertEqual(util.upperASCII("_&*'@#$%^aBcžčŘ"),
-                         "_&*'@#$%^ABCZCR")
-        _out = "HEIZOLRUCKSTOABDAMPFUNG"
-        self.assertEqual(util.upperASCII("Heizölrückstoßabdämpfung"), _out)
-
-
-    def test_lower_ascii(self):
-        """Test lowerASCII."""
-        self.assertEqual(util.lowerASCII(""), "")
-        self.assertEqual(util.lowerASCII("A"), "a")
-        self.assertEqual(util.lowerASCII("a"), "a")
-        self.assertEqual(util.lowerASCII("aBc"), "abc")
-        self.assertEqual(util.lowerASCII("_&*'@#$%^aBcžčŘ"),
-                         "_&*'@#$%^abczcr")
-        _out = "heizolruckstoabdampfung"
-        self.assertEqual(util.lowerASCII("Heizölrückstoßabdämpfung"), _out)
-
-    def test_have_word_match(self):
-        """Test have_word_match."""
-
-        self.assertTrue(util.have_word_match("word1 word2", "word1 word2 word3"))
-        self.assertTrue(util.have_word_match("word1 word2", "word2 word1 word3"))
-        self.assertTrue(util.have_word_match("word2 word1", "word3 word1 word2"))
-        self.assertTrue(util.have_word_match("word1", "word1 word2"))
-        self.assertTrue(util.have_word_match("word1 word2", "word2word1 word3"))
-        self.assertTrue(util.have_word_match("word2 word1", "word3 word1word2"))
-        self.assertTrue(util.have_word_match("word1", "word1word2"))
-        self.assertTrue(util.have_word_match("", "word1"))
-
-        self.assertFalse(util.have_word_match("word3 word1", "word1"))
-        self.assertFalse(util.have_word_match("word1 word3", "word1 word2"))
-        self.assertFalse(util.have_word_match("word3 word2", "word1 word2"))
-        self.assertFalse(util.have_word_match("word1word2", "word1 word2 word3"))
-        self.assertFalse(util.have_word_match("word1", ""))
-        self.assertFalse(util.have_word_match("word1", None))
-        self.assertFalse(util.have_word_match(None, "word1"))
-        self.assertFalse(util.have_word_match("", None))
-        self.assertFalse(util.have_word_match(None, ""))
-        self.assertFalse(util.have_word_match(None, None))
-
-        # Compare designated unicode and "standard" unicode string and make sure nothing crashes
-        self.assertTrue(util.have_word_match("fête", u"fête champêtre"))
-        self.assertTrue(util.have_word_match(u"fête", "fête champêtre"))
-
-    def test_parent_dir(self):
-        """Test the parent_dir function"""
-        dirs = [("", ""), ("/", ""), ("/home/", ""), ("/home/bcl", "/home"), ("home/bcl", "home"),
-                ("/home/bcl/", "/home"), ("/home/extra/bcl", "/home/extra"),
-                ("/home/extra/bcl/", "/home/extra"), ("/home/extra/../bcl/", "/home")]
-
-        for d, r in dirs:
-            self.assertEqual(util.parent_dir(d), r)
-
-    def test_open_with_perm(self):
-        """Test the open_with_perm function"""
-        # Create a directory for test files
-        test_dir = tempfile.mkdtemp()
-        try:
-            # Reset the umask
-            old_umask = os.umask(0)
-            try:
-                # Create a file with mode 0777
-                util.open_with_perm(test_dir + '/test1', 'w', 0o777)
-                self.assertEqual(os.stat(test_dir + '/test1').st_mode & 0o777, 0o777)
-
-                # Create a file with mode 0600
-                util.open_with_perm(test_dir + '/test2', 'w', 0o600)
-                self.assertEqual(os.stat(test_dir + '/test2').st_mode & 0o777, 0o600)
-            finally:
-                os.umask(old_umask)
-        finally:
-            shutil.rmtree(test_dir)
-
-    def test_touch(self):
-        """Test if the touch function correctly creates empty files"""
-        test_dir = tempfile.mkdtemp()
-        try:
-            file_path = os.path.join(test_dir, "EMPTY_FILE")
-            # try to create an empty file with touch()
-            util.touch(file_path)
-
-            # check if it exists & is a file
-            self.assertTrue(os.path.isfile(file_path))
-
-            # check if the file is empty
-            self.assertEqual(os.stat(file_path).st_size, 0)
-        finally:
-            shutil.rmtree(test_dir)
+        # chvt does not exist on all platforms
+        exec_mock.side_effect = OSError
+        assert util.vtActivate(2) is False
 
     def test_item_counter(self):
         """Test the item_counter generator."""
         # normal usage
         counter = util.item_counter(3)
-        self.assertEqual(next(counter), "1/3")
-        self.assertEqual(next(counter), "2/3")
-        self.assertEqual(next(counter), "3/3")
-        with self.assertRaises(StopIteration):
+        assert next(counter) == "1/3"
+        assert next(counter) == "2/3"
+        assert next(counter) == "3/3"
+        with pytest.raises(StopIteration):
             next(counter)
         # zero items
         counter = util.item_counter(0)
-        with self.assertRaises(StopIteration):
+        with pytest.raises(StopIteration):
             next(counter)
         # one item
         counter = util.item_counter(1)
-        self.assertEqual(next(counter), "1/1")
-        with self.assertRaises(StopIteration):
+        assert next(counter) == "1/1"
+        with pytest.raises(StopIteration):
             next(counter)
         # negative item count
         counter = util.item_counter(-1)
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             next(counter)
 
     def test_synchronized_decorator(self):
@@ -771,7 +641,7 @@ class MiscTests(unittest.TestCase):
 
         # The @synchronized decorator work on methods of classes
         # that provide self._lock with Lock or RLock instance.
-        class LockableClass(object):
+        class LockableClass:
             def __init__(self):
                 self._lock = Lock()
 
@@ -785,17 +655,17 @@ class MiscTests(unittest.TestCase):
                 return lock_state
 
         lockable = LockableClass()
-        self.assertFalse(lockable.test_method())
-        self.assertTrue(lockable.sync_test_method())
+        assert not lockable.test_method()
+        assert lockable.sync_test_method()
 
         # The @synchronized decorator does not work on classes without self._lock.
-        class NotLockableClass(object):
+        class NotLockableClass:
             @synchronized
             def sync_test_method(self):
                 return "Hello world!"
 
         not_lockable = NotLockableClass()
-        with self.assertRaises(AttributeError):
+        with pytest.raises(AttributeError):
             not_lockable.sync_test_method()
 
         # It also does not work on functions.
@@ -803,37 +673,12 @@ class MiscTests(unittest.TestCase):
         def test_function():
             return "Hello world!"
 
-        with self.assertRaises(TypeError):
+        with pytest.raises(TypeError):
             test_function()
 
     def test_sysroot(self):
-        self.assertEqual(conf.target.physical_root, "/mnt/sysimage")
-        self.assertEqual(conf.target.system_root, "/mnt/sysroot")
-
-    def test_join_paths(self):
-        self.assertEqual(util.join_paths("/first/path/"),
-                         "/first/path/")
-        self.assertEqual(util.join_paths(""),
-                         "")
-        self.assertEqual(util.join_paths("/first/path/", "/second/path"),
-                         "/first/path/second/path")
-        self.assertEqual(util.join_paths("/first/path/", "/second/path", "/third/path"),
-                         "/first/path/second/path/third/path")
-        self.assertEqual(util.join_paths("/first/path/", "/second/path", "third/path"),
-                         "/first/path/second/path/third/path")
-        self.assertEqual(util.join_paths("/first/path/", "second/path"),
-                         "/first/path/second/path")
-        self.assertEqual(util.join_paths("first/path", "/second/path"),
-                         "first/path/second/path")
-        self.assertEqual(util.join_paths("first/path", "second/path"),
-                         "first/path/second/path")
-
-    def test_decode_bytes(self):
-        self.assertEqual("STRING", util.decode_bytes("STRING"))
-        self.assertEqual("BYTES", util.decode_bytes(b"BYTES"))
-        self.assertRaises(ValueError, util.decode_bytes, None)
-        self.assertRaises(ValueError, util.decode_bytes, 0)
-        self.assertRaises(ValueError, util.decode_bytes, [])
+        assert conf.target.physical_root == "/mnt/sysimage"
+        assert conf.target.system_root == "/mnt/sysroot"
 
     @patch.dict('sys.modules')
     def test_get_anaconda_version_string(self):
@@ -848,118 +693,177 @@ class MiscTests(unittest.TestCase):
         sys.modules['pyanaconda.version'] = None
 
         from pyanaconda.core.util import get_anaconda_version_string
-        self.assertEqual(get_anaconda_version_string(), "unknown")
+        assert get_anaconda_version_string() == "unknown"
 
         # Mock the version module.
         sys.modules['pyanaconda.version'] = Mock(
             __version__="1.0",
             __build_time_version__="1.0-1"
         )
-        self.assertEqual(get_anaconda_version_string(), "1.0")
-        self.assertEqual(get_anaconda_version_string(build_time_version=True), "1.0-1")
+        assert get_anaconda_version_string() == "1.0"
+        assert get_anaconda_version_string(build_time_version=True) == "1.0-1"
 
     def test_get_os_relase_value(self):
         """Test the get_release_value function."""
         with tempfile.TemporaryDirectory() as root:
             # prepare paths
-            util.mkdirChain(root + "/usr/lib")
-            util.mkdirChain(root + "/etc")
+            make_directories(root + "/usr/lib")
+            make_directories(root + "/etc")
 
             # no file
             with self.assertLogs(level="DEBUG") as cm:
                 version = util.get_os_release_value("VERSION_ID", root)
 
             msg = "VERSION_ID not found in os-release files"
-            self.assertTrue(any(map(lambda x: msg in x, cm.output)))
-            self.assertEqual(version, None)
+            assert any(map(lambda x: msg in x, cm.output))
+            assert version is None
 
             # backup file only
             with open(root + "/usr/lib/os-release", "w") as f:
                 f.write("# blah\nVERSION_ID=foo256bar  \n VERSION_ID = wrong\n\n")
             version = util.get_os_release_value("VERSION_ID", root)
-            self.assertEqual(version, "foo256bar")
-            self.assertEqual(util.get_os_release_value("PLATFORM_ID", root), None)
+            assert version == "foo256bar"
+            assert util.get_os_release_value("PLATFORM_ID", root) is None
 
             # main file and backup too
             with open(root + "/etc/os-release", "w") as f:
                 f.write("# blah\nVERSION_ID=more-important\n")
             version = util.get_os_release_value("VERSION_ID", root)
-            self.assertEqual(version, "more-important")
+            assert version == "more-important"
 
             # both, main file twice
             with open(root + "/etc/os-release", "w") as f:
                 f.write("# blah\nVERSION_ID=more-important\nVERSION_ID=not-reached\n \n")
             version = util.get_os_release_value("VERSION_ID", root)
-            self.assertEqual(version, "more-important")
+            assert version == "more-important"
 
             # quoted values
             with open(root + "/etc/os-release", "w") as f:
                 f.write("PRETTY_NAME=\"Fedora 32\"\nPLATFORM_ID='platform:f32'\n")
-            self.assertEqual(util.get_os_release_value("PRETTY_NAME", root), "Fedora 32")
-            self.assertEqual(util.get_os_release_value("PLATFORM_ID", root), "platform:f32")
+            assert util.get_os_release_value("PRETTY_NAME", root) == "Fedora 32"
+            assert util.get_os_release_value("PLATFORM_ID", root) == "platform:f32"
 
             # no files
             os.remove(root + "/usr/lib/os-release")
             os.remove(root + "/etc/os-release")
             version = util.get_os_release_value("VERSION_ID", root)
-            self.assertEqual(version, None)
+            assert version is None
 
-    def test_detect_virtualized_platform(self):
-        """Test the function detect_virtualized_platform."""
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.side_effect = OSError
-            self.assertEqual(util.detect_virtualized_platform(), None)
+    @patch("pyanaconda.core.util.execWithRedirect")
+    def test_restorecon(self, exec_mock):
+        """Test restorecon helper normal function"""
+        # default behavior
+        assert util.restorecon(["foo"], root="/root")
+        exec_mock.assert_called_once_with("restorecon", ["-r", "foo"], root="/root")
 
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.return_value = "none"
-            self.assertEqual(util.detect_virtualized_platform(), None)
+        # also skip
+        exec_mock.reset_mock()
+        assert util.restorecon(["bar"], root="/root", skip_nonexistent=True)
+        exec_mock.assert_called_once_with("restorecon", ["-ir", "bar"], root="/root")
 
-        with patch('pyanaconda.core.util.execWithCapture') as execute:
-            execute.return_value = "vmware"
-            self.assertEqual(util.detect_virtualized_platform(), "vmware")
+        # explicitly don't skip
+        exec_mock.reset_mock()
+        assert util.restorecon(["bar"], root="/root", skip_nonexistent=False)
+        exec_mock.assert_called_once_with("restorecon", ["-r", "bar"], root="/root")
+
+        # missing restorecon
+        exec_mock.reset_mock()
+        exec_mock.side_effect = FileNotFoundError
+        assert not util.restorecon(["baz"], root="/root")
+        exec_mock.assert_called_once_with("restorecon", ["-r", "baz"], root="/root")
+
+    @patch("pyanaconda.core.util.execWithCapture")
+    @patch("pyanaconda.core.util.os.path.exists")
+    def test_ipmi_report(self, exists_mock, exec_mock):
+        """Test IPMI reporting"""
+        # IPMI present
+        exists_mock.side_effect = [True, True]
+        util.ipmi_report(util.IPMI_ABORTED)  # the actual value does not matter
+        assert util._supports_ipmi is True
+        assert exists_mock.call_count == 2
+        assert exec_mock.call_count == 1
+        assert exec_mock.mock_calls[0].args[0] == "ipmitool"
+
+        # IPMI not present
+        util._supports_ipmi = None  # reset the global state
+        exists_mock.side_effect = [True, False]
+        exec_mock.reset_mock()
+        util.ipmi_report(util.IPMI_ABORTED)
+        assert util._supports_ipmi is False
+        exec_mock.assert_not_called()
+
+    @patch("pyanaconda.core.util.ipmi_report")
+    def test_ipmi_abort(self, ipmi_mock):
+        """Test termination with IPMI messaging and running onerror scripts."""
+        from pykickstart.constants import KS_SCRIPT_ONERROR, KS_SCRIPT_POST
+
+        script1 = Mock(type=KS_SCRIPT_ONERROR)
+        script2 = Mock(type=KS_SCRIPT_POST)
+
+        util.ipmi_abort([script1, script2])
+
+        ipmi_mock.assert_called_with(util.IPMI_ABORTED)
+        script1.run.assert_called_once_with("/")
+        script2.run.assert_not_called()
+
+    def test_dracut_eject(self):
+        """Test writing the device eject dracut shutdown hook."""
+        devname = "/some/device"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hook_file_path = tmpdir + "/longer_path/hook.file"
+            with patch("pyanaconda.core.util.DRACUT_SHUTDOWN_EJECT", new=hook_file_path):
+                util.dracut_eject(devname)
+                with open(hook_file_path, "r") as f:
+                    file_contents = "\n".join(f.readlines())
+                    assert "eject " + devname in file_contents
 
     @patch("pyanaconda.core.util.open")
-    @patch("pyanaconda.core.util.blivet.arch.is_arm")
-    def test_is_lpae_available(self, is_arm, mock_open):
-        """Test the is_lpae_available function."""
-        is_arm.return_value = False
-        self.assertEqual(util.is_lpae_available(), False)
-
-        is_arm.return_value = True
-        cpu_info = """
-        processor       : 0
-        model name      : ARMv7 Processor rev 2 (v7l)
-        BogoMIPS        : 50.00
-        Features        : half thumb fastmult vfp edsp thumbee vfpv3 tls idiva idivt vfpd32
-        CPU implementer : 0x56
-        CPU architecture: 7
-        CPU variant     : 0x2
-        CPU part        : 0x584
-        CPU revision    : 2
+    def test_is_stage2_on_nfs(self, mock_open):
+        """Test check for installation running on nfs."""
+        nfs_source_mounts = """
+        LiveOS_rootfs / overlay rw,seclabel,relatime,lowerdir=/run/rootfsbase,upperdir=/run/overlayfs,workdir=/run/ovlwork,uuid=on 0 0
+        proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+        tmpfs /run tmpfs rw,seclabel,nosuid,nodev,size=401324k,nr_inodes=819200,mode=755,inode64 0 0
+        10.43.136.2:/mnt/data/trees/rawhide /run/install/repo nfs ro,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,hard,nolock,proto=tcp,timeo=600,retrans=2,sec=sys,mountaddr=10.43.136.2,mountvers=3,mountport=20
+        048,mountproto=udp,local_lock=all,addr=10.43.136.2 0 0
+        mqueue /dev/mqueue mqueue rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+        tmpfs /run/credentials/systemd-vconsole-setup.service tmpfs ro,seclabel,nosuid,nodev,noexec,relatime,nosymfollow,size=1024k,nr_inodes=1024,mode=700,inode64,noswap 0 0
+        10.43.136.2:/mnt/data/trees/rawhide /run/install/sources/mount-0000-nfs-device nfs rw,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,hard,nolock,proto=tcp,timeo=600,retrans=2,sec=sys,mountaddr=10.43.136.2
+        ,mountvers=3,mountport=20048,mountproto=udp,local_lock=all,addr=10.43.136.2 0 0
         """
-
-        mock_open.return_value = StringIO(dedent(cpu_info))
-        self.assertEqual(util.is_lpae_available(), False)
-
-        cpu_info = """
-        processor       : 0
-        model name      : ARMv7 Processor rev 2 (v7l)
-        BogoMIPS        : 50.00
-        Features        : half thumb fastmult vfp edsp thumbee vfpv3 tls idiva idivt vfpd32 lpae
-        CPU implementer : 0x56
-        CPU architecture: 7
-        CPU variant     : 0x2
-        CPU part        : 0x584
-        CPU revision    : 2
+        nfs_stage2_mounts = """
+        LiveOS_rootfs / overlay rw,seclabel,relatime,lowerdir=/run/rootfsbase,upperdir=/run/overlayfs,workdir=/run/ovlwork,uuid=on 0 0
+        proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+        tmpfs /run tmpfs rw,seclabel,nosuid,nodev,size=401324k,nr_inodes=819200,mode=755,inode64 0 0
+        10.43.136.2:/mnt/data/users/rv/s2/rvm /run/install/repo nfs ro,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,hard,nolock,proto=tcp,timeo=600,retrans=2,sec=sys,mountaddr=10.43.136.2,mountvers=3,mountport=
+        mqueue /dev/mqueue mqueue rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+        tmpfs /run/credentials/systemd-vconsole-setup.service tmpfs ro,seclabel,nosuid,nodev,noexec,relatime,nosymfollow,size=1024k,nr_inodes=1024,mode=700,inode64,noswap 0 0
         """
+        no_nfs_mounts = """
+        LiveOS_rootfs / overlay rw,seclabel,relatime,lowerdir=/run/rootfsbase,upperdir=/run/overlayfs,workdir=/run/ovlwork,uuid=on 0 0
+        rpc_pipefs /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
+        mqueue /dev/mqueue mqueue rw,seclabel,nosuid,nodev,noexec,relatime 0 0
+        tmpfs /run/credentials/systemd-vconsole-setup.service tmpfs ro,seclabel,nosuid,nodev,noexec,relatime,nosymfollow,size=1024k,nr_inodes=1024,mode=700,inode64,noswap 0 0
+        """
+        nfs4_mounts = """
+        10.43.136.2:/mnt/data/users/rv/s2/rvm /run/install/repo nfs4 ro,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,hard,nolock,proto=tcp,timeo=600,retrans=2,sec=sys,mountaddr=10.43.136.2,mountvers=3,mountport=
+        """
+        mock_open.return_value = StringIO(dedent(nfs_stage2_mounts))
+        assert is_stage2_on_nfs() is True
 
-        mock_open.return_value = StringIO(dedent(cpu_info))
-        self.assertEqual(util.is_lpae_available(), True)
+        mock_open.return_value = StringIO(dedent(nfs_source_mounts))
+        assert is_stage2_on_nfs() is True
+
+        mock_open.return_value = StringIO(dedent(nfs4_mounts))
+        assert is_stage2_on_nfs() is True
+
+        mock_open.return_value = StringIO(dedent(no_nfs_mounts))
+        assert is_stage2_on_nfs() is False
 
 
 class LazyObjectTestCase(unittest.TestCase):
 
-    class Object(object):
+    class Object:
 
         def __init__(self):
             self._x = 0
@@ -990,40 +894,37 @@ class LazyObjectTestCase(unittest.TestCase):
         return LazyObject(lambda: self.obj)
 
     def test_get_set(self):
-        self.assertIsNotNone(self.lazy_obj)
-        self.assertIsNone(self._obj)
+        assert self.lazy_obj is not None
+        assert self._obj is None
 
-        self.assertEqual(self.lazy_obj.x, 0)
-        self.assertIsNotNone(self._obj)
+        assert self.lazy_obj.x == 0
+        assert self._obj is not None
 
         self.obj.x = -10
-        self.assertEqual(self.obj.x, -10)
-        self.assertEqual(self.lazy_obj.x, -10)
+        assert self.obj.x == -10
+        assert self.lazy_obj.x == -10
 
         self.lazy_obj.x = 10
-        self.assertEqual(self.obj.x, 10)
-        self.assertEqual(self.lazy_obj.x, 10)
+        assert self.obj.x == 10
+        assert self.lazy_obj.x == 10
 
         self.lazy_obj.f(90)
-        self.assertEqual(self.obj.x, 100)
-        self.assertEqual(self.lazy_obj.x, 100)
+        assert self.obj.x == 100
+        assert self.lazy_obj.x == 100
 
     def test_eq(self):
         a = object()
         lazy_a1 = LazyObject(lambda: a)
         lazy_a2 = LazyObject(lambda: a)
 
-        self.assertEqual(a, lazy_a1)
-        self.assertEqual(lazy_a1, a)
+        assert a == lazy_a1
+        assert lazy_a1 == a
 
-        self.assertEqual(a, lazy_a2)
-        self.assertEqual(lazy_a2, a)
+        assert a == lazy_a2
+        assert lazy_a2 == a
 
-        self.assertEqual(lazy_a1, lazy_a2)
-        self.assertEqual(lazy_a2, lazy_a1)
-
-        self.assertEqual(lazy_a1, lazy_a1)
-        self.assertEqual(lazy_a2, lazy_a2)
+        assert lazy_a1 == lazy_a2
+        assert lazy_a2 == lazy_a1
 
     def test_neq(self):
         a = object()
@@ -1032,11 +933,11 @@ class LazyObjectTestCase(unittest.TestCase):
         b = object()
         lazy_b = LazyObject(lambda: b)
 
-        self.assertNotEqual(b, lazy_a)
-        self.assertNotEqual(lazy_a, b)
+        assert b != lazy_a
+        assert lazy_a != b
 
-        self.assertNotEqual(lazy_a, lazy_b)
-        self.assertNotEqual(lazy_b, lazy_a)
+        assert lazy_a != lazy_b
+        assert lazy_b != lazy_a
 
     def test_hash(self):
         a = object()
@@ -1047,6 +948,6 @@ class LazyObjectTestCase(unittest.TestCase):
         lazy_b1 = LazyObject(lambda: b)
         lazy_b2 = LazyObject(lambda: b)
 
-        self.assertEqual({a, lazy_a1, lazy_a2}, {a})
-        self.assertEqual({b, lazy_b1, lazy_b2}, {b})
-        self.assertEqual({lazy_a1, lazy_b2}, {a, b})
+        assert {a, lazy_a1, lazy_a2} == {a}
+        assert {b, lazy_b1, lazy_b2} == {b}
+        assert {lazy_a1, lazy_b2} == {a, b}

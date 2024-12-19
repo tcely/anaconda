@@ -18,10 +18,11 @@
 #
 
 # Used for digits, ascii_letters, punctuation constants
-import string # pylint: disable=deprecated-module
-from pyanaconda.core.i18n import N_
-
+import string
 from enum import Enum
+
+from pyanaconda.core.i18n import N_
+from pyanaconda.core.product import get_product_name, get_product_version
 
 # Use -1 to indicate that the selinux configuration is unset
 SELINUX_DEFAULT = -1
@@ -29,44 +30,48 @@ SELINUX_DEFAULT = -1
 # where to look for 3rd party addons
 ADDON_PATHS = ["/usr/share/anaconda/addons"]
 
-# common string needs to be easy to change
-from pyanaconda import product
-productName = product.productName
-productVersion = product.productVersion
-isFinal = product.isFinal
-
-# for use in device names, eg: "fedora", "rhel"
-shortProductName = productName.lower()          # pylint: disable=no-member
-if productName.count(" "):                      # pylint: disable=no-member
-    shortProductName = ''.join(s[0] for s in shortProductName.split())
-
 # The default virtio port.
 VIRTIO_PORT = "/dev/virtio-ports/org.fedoraproject.anaconda.log.0"
 
+# The clean-up tool.
 ANACONDA_CLEANUP = "anaconda-cleanup"
+
+# System mount points.
+LIVE_MOUNT_POINT = "/run/initramfs/live"
+
+# Source mount points.
 MOUNT_DIR = "/run/install"
 DRACUT_ISODIR = "/run/install/source"
+DRACUT_REPO_DIR = "/run/install/repo"
 ISO_DIR = MOUNT_DIR + "/isodir"
-IMAGE_DIR = MOUNT_DIR + "/image"
-INSTALL_TREE = MOUNT_DIR + "/source"
 SOURCES_DIR = MOUNT_DIR + "/sources"
+
+# Names of repositories.
 BASE_REPO_NAME = "anaconda"
 
 # Get list of repo names witch should be used as base repo
-DEFAULT_REPOS = [productName.split('-')[0].lower(),  # pylint: disable=no-member
-                 "fedora-modular-server",
-                 "rawhide",
-                 "BaseOS",  # Used by RHEL
-                 "baseos"]  # Used by CentOS Stream
+DEFAULT_REPOS = [
+    get_product_name().split('-')[0].lower(),  # pylint: disable=no-member
+    "fedora-modular-server",
+    "rawhide",
+    "BaseOS",      # Used by RHEL
+    "baseos",      # Used by CentOS Stream
+    "eln-baseos",  # Used by Fedora ELN
+]
 
 DBUS_ANACONDA_SESSION_ADDRESS = "DBUS_ANACONDA_SESSION_BUS_ADDRESS"
 
 ANACONDA_BUS_CONF_FILE = "/usr/share/anaconda/dbus/anaconda-bus.conf"
 ANACONDA_BUS_ADDR_FILE = "/run/anaconda/bus.address"
 
-ANACONDA_DATA_DIR = "/usr/share/anaconda"
 ANACONDA_CONFIG_DIR = "/etc/anaconda/"
 ANACONDA_CONFIG_TMP = "/run/anaconda/anaconda.conf"
+
+# file to store pid of the web viewer app to show Anaconda locally
+WEBUI_VIEWER_PID_FILE = "/run/anaconda/webui_script.pid"
+# flag file for Web UI to signalize that Anaconda backend is ready to be used
+# FIXME: Web UI should monitor the initialization itself
+BACKEND_READY_FLAG_FILE = "/run/anaconda/backend_ready"
 
 # NOTE: this should be LANG_TERRITORY.CODESET, e.g. en_US.UTF-8
 DEFAULT_LANG = "en_US.UTF-8"
@@ -77,12 +82,8 @@ DEFAULT_KEYBOARD = "us"
 
 DRACUT_SHUTDOWN_EJECT = "/run/initramfs/usr/lib/dracut/hooks/shutdown/99anaconda-eject.sh"
 
-# Help.
-HELP_MAIN_PAGE_GUI = "Installation_Guide.xml"
-HELP_MAIN_PAGE_TUI = "Installation_Guide.txt"
-
-# VNC questions
-USEVNC = N_("Start VNC")
+# RDP questions
+USERDP = N_("Use graphical mode via Remote Desktop Protocol")
 USETEXT = N_("Use text mode")
 
 # Quit message
@@ -100,8 +101,10 @@ GRAPHICAL_TARGET = 'graphical.target'
 NETWORK_CONNECTION_TIMEOUT = 46  # in seconds
 NETWORK_CONNECTED_CHECK_INTERVAL = 0.1  # in seconds
 
-# DBus
-DEFAULT_DBUS_TIMEOUT = -1       # use default
+NETWORK_CAPABILITY_TEAM = 1
+
+# Anaconda user agent
+USER_AGENT = "%s (anaconda)/%s" % (get_product_name(), get_product_version())
 
 # Thread names
 THREAD_EXECUTE_STORAGE = "AnaExecuteStorageThread"
@@ -115,8 +118,6 @@ THREAD_LIVE_PROGRESS = "AnaLiveProgressThread"
 THREAD_SOFTWARE_WATCHER = "AnaSoftwareWatcher"
 THREAD_CHECK_SOFTWARE = "AnaCheckSoftwareThread"
 THREAD_SOURCE_WATCHER = "AnaSourceWatcher"
-THREAD_INSTALL = "AnaInstallThread"
-THREAD_GEOLOCATION_REFRESH = "AnaGeolocationRefreshThread"
 THREAD_DATE_TIME = "AnaDateTimeThread"
 THREAD_TIME_INIT = "AnaTimeInitThread"
 THREAD_DASDFMT = "AnaDasdfmtThread"
@@ -126,6 +127,7 @@ THREAD_NTP_SERVER_CHECK = "AnaNTPserver"
 THREAD_DBUS_TASK = "AnaTaskThread"
 THREAD_SUBSCRIPTION = "AnaSubscriptionThread"
 THREAD_SUBSCRIPTION_SPOKE_INIT = "AnaSubscriptionSpokeInitThread"
+THREAD_RDP_OBTAIN_HOSTNAME = "AnaRDPObtainHostnameThread"
 
 # Geolocation constants
 
@@ -135,30 +137,14 @@ GEOLOC_PROVIDER_FEDORA_GEOIP = "provider_fedora_geoip"
 GEOLOC_PROVIDER_HOSTIP = "provider_hostip"
 # default provider
 GEOLOC_DEFAULT_PROVIDER = GEOLOC_PROVIDER_FEDORA_GEOIP
-# how long should the GUI wait for the geolocation thread to finish (in seconds)
-# - GUI starts this count once it finishes its initialization
-# - the geoloc thread is started early and in most cases will be already done
-#   when GUI finishes its initialization, so no delays will be introduced
-GEOLOC_TIMEOUT = 3
+# geolocation URLs - values used by config file
+GEOLOC_URL_FEDORA_GEOIP = "https://geoip.fedoraproject.org/city"
+GEOLOC_URL_HOSTIP = "https://api.hostip.info/get_json.php"
 # timeout for the network connection used for geolocation (in seconds)
 GEOLOC_CONNECTION_TIMEOUT = 5
 
 ANACONDA_ENVIRON = "anaconda"
 FIRSTBOOT_ENVIRON = "firstboot"
-
-# Tainted hardware
-TAINT_SUPPORT_REMOVED = 27
-TAINT_HARDWARE_UNSUPPORTED = 28
-
-WARNING_SUPPORT_REMOVED = N_(
-    "Support for this hardware has been removed in this major OS release. Please check the "
-    "removed functionality section of the release notes."
-)
-
-WARNING_HARDWARE_UNSUPPORTED = N_(
-    "This hardware (or a combination thereof) is not supported by Red Hat. For more information "
-    "on supported hardware, please refer to http://www.redhat.com/hardware."
-)
 
 # Storage messages
 WARNING_NO_DISKS_DETECTED = N_(
@@ -231,6 +217,8 @@ SECRET_ASCII = {
 }
 PASSWORD_DONE_TWICE = N_("You will have to press <b>Done</b> twice to confirm it.")
 PASSWORD_SET = N_("Password set.")
+# TRANSLATORS: Password error message from libreport library needs to be joined with "You will have to press <b>Done</b> twice to confirm it." add a missing '.'
+PASSWORD_ERROR_CONCATENATION = N_("{}. {}")
 
 
 class SecretStatus(Enum):
@@ -259,11 +247,7 @@ NOTICEABLE_FREEZE = 0.1
 # all ASCII characters
 PW_ASCII_CHARS = string.digits + string.ascii_letters + string.punctuation + " "
 
-# Recognizing a tarfile
-TAR_SUFFIX = (".tar", ".tbz", ".tgz", ".txz", ".tar.bz2", "tar.gz", "tar.xz")
-
-# screenshots
-SCREENSHOTS_DIRECTORY = "/tmp/anaconda-screenshots"
+PACKAGES_LIST_FILE = "/root/lorax-packages.log"
 
 CMDLINE_FILES = [
     "/proc/cmdline",
@@ -276,9 +260,6 @@ CMDLINE_FILES = [
 CMDLINE_APPEND = ["modprobe.blacklist", "ifname", "ip"]
 CMDLINE_LIST = ["addrepo"]
 
-# Default to these units when reading user input when no units given
-SIZE_UNITS_DEFAULT = "MiB"
-
 # An estimated ratio for metadata size to total disk space.
 STORAGE_METADATA_RATIO = 0.1
 
@@ -288,13 +269,17 @@ IPMI_FINISHED = 0x8         # installation finished successfully
 IPMI_ABORTED = 0x9          # installation finished unsuccessfully, due to some non-exn error
 IPMI_FAILED = 0xA           # installation hit an exception
 
+# Wayland socket name to use
+WAYLAND_SOCKET_NAME = "wl-sysinstall-0"
+
 # X display number to use
 X_DISPLAY_NUMBER = 1
 
 # Payload status messages
 PAYLOAD_STATUS_PROBING_STORAGE = N_("Probing storage...")
-PAYLOAD_STATUS_PACKAGE_MD = N_("Downloading package metadata...")
-PAYLOAD_STATUS_GROUP_MD = N_("Downloading group metadata...")
+PAYLOAD_STATUS_SETTING_SOURCE = N_("Setting up installation source...")
+PAYLOAD_STATUS_INVALID_SOURCE = N_("Error setting up repositories")
+PAYLOAD_STATUS_CHECKING_SOFTWARE = N_("Checking software dependencies...")
 
 # Window title text
 WINDOW_TITLE_TEXT = N_("Anaconda Installer")
@@ -333,7 +318,7 @@ class DisplayModes(Enum):
 
 DISPLAY_MODE_NAME = {
     DisplayModes.GUI: "graphical mode",
-    DisplayModes.TUI: "text mode"
+    DisplayModes.TUI: "text mode",
 }
 
 INTERACTIVE_MODE_NAME = {
@@ -346,11 +331,7 @@ LOGGER_ANACONDA_ROOT = "anaconda"
 LOGGER_MAIN = "anaconda.main"
 LOGGER_STDOUT = "anaconda.stdout"
 LOGGER_PROGRAM = "program"
-LOGGER_PACKAGING = "packaging"
-LOGGER_DNF = "dnf"
-LOGGER_LIBREPO = "librepo"  # second DNF logger for librepo
 LOGGER_SIMPLELINE = "simpleline"
-LOGGER_SENSITIVE_INFO = "sensitive_info"
 
 # Timeout for starting X
 X_TIMEOUT = 60
@@ -426,23 +407,19 @@ PAYLOAD_LIVE_TYPES = (
 # Types of the payload source.
 SOURCE_TYPE_LIVE_OS_IMAGE = "LIVE_OS_IMAGE"
 SOURCE_TYPE_LIVE_IMAGE = "LIVE_IMAGE"
+SOURCE_TYPE_LIVE_TAR = "LIVE_TAR"
 SOURCE_TYPE_RPM_OSTREE = "RPM_OSTREE"
+SOURCE_TYPE_RPM_OSTREE_CONTAINER = "RPM_OSTREE_CONTAINER"
 SOURCE_TYPE_FLATPAK = "FLATPAK"
 SOURCE_TYPE_HMC = "HMC"
 SOURCE_TYPE_CDROM = "CDROM"
 SOURCE_TYPE_CLOSEST_MIRROR = "CLOSEST_MIRROR"
 SOURCE_TYPE_REPO_FILES = "REPO_FILES"
+SOURCE_TYPE_REPO_PATH = "REPO_PATH"
 SOURCE_TYPE_NFS = "NFS"
 SOURCE_TYPE_URL = "URL"
 SOURCE_TYPE_HDD = "HDD"
 SOURCE_TYPE_CDN = "CDN"
-
-# All types that use repo files.
-SOURCE_REPO_FILE_TYPES = (
-    SOURCE_TYPE_REPO_FILES,
-    SOURCE_TYPE_CLOSEST_MIRROR,
-    SOURCE_TYPE_CDN,
-)
 
 # Payload sources overriden by the CDN
 
@@ -465,6 +442,11 @@ URL_TYPES = (
     URL_TYPE_MIRRORLIST,
     URL_TYPE_METALINK
 )
+
+# Repository origin.
+REPO_ORIGIN_SYSTEM = "SYSTEM"
+REPO_ORIGIN_USER = "USER"
+REPO_ORIGIN_TREEINFO = "TREEINFO"
 
 # Default values of DNF configuration.
 DNF_DEFAULT_REPO_COST = 1000
@@ -522,3 +504,25 @@ RHSM_SYSPURPOSE_FILE_PATH = "/etc/rhsm/syspurpose/syspurpose.json"
 # GID and UID modes
 ID_MODE_USE_VALUE = "ID_MODE_USE_VALUE"
 ID_MODE_USE_DEFAULT = "ID_MODE_USE_DEFAULT"
+
+# Path to the initrd critical warnings log file created by us in Dracut.
+DRACUT_ERRORS_PATH = "/run/anaconda/initrd_errors.txt"
+
+# Timezone setting priorities
+TIMEZONE_PRIORITY_DEFAULT = 0
+TIMEZONE_PRIORITY_LANGUAGE = 30
+TIMEZONE_PRIORITY_GEOLOCATION = 50
+TIMEZONE_PRIORITY_KICKSTART = 70
+TIMEZONE_PRIORITY_USER = 90
+
+# FIPS mode minimum LUKS passphrase length
+FIPS_PASSPHRASE_MIN_LENGTH = 8
+
+
+# Installation categories
+CATEGORY_UNDEFINED = "UNDEFINED"
+CATEGORY_ENVIRONMENT = "ENVIRONMENT_CONFIGURATION"
+CATEGORY_STORAGE = "STORAGE_CONFIGURATION"
+CATEGORY_SOFTWARE = "SOFTWARE_INSTALLATION"
+CATEGORY_BOOTLOADER = "BOOTLOADER_INSTALLATION"
+CATEGORY_SYSTEM = "SYSTEM_CONFIGURATION"

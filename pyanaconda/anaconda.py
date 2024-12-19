@@ -19,32 +19,37 @@
 
 import os
 import sys
-from glob import glob
-from tempfile import mkstemp
 import threading
-
-from pyanaconda.core.constants import DisplayModes, PAYLOAD_TYPE_RPM_OSTREE, ADDON_PATHS
-from pyanaconda.core import constants
-from pyanaconda.core.startup.dbus_launcher import AnacondaDBusLauncher
-from pyanaconda.modules.common.constants.services import PAYLOADS
-from pyanaconda.payload.source import SourceFactory, PayloadSourceTypeUnrecognized
-from pyanaconda.ui.lib.addons import collect_addon_ui_paths
+from tempfile import mkstemp
 
 from pyanaconda.anaconda_loggers import get_stdout_logger
+from pyanaconda.core import constants
+from pyanaconda.core.constants import (
+    ADDON_PATHS,
+    PAYLOAD_TYPE_LIVE_IMAGE,
+    PAYLOAD_TYPE_RPM_OSTREE,
+    DisplayModes,
+)
+from pyanaconda.core.kernel import kernel_arguments
+from pyanaconda.core.path import open_with_perm
+from pyanaconda.core.startup.dbus_launcher import AnacondaDBusLauncher
+from pyanaconda.modules.common.constants.services import PAYLOADS
+from pyanaconda.ui.lib.addons import collect_addon_ui_paths
+
 stdoutLog = get_stdout_logger()
 
 from pyanaconda.anaconda_loggers import get_module_logger
+
 log = get_module_logger(__name__)
 
 
-class Anaconda(object):
+class Anaconda:
     def __init__(self):
         self._display_mode = None
         self._interactive_mode = True
         self.gui_startup_failed = False
         self._intf = None
         self.ksdata = None
-        self.additional_repos = None
         self.opts = None
         self._payload = None
         self.mehConfig = None
@@ -64,7 +69,6 @@ class Anaconda(object):
     def set_from_opts(self, opts):
         """Load argument to variables from self.opts."""
         self.opts = opts
-        self.additional_repos = opts.addRepo
 
     @property
     def dbus_launcher(self):
@@ -83,18 +87,18 @@ class Anaconda(object):
 
             if payload_type == PAYLOAD_TYPE_RPM_OSTREE:
                 from pyanaconda.payload.rpmostreepayload import RPMOSTreePayload
-                klass = RPMOSTreePayload
+                payload = RPMOSTreePayload()
             elif self.opts.liveinst:
                 from pyanaconda.payload.live import LiveOSPayload
-                klass = LiveOSPayload
-            elif self.ksdata.liveimg.seen:
+                payload = LiveOSPayload()
+            elif payload_type == PAYLOAD_TYPE_LIVE_IMAGE:
                 from pyanaconda.payload.live import LiveImagePayload
-                klass = LiveImagePayload
+                payload = LiveImagePayload()
             else:
                 from pyanaconda.payload.dnf import DNFPayload
-                klass = DNFPayload
+                payload = DNFPayload(self.ksdata)
 
-            self._payload = klass(self.ksdata)
+            self._payload = payload
 
         return self._payload
 
@@ -108,38 +112,6 @@ class Anaconda(object):
 
         object_proxy = PAYLOADS.get_proxy(object_path)
         return object_proxy.Type
-
-    @staticmethod
-    def get_protected_devices(opts):
-        specs = []
-
-        # methodstr and stage2 become strings in ways that pylint can't figure out
-        # pylint: disable=unsubscriptable-object
-        if opts.method and SourceFactory.is_harddrive(opts.method):
-            specs.append(opts.method[3:].split(":", 3)[0])
-
-        if opts.stage2 and SourceFactory.is_harddrive(opts.stage2):
-            specs.append(opts.stage2[3:].split(":", 3)[0])
-
-        for additional_repo in opts.addRepo:
-            _name, repo_url = Anaconda._get_additional_repo_name(additional_repo)
-            if SourceFactory.is_harddrive(repo_url):
-                specs.append(repo_url[3:].split(":", 3)[0])
-
-        # zRAM swap devices need to be protected
-        for zram_dev in glob("/dev/zram*"):
-            specs.append(zram_dev)
-
-        return specs
-
-    @staticmethod
-    def _get_additional_repo_name(repo):
-        try:
-            name, rest = repo.split(',', maxsplit=1)
-        except ValueError:
-            raise RuntimeError("addrepo boot option has incorrect format. Correct format is: "
-                               "inst.addrepo=<name>,<url>") from None
-        return name, rest
 
     @property
     def display_mode(self):
@@ -181,6 +153,11 @@ class Anaconda(object):
         """Report if Anaconda should run with the TUI."""
         return self._display_mode == DisplayModes.TUI
 
+    @property
+    def is_webui_supported(self):
+        "Report if webui package is installed"
+        return os.path.exists("/usr/share/cockpit/anaconda-webui")
+
     def log_display_mode(self):
         if not self.display_mode:
             log.error("Display mode is not set!")
@@ -190,49 +167,12 @@ class Anaconda(object):
                  constants.INTERACTIVE_MODE_NAME[self.interactive_mode],
                  constants.DISPLAY_MODE_NAME[self.display_mode])
 
-    def add_additional_repositories_to_ksdata(self):
-        from pyanaconda.kickstart import RepoData
-
-        for add_repo in self.additional_repos:
-            name, repo_url = self._get_additional_repo_name(add_repo)
-            try:
-                source = SourceFactory.parse_repo_cmdline_string(repo_url)
-            except PayloadSourceTypeUnrecognized:
-                log.error("Type for additional repository %s is not recognized!", add_repo)
-                return
-
-            repo = RepoData(name=name, baseurl=repo_url, install=False)
-
-            if source.is_nfs or source.is_http or source.is_https or source.is_ftp \
-                    or source.is_file:
-                repo.enabled = True
-            elif source.is_harddrive:
-                repo.enabled = True
-                repo.partition = source.partition
-                repo.iso_path = source.path
-                repo.baseurl = "file://"
-            else:
-                log.error("Source type %s for additional repository %s is not supported!",
-                          source.source_type.value, add_repo)
-                continue
-
-            self._check_repo_name_uniqueness(repo)
-            self.ksdata.repo.dataList().append(repo)
-
-    def _check_repo_name_uniqueness(self, repo):
-        """Log if we are adding repository with already used name
-
-        In automatic kickstart installation this will result in using the first defined repo.
-        """
-        if repo in self.ksdata.repo.dataList():
-            log.warning("Repository name %s is not unique. Only the first repo will be used!",
-                        repo.name)
-
     def dumpState(self):
-        from meh import ExceptionInfo
-        from meh.dump import ReverseExceptionDump
         from inspect import stack as _stack
         from traceback import format_stack
+
+        from meh import ExceptionInfo
+        from meh.dump import ReverseExceptionDump
 
         # Skip the frames for dumpState and the signal handler.
         stack = _stack()[2:]
@@ -259,7 +199,7 @@ class Anaconda(object):
         os.close(fd)
 
         # append to a given file
-        with open("/tmp/anaconda-tb-all.log", "a+") as f:
+        with open_with_perm("/tmp/anaconda-tb-all.log", "a+", 0o600) as f:
             f.write("--- traceback: %s ---\n" % filename)
             f.write(dump_text + "\n")
 
@@ -268,11 +208,22 @@ class Anaconda(object):
         """The user interface."""
         return self._intf
 
-    def initInterface(self):
+    def initialize_interface(self):
         if self._intf:
             raise RuntimeError("Second attempt to initialize the InstallInterface")
 
-        if self.gui_mode:
+        if self.gui_mode and self.is_webui_supported:
+            from pyanaconda.ui.webui import CockpitUserInterface
+            self._intf = CockpitUserInterface(
+                None,
+                self.payload,
+                "webui.remote" in kernel_arguments
+            )
+
+            # needs to be refreshed now we know if gui or tui will take place
+            # FIXME - what about Cockpit based addons ?
+            addon_paths = []
+        elif self.gui_mode:
             from pyanaconda.ui.gui import GraphicalUserInterface
             # Run the GUI in non-fullscreen mode, so live installs can still
             # use the window manager

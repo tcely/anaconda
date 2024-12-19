@@ -17,20 +17,22 @@
 # Red Hat, Inc.
 #
 
+import functools
 import gettext
+import glob
+import locale as locale_mod
 import os
 import re
-import langtable
-import locale as locale_mod
-import glob
 from collections import namedtuple
-import functools
 
-from pyanaconda.core import constants
-from pyanaconda.core.util import upcase_first_letter, setenv, execWithRedirect
-from pyanaconda.modules.common.constants.services import BOSS
+import langtable
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import constants
+from pyanaconda.core.string import upcase_first_letter
+from pyanaconda.core.util import execWithRedirect, setenv
+from pyanaconda.modules.common.constants.services import BOSS
+
 log = get_module_logger(__name__)
 
 SCRIPTS_SUPPORTED_BY_CONSOLE = {'Latn', 'Cyrl', 'Grek'}
@@ -72,6 +74,7 @@ def get_language_id(locale):
     return langtable.parse_locale(locale).language
 
 
+@functools.cache
 def get_common_languages():
     """Return common languages to prioritize them"""
     return langtable.list_common_languages()
@@ -104,7 +107,11 @@ def locale_supported_in_console(locale):
     :raise InvalidLocaleSpec: if an invalid locale is given (see is_valid_langcode)
     """
     locale_scripts = get_locale_scripts(locale)
-    return set(locale_scripts).issubset(SCRIPTS_SUPPORTED_BY_CONSOLE)
+
+    if not locale_scripts:
+        return False
+
+    return locale_scripts[0] in SCRIPTS_SUPPORTED_BY_CONSOLE
 
 
 def find_best_locale_match(locale, langcodes):
@@ -211,7 +218,7 @@ def setup_locale(locale, localization_proxy=None, text_mode=False):
     :rtype: str
     """
     if localization_proxy:
-        localization_proxy.SetLanguage(locale)
+        localization_proxy.Language = locale
 
     # not all locales might be displayable in text mode
     if text_mode:
@@ -650,7 +657,7 @@ def setup_locale_environment(locale=None, text_mode=False, prefer_environment=Fa
     # to a locale set at install time and saved in the kickstart.
     if not locale or prefer_environment:
         for varname in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
-            if varname in os.environ and os.environ[varname]:
+            if os.environ.get(varname):
                 locale = os.environ[varname]
                 break
 

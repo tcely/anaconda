@@ -23,14 +23,17 @@ from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.signal import Signal
 from pyanaconda.modules.common.structures.partitioning import PartitioningRequest
-from pyanaconda.modules.storage.partitioning.automatic.resizable_module import \
-    ResizableDeviceTreeModule
+from pyanaconda.modules.storage.partitioning.automatic.automatic_interface import (
+    AutoPartitioningInterface,
+)
+from pyanaconda.modules.storage.partitioning.automatic.automatic_partitioning import (
+    AutomaticPartitioningTask,
+)
+from pyanaconda.modules.storage.partitioning.automatic.resizable_module import (
+    ResizableDeviceTreeModule,
+)
 from pyanaconda.modules.storage.partitioning.base import PartitioningModule
-from pyanaconda.modules.storage.partitioning.automatic.automatic_interface import \
-    AutoPartitioningInterface
 from pyanaconda.modules.storage.partitioning.constants import PartitioningMethod
-from pyanaconda.modules.storage.partitioning.automatic.automatic_partitioning import \
-    AutomaticPartitioningTask
 
 log = get_module_logger(__name__)
 
@@ -76,6 +79,8 @@ class AutoPartitioningModule(PartitioningModule):
         if data.autopart.noswap:
             request.excluded_mount_points.append("swap")
 
+        request.hibernation = data.autopart.hibernation
+
         if data.autopart.encrypted:
             request.encrypted = True
             request.passphrase = data.autopart.passphrase
@@ -89,6 +94,8 @@ class AutoPartitioningModule(PartitioningModule):
 
             request.escrow_certificate = data.autopart.escrowcert
             request.backup_passphrase_enabled = data.autopart.backuppassphrase
+
+            request.opal_admin_passphrase = data.autopart.hw_passphrase
 
         self.set_request(request)
 
@@ -104,6 +111,8 @@ class AutoPartitioningModule(PartitioningModule):
         data.autopart.noboot = "/boot" in self.request.excluded_mount_points
         data.autopart.noswap = "swap" in self.request.excluded_mount_points
 
+        data.autopart.hibernation = self.request.hibernation
+
         data.autopart.encrypted = self.request.encrypted
 
         # Don't generate sensitive information.
@@ -118,6 +127,9 @@ class AutoPartitioningModule(PartitioningModule):
 
         data.autopart.escrowcert = self.request.escrow_certificate
         data.autopart.backuppassphrase = self.request.backup_passphrase_enabled
+
+        # Don't generate sensitive information.
+        data.autopart.hw_passphrase = ""
 
     @property
     def request(self):

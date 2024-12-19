@@ -19,7 +19,6 @@
 #
 import errno
 import glob
-import gi
 import os
 import re
 import shutil
@@ -28,27 +27,29 @@ import time
 import traceback
 
 import blivet.errors
-
+import gi
 from meh import Config
 from meh.dump import ReverseExceptionDump
 from meh.handler import ExceptionHandler
-
-from pyanaconda import kickstart
-from pyanaconda.core import util
-from pyanaconda import product
-from pyanaconda.core.async_utils import run_in_loop
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import THREAD_EXCEPTION_HANDLING_TEST, IPMI_FAILED
-from pyanaconda.errors import NonInteractiveError
-from pyanaconda.core.i18n import _
-from pyanaconda.modules.common.errors.storage import UnusableStorageError
-from pyanaconda.threading import threadMgr
-from pyanaconda.ui.communication import hubQ
-
+from pykickstart.constants import KS_SCRIPT_ONERROR, KS_SCRIPT_TRACEBACK
 from simpleline import App
 from simpleline.event_loop.signals import ExceptionSignal
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import util
+from pyanaconda.core.async_utils import run_in_loop
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import IPMI_FAILED, THREAD_EXCEPTION_HANDLING_TEST
+from pyanaconda.core.i18n import _
+from pyanaconda.core.product import get_product_is_final_release
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.errors import NonInteractiveError
+from pyanaconda.modules.common.constants.objects import SCRIPTS
+from pyanaconda.modules.common.constants.services import RUNTIME
+from pyanaconda.modules.common.errors.storage import UnusableStorageError
+from pyanaconda.modules.common.task import sync_run_task
+from pyanaconda.ui.communication import hubQ
+
 log = get_module_logger(__name__)
 
 
@@ -138,6 +139,10 @@ class AnacondaExceptionHandler(ExceptionHandler):
         """
 
         log.debug("running handleException")
+        # don't try and attach empty or non-existent files (#2185827)
+        self.conf.fileList = [
+            fn for fn in self.conf.fileList if os.path.exists(fn) and os.path.getsize(fn) > 0
+        ]
         exception_lines = traceback.format_exception(*dump_info.exc_info)
         log.critical("\n".join(exception_lines))
 
@@ -169,8 +174,8 @@ class AnacondaExceptionHandler(ExceptionHandler):
 
         except (RuntimeError, ImportError, ValueError):
             log.debug("Gtk cannot be initialized")
-            # X not running (Gtk cannot be initialized)
-            if threadMgr.in_main_thread():
+            # Wayland not running (Gtk cannot be initialized)
+            if thread_manager.in_main_thread():
                 log.debug("In the main thread, running exception handler")
                 if issubclass(ty, NonInteractiveError) or not self._interactive:
                     if issubclass(ty, NonInteractiveError):
@@ -232,14 +237,22 @@ class AnacondaExceptionHandler(ExceptionHandler):
 
         util.ipmi_report(IPMI_FAILED)
 
-    def _run_kickstart_scripts(self, dump_info):
+    def _run_kickstart_scripts(self, _dump_info):
         """Run the %traceback and %onerror kickstart scripts."""
-        anaconda = dump_info.object
+        scripts_proxy = RUNTIME.get_proxy(SCRIPTS)
 
+        # OnError script call
+        onerror_task_path = scripts_proxy.RunScriptsWithTask(KS_SCRIPT_ONERROR)
+        onerror_task_proxy = RUNTIME.get_proxy(onerror_task_path)
+
+        # Traceback script call
+        traceback_task_path = scripts_proxy.RunScriptsWithTask(KS_SCRIPT_TRACEBACK)
+        traceback_task_proxy = RUNTIME.get_proxy(traceback_task_path)
         try:
-            util.runOnErrorScripts(anaconda.ksdata.scripts)
-            kickstart.runTracebackScripts(anaconda.ksdata.scripts)
+            sync_run_task(onerror_task_proxy)
+            sync_run_task(traceback_task_proxy)
         # pylint: disable=bare-except
+        # ruff: noqa: E722
         except:
             pass
 
@@ -321,7 +334,7 @@ def initExceptionHandling(anaconda):
         # anaconda-tb file
         config.register_callback("journalctl", journalctl_callback, attchmnt_only=False)
 
-    if not product.isFinal:
+    if not get_product_is_final_release():
         config.register_callback("release_type", lambda: "pre-release", attchmnt_only=True)
 
     handler = AnacondaExceptionHandler(config, anaconda.intf.meh_interface,
@@ -395,12 +408,13 @@ f%s(msg, non_ascii)
         eval(compile(code, "str_eval", "exec"))  # pylint: disable=eval-used
 
     # test non-ascii characters dumping
-    non_ascii = u'\u0159'
+    non_ascii = '\u0159'
 
     msg = "NOTABUG: testing exception handling"
 
     # raise exception from a separate thread
-    from pyanaconda.threading import AnacondaThread
-    threadMgr.add(AnacondaThread(name=THREAD_EXCEPTION_HANDLING_TEST,
-                                 target=raise_exception,
-                                 args=(msg, non_ascii)))
+    thread_manager.add_thread(
+        name=THREAD_EXCEPTION_HANDLING_TEST,
+        target=raise_exception,
+        args=(msg, non_ascii)
+    )

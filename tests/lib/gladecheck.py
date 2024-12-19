@@ -30,9 +30,10 @@ except ImportError:
     print("No module named lxml, you need to install the python3-lxml package")
     raise
 
+import logging
+
 from filelist import testfilelist
 
-import logging
 log = logging.getLogger('unittest')
 
 
@@ -62,7 +63,7 @@ def load_glade_trees_from_files():
     # Parse all of the glade files
     log.info("Parsing glade files...")
     for glade_file in glade_files:
-        trees.append(etree.parse(glade_file))
+        trees.append(etree.parse(glade_file))  # pylint: disable=c-extension-no-member
 
     return trees
 

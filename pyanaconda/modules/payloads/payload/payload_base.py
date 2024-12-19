@@ -21,14 +21,20 @@ from abc import ABCMeta, abstractmethod
 
 from dasbus.server.publishable import Publishable
 
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.signal import Signal
-from pyanaconda.modules.common.errors.general import UnavailableValueError
-from pyanaconda.modules.common.errors.payload import IncompatibleSourceError, SourceSetupError
 from pyanaconda.modules.common.base import KickstartBaseModule
-from pyanaconda.modules.payloads.base.initialization import SetUpSourcesTask, TearDownSourcesTask
+from pyanaconda.modules.common.errors.general import UnavailableValueError
+from pyanaconda.modules.common.errors.payload import (
+    IncompatibleSourceError,
+    SourceSetupError,
+)
+from pyanaconda.modules.payloads.base.initialization import (
+    SetUpSourcesTask,
+    TearDownSourcesTask,
+)
 from pyanaconda.modules.payloads.constants import SourceState
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
@@ -47,21 +53,29 @@ class PayloadBase(KickstartBaseModule, Publishable, metaclass=ABCMeta):
     @property
     @abstractmethod
     def type(self):
-        """Get type of this payload.
+        """Type of this payload.
 
         :return: value of the payload.base.constants.PayloadType enum
         """
-        pass
+        return None
+
+    @property
+    @abstractmethod
+    def default_source_type(self):
+        """Type of the default source.
+
+        :return SourceType: a default source type
+        """
+        return None
 
     @property
     @abstractmethod
     def supported_source_types(self):
         """Get list of supported source types.
 
-        :return: list of supported source types
-        :rtype: [values from payload.base.constants.SourceType]
+        :return [SourceType]: a list of supported source types
         """
-        pass
+        return []
 
     @property
     def sources(self):
@@ -179,13 +193,12 @@ class PayloadBase(KickstartBaseModule, Publishable, metaclass=ABCMeta):
         """
         pass
 
-    @abstractmethod
     def post_install_with_tasks(self):
         """Execute post installation steps.
 
         :return: list of tasks
         """
-        pass
+        return []
 
     def set_up_sources_with_task(self):
         """Set up installation sources."""

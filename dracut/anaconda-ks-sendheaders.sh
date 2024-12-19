@@ -9,13 +9,13 @@ if getargbool 0 inst.ks.sendmac; then
     ifnum=0
     for ifname in /sys/class/net/*; do
         [ -e "$ifname/address" ] || continue
-        mac=$(cat $ifname/address)
+        mac=$(cat "$ifname/address")
         ifname=${ifname#/sys/class/net/}
         # TODO: might need to choose devices better
         if [ "$ifname" != "lo" ] && [ -n "$mac" ]; then
             # set_http_header is from url-lib.sh, sourced earlier
             set_http_header "X-RHN-Provisioning-MAC-$ifnum" "$ifname $mac"
-            ifnum=$(($ifnum+1))
+            ifnum=$((ifnum+1))
         fi
     done
 fi
@@ -30,4 +30,4 @@ if getargbool 0 inst.ks.sendsn; then
     fi
 fi
 
-> /tmp/.ks_sendheaders
+true > /tmp/.ks_sendheaders

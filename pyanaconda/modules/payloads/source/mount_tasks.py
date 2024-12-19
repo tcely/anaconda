@@ -20,11 +20,13 @@
 import os.path
 from abc import ABC, abstractmethod
 
-from pyanaconda.modules.common.task import Task
-from pyanaconda.modules.common.errors.payload import SourceSetupError, SourceTearDownError
-
-from pyanaconda.payload.utils import unmount
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.modules.common.errors.payload import (
+    SourceSetupError,
+    SourceTearDownError,
+)
+from pyanaconda.modules.common.task import Task
+from pyanaconda.payload.utils import unmount
 
 log = get_module_logger(__name__)
 
@@ -41,7 +43,7 @@ class TearDownMountTask(Task):
 
     @property
     def name(self):
-        return "Tear down mount installation source"
+        return "Unmount an installation source"
 
     def run(self):
         """Run source un-setup."""

@@ -18,16 +18,22 @@
 import blivet.arch
 from blivet.devices import iScsiDiskDevice
 
-from pyanaconda.modules.storage.bootloader.base import BootLoaderError
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import BOOTLOADER_ENABLED, BOOTLOADER_SKIPPED, \
-    BOOTLOADER_LOCATION_PARTITION
+from pyanaconda.core.constants import (
+    BOOTLOADER_ENABLED,
+    BOOTLOADER_LOCATION_PARTITION,
+    BOOTLOADER_SKIPPED,
+)
 from pyanaconda.core.i18n import _
+from pyanaconda.core.storage import device_matches
 from pyanaconda.modules.common.constants.objects import BOOTLOADER
 from pyanaconda.modules.common.constants.services import STORAGE
-from pyanaconda.core.storage import device_matches
+from pyanaconda.modules.storage.bootloader.base import (
+    BootLoaderError,
+    is_on_non_ibft_sw_iscsi,
+)
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ["setup_bootloader"]
@@ -43,7 +49,7 @@ def setup_bootloader(storage, dry_run=False):
     executor.execute(storage=storage, dry_run=dry_run)
 
 
-class BootloaderExecutor(object):
+class BootloaderExecutor:
     """The executor of the bootloader command."""
 
     def execute(self, storage, dry_run=False):
@@ -55,7 +61,7 @@ class BootloaderExecutor(object):
         if blivet.arch.is_s390() \
                 and conf.target.is_image \
                 and bootloader_proxy.BootloaderMode == BOOTLOADER_ENABLED:
-            bootloader_proxy.SetBootloaderMode(BOOTLOADER_SKIPPED)
+            bootloader_proxy.BootloaderMode = BOOTLOADER_SKIPPED
 
         # Is the bootloader enabled?
         if bootloader_proxy.BootloaderMode != BOOTLOADER_ENABLED:
@@ -94,7 +100,8 @@ class BootloaderExecutor(object):
         return \
             not d.format.hidden and \
             not d.protected and \
-            not (blivet.arch.is_s390() and isinstance(d, iScsiDiskDevice))
+            not (blivet.arch.is_s390() and isinstance(d, iScsiDiskDevice)) and \
+            (not is_on_non_ibft_sw_iscsi(d) or conf.bootloader.nonibft_iscsi_boot)
 
     def _get_usable_disks(self, storage):
         """Get a list of usable disks."""
@@ -133,7 +140,7 @@ class BootloaderExecutor(object):
 
         # Update the module.
         if not dry_run and bootloader_proxy.DriveOrder != drive_order:
-            bootloader_proxy.SetDriveOrder(drive_order)
+            bootloader_proxy.DriveOrder = drive_order
 
     def _check_boot_drive(self, storage, boot_drive, usable_disks):
         """Check the specified boot drive."""
@@ -224,4 +231,4 @@ class BootloaderExecutor(object):
 
         # Update the bootloader module.
         if not dry_run and bootloader_proxy.Drive != boot_drive:
-            bootloader_proxy.SetDrive(boot_drive)
+            bootloader_proxy.Drive = boot_drive

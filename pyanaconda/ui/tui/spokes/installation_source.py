@@ -16,42 +16,53 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.payload import parse_nfs_url
-from pyanaconda.flags import flags
-from pyanaconda.modules.common.constants.objects import DEVICE_TREE
-from pyanaconda.modules.common.constants.services import STORAGE
-from pyanaconda.modules.common.structures.payload import RepoConfigurationData
-from pyanaconda.payload.utils import get_device_path
-from pyanaconda.ui.categories.software import SoftwareCategory
-from pyanaconda.ui.context import context
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.tui.tuiobject import Dialog
-from pyanaconda.threading import threadMgr, AnacondaThread
-from pyanaconda.payload import utils as payload_utils
-from pyanaconda.payload.manager import payloadMgr, PayloadState
-from pyanaconda.core.i18n import N_, _
-from pyanaconda.payload.image import find_potential_hdiso_sources, \
-    get_hdiso_source_info, get_hdiso_source_description
-
-from pyanaconda.core.constants import THREAD_SOURCE_WATCHER, THREAD_PAYLOAD, PAYLOAD_TYPE_DNF, \
-    SOURCE_TYPE_URL, SOURCE_TYPE_NFS, SOURCE_TYPE_HMC
-from pyanaconda.core.constants import THREAD_STORAGE_WATCHER
-from pyanaconda.core.constants import THREAD_CHECK_SOFTWARE, ISO_DIR, DRACUT_ISODIR
-from pyanaconda.core.constants import PAYLOAD_STATUS_PROBING_STORAGE
-
-from pyanaconda.ui.helpers import SourceSwitchHandler
+import fnmatch
+import os
 
 from simpleline.render.containers import ListColumnContainer
 from simpleline.render.prompt import Prompt
 from simpleline.render.screen import InputState
 from simpleline.render.screen_handler import ScreenHandler
-from simpleline.render.widgets import TextWidget, EntryWidget
-
-import os
-import fnmatch
+from simpleline.render.widgets import EntryWidget, TextWidget
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import (
+    DRACUT_ISODIR,
+    ISO_DIR,
+    PAYLOAD_STATUS_INVALID_SOURCE,
+    PAYLOAD_STATUS_PROBING_STORAGE,
+    PAYLOAD_STATUS_SETTING_SOURCE,
+    PAYLOAD_TYPE_DNF,
+    SOURCE_TYPE_HMC,
+    SOURCE_TYPE_NFS,
+    SOURCE_TYPE_URL,
+    THREAD_CHECK_SOFTWARE,
+    THREAD_PAYLOAD,
+    THREAD_SOURCE_WATCHER,
+    THREAD_STORAGE_WATCHER,
+)
+from pyanaconda.core.i18n import N_, _
+from pyanaconda.core.payload import parse_nfs_url
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.modules.common.constants.objects import DEVICE_TREE
+from pyanaconda.modules.common.constants.services import STORAGE
+from pyanaconda.modules.common.structures.payload import RepoConfigurationData
+from pyanaconda.modules.common.structures.storage import DeviceData
+from pyanaconda.payload import utils as payload_utils
+from pyanaconda.payload.manager import payloadMgr
+from pyanaconda.payload.utils import get_device_path
+from pyanaconda.ui.categories.software import SoftwareCategory
+from pyanaconda.ui.context import context
+from pyanaconda.ui.helpers import SourceSwitchHandler
+from pyanaconda.ui.lib.payload import (
+    find_potential_hdiso_sources,
+    get_hdiso_source_description,
+    get_hdiso_source_info,
+)
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
+from pyanaconda.ui.tui.tuiobject import Dialog
+
 log = get_module_logger(__name__)
 
 __all__ = ["SourceSpoke"]
@@ -63,10 +74,14 @@ class SourceSpoke(NormalTUISpoke, SourceSwitchHandler):
        .. inheritance-diagram:: SourceSpoke
           :parts: 3
     """
-    helpFile = "SourceSpoke.txt"
     category = SoftwareCategory
 
     SET_NETWORK_INSTALL_MODE = "network_install"
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "software-source-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -89,13 +104,23 @@ class SourceSpoke(NormalTUISpoke, SourceSwitchHandler):
         NormalTUISpoke.initialize(self)
         self.initialize_start()
 
-        threadMgr.add(AnacondaThread(name=THREAD_SOURCE_WATCHER,
-                                     target=self._initialize))
-        payloadMgr.add_listener(PayloadState.ERROR, self._payload_error)
+        # Register callbacks to signals of the payload manager.
+        payloadMgr.failed_signal.connect(self._on_payload_failed)
+
+        # It is possible that the payload manager is finished by now. In that case,
+        # trigger the failed callback manually to set up the error messages.
+        if not payloadMgr.is_running and not payloadMgr.report.is_valid():
+            self._on_payload_failed()
+
+        # Finish the initialization.
+        thread_manager.add_thread(
+            name=THREAD_SOURCE_WATCHER,
+            target=self._initialize
+        )
 
     def _initialize(self):
         """ Private initialize. """
-        threadMgr.wait(THREAD_PAYLOAD)
+        thread_manager.wait(THREAD_PAYLOAD)
 
         # Enable the SE/HMC option.
         if self.payload.source_type == SOURCE_TYPE_HMC:
@@ -106,31 +131,29 @@ class SourceSpoke(NormalTUISpoke, SourceSwitchHandler):
         # report that the source spoke has been initialized
         self.initialize_done()
 
-    def _payload_error(self):
+    def _on_payload_failed(self):
         self._error = True
 
     @property
     def status(self):
-        if self._error:
-            return _("Error setting up software source")
-        elif not self.ready:
-            return _("Processing...")
-        elif not self.payload.is_complete():
-            return _("Nothing selected")
-        else:
-            source_proxy = self.payload.get_source_proxy()
-            return source_proxy.Description
+        """The status of the spoke."""
+        if not self.ready:
+            return _(PAYLOAD_STATUS_SETTING_SOURCE)
+
+        if not self.completed:
+            return _(PAYLOAD_STATUS_INVALID_SOURCE)
+
+        source_proxy = self.payload.get_source_proxy()
+        return source_proxy.Description
 
     @property
     def completed(self):
-        if flags.automatedInstall and self.ready and not self.payload.base_repo:
-            return False
-
-        return not self._error and self.ready and self.payload.is_complete()
+        """Is the spoke complete?"""
+        return self.ready and not self._error and self.payload.is_ready()
 
     def refresh(self, args=None):
         NormalTUISpoke.refresh(self, args)
-        threadMgr.wait(THREAD_PAYLOAD)
+        thread_manager.wait(THREAD_PAYLOAD)
 
         self._container = ListColumnContainer(1, columns_width=78, spacing=1)
 
@@ -212,8 +235,8 @@ class SourceSpoke(NormalTUISpoke, SourceSwitchHandler):
     def ready(self):
         """ Check if the spoke is ready. """
         return (self._ready and
-                not threadMgr.get(THREAD_PAYLOAD) and
-                not threadMgr.get(THREAD_CHECK_SOFTWARE))
+                not thread_manager.get(THREAD_PAYLOAD) and
+                not thread_manager.get(THREAD_CHECK_SOFTWARE))
 
     def apply(self):
         """ Execute the selections made. """
@@ -221,7 +244,8 @@ class SourceSpoke(NormalTUISpoke, SourceSwitchHandler):
         # clear them at this point
         self._error = False
 
-        payloadMgr.restart_thread(self.payload, checkmount=False)
+        # Restart the payload setup.
+        payloadMgr.start(self.payload)
 
 
 class SpecifyRepoSpoke(NormalTUISpoke, SourceSwitchHandler):
@@ -246,7 +270,7 @@ class SpecifyRepoSpoke(NormalTUISpoke, SourceSwitchHandler):
 
         if source_proxy.Type == SOURCE_TYPE_URL:
             repo_configuration = RepoConfigurationData.from_structure(
-                source_proxy.RepoConfiguration
+                source_proxy.Configuration
             )
 
             return repo_configuration.url
@@ -313,7 +337,10 @@ class SpecifyNFSRepoSpoke(NormalTUISpoke, SourceSwitchHandler):
         source_proxy = self.payload.get_source_proxy()
 
         if source_proxy.Type == SOURCE_TYPE_NFS:
-            return parse_nfs_url(source_proxy.URL)
+            configuration = RepoConfigurationData.from_structure(
+                source_proxy.Configuration
+            )
+            return parse_nfs_url(configuration.url)
 
         return "", "", ""
 
@@ -394,9 +421,11 @@ class SelectDeviceSpoke(NormalTUISpoke):
     def _get_mountable_devices(self):
         disks = []
 
-        for device_name in find_potential_hdiso_sources():
-            device_info = get_hdiso_source_info(self._device_tree, device_name)
+        for device_id in find_potential_hdiso_sources():
+            device_info = get_hdiso_source_info(self._device_tree, device_id)
             device_desc = get_hdiso_source_description(device_info)
+            device_data = DeviceData.from_structure(self._device_tree.GetDeviceData(device_id))
+            device_name = device_data.name
             disks.append([device_name, device_desc])
 
         return disks
@@ -407,7 +436,7 @@ class SelectDeviceSpoke(NormalTUISpoke):
         self._container = ListColumnContainer(1, columns_width=78, spacing=1)
 
         # check if the storage refresh thread is running
-        if threadMgr.get(THREAD_STORAGE_WATCHER):
+        if thread_manager.get(THREAD_STORAGE_WATCHER):
             # storage refresh is running - just report it
             # so that the user can refresh until it is done
             # TODO: refresh once the thread is done ?

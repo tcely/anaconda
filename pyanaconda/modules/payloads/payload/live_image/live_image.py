@@ -17,13 +17,15 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.modules.common.errors.payload import IncompatibleSourceError
 from pyanaconda.modules.payloads.constants import PayloadType, SourceType
+from pyanaconda.modules.payloads.payload.live_image.live_image_interface import (
+    LiveImageInterface,
+)
 from pyanaconda.modules.payloads.payload.payload_base import PayloadBase
-from pyanaconda.modules.payloads.payload.live_image.live_image_interface import \
-    LiveImageInterface
 from pyanaconda.modules.payloads.source.factory import SourceFactory
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 __all__ = ["LiveImageModule"]
@@ -38,18 +40,28 @@ class LiveImageModule(PayloadBase):
 
     @property
     def type(self):
-        """Get type of this payload.
-
-        :return: value of the payload.base.constants.PayloadType enum
-        """
+        """Type of this payload."""
         return PayloadType.LIVE_IMAGE
+
+    @property
+    def default_source_type(self):
+        """Type of the default source."""
+        return SourceType.LIVE_IMAGE
 
     @property
     def supported_source_types(self):
         """Get list of sources supported by Live Image module."""
         return [
-            SourceType.LIVE_IMAGE
+            SourceType.LIVE_IMAGE,
+            SourceType.LIVE_TAR,
         ]
+
+    def set_sources(self, sources):
+        """Set at most one source."""
+        if len(sources) > 1:
+            raise IncompatibleSourceError("You can set only one source for this payload type.")
+
+        super().set_sources(sources)
 
     def process_kickstart(self, data):
         """Process the kickstart data."""
@@ -68,49 +80,23 @@ class LiveImageModule(PayloadBase):
             source.setup_kickstart(data)
 
     def install_with_tasks(self):
-        """Execute preparation and installation steps.
+        """Execute preparation and installation steps."""
+        if not self.sources:
+            log.debug("No image is available.")
+            return []
 
-        * Download the image
-        * Check the checksum
-        * Mount the image
-        * Install the image
+        source = self.sources[0]
+        tasks = source.install_with_tasks()
+
+        self._collect_kernels_on_success(tasks)
+        return tasks
+
+    def _collect_kernels_on_success(self, tasks):
+        """Collect kernel version lists from successful tasks.
+
+        :param tasks: a list of tasks
         """
-        # task = SetupInstallationSourceImageTask(
-        #     self.url,
-        #     self.proxy,
-        #     self.checksum,
-        #     self.verifyssl,
-        #     self.image_path,
-        #     INSTALL_TREE,
-        #     self.requests_session
-        # )
-        # task.succeeded_signal.connect(lambda: self.set_image_path(task.get_result()))
-        # return [task]
-
-        # if url_target_is_tarfile(self._url):
-        #     task = InstallFromTarTask(
-        #         self.image_path,
-        #         conf.target.system_root,
-        #         self.kernel_version_list
-        #     )
-        # else:
-        #     task = InstallFromImageTask(
-        #         conf.target.system_root,
-        #         self.kernel_version_list
-        #     )
-        #
-        # task2 = TeardownInstallationSourceImageTask(
-        #     self.image_path,
-        #     self.url,
-        #     INSTALL_TREE
-        # )
-        #
-        # return [task, task2]
-        return []
-
-    def post_install_with_tasks(self):
-        """Execute post installation steps.
-
-        * Copy Driver Disk files to the resulting system
-        """
-        return []
+        for task in tasks:
+            task.succeeded_signal.connect(
+                lambda t=task: self.set_kernel_version_list(t.get_result())
+            )

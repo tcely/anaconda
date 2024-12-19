@@ -16,6 +16,26 @@
 CLEANFILES = *~
 
 configdir           = $(sysconfdir)/$(PACKAGE_NAME)/profile.d
-dist_config_DATA    = *.conf
+dist_config_DATA    = \
+	almalinux.conf \
+	centos.conf \
+	circle.conf \
+	fedora-designsuite.conf \
+	fedora-eln.conf \
+	fedora-iot.conf \
+	fedora-kde.conf \
+	fedora-kinoite.conf \
+	fedora-sericea.conf \
+	fedora-server.conf \
+	fedora-silverblue.conf \
+	fedora-workstation.conf \
+	fedora.conf \
+	ovirt.conf \
+	rhel.conf \
+	rhvh.conf \
+	rocky.conf \
+	scientific-linux.conf \
+	virtuozzo-linux.conf
+
 
 MAINTAINERCLEANFILES = Makefile.in

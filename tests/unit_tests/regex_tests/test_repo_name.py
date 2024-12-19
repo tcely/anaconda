@@ -20,7 +20,9 @@
 import unittest
 
 from regexcheck import regex_match
+
 from pyanaconda.core.regexes import REPO_NAME_VALID
+
 
 class RepoNameTestCase(unittest.TestCase):
     def test_reponame(self):
@@ -43,4 +45,4 @@ class RepoNameTestCase(unittest.TestCase):
                 '[reponame]'
                 ]
 
-        self.assertTrue(regex_match(REPO_NAME_VALID, good_tests, bad_tests))
+        assert regex_match(REPO_NAME_VALID, good_tests, bad_tests)

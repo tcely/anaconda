@@ -15,26 +15,26 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import re
 from collections import defaultdict
 
-import re
-
 import gi
-gi.require_version("GLib", "2.0")
-from gi.repository import GLib
 
+gi.require_version("GLib", "2.0")
 from contextlib import ContextDecorator
 from textwrap import dedent
 from unittest.mock import Mock, patch
 
 from dasbus.server.template import BasicInterfaceTemplate
+from dasbus.typing import get_native
+from gi.repository import GLib
+
 from pyanaconda.modules.common.constants.interfaces import KICKSTART_MODULE
 from pyanaconda.modules.common.structures.kickstart import KickstartReport
 from pyanaconda.modules.common.task import TaskInterface
-from dasbus.typing import get_native
 
 
-class run_in_glib(object):
+class run_in_glib:
     """Run the test methods in GLib.
 
     :param timeout: Timeout in seconds when the loop will be killed.
@@ -66,6 +66,14 @@ class run_in_glib(object):
         return create_loop
 
 
+def check_instances(objects, classes):
+    """Check if objects are instances of specified classes."""
+    assert len(objects) == len(classes)
+
+    for obj, cls in zip(objects, classes):
+        assert isinstance(obj, cls)
+
+
 def clear_version_from_kickstart_string(ks_in):
     """Remove leading line comment with version from kickstart, if present.
 
@@ -80,15 +88,13 @@ def clear_version_from_kickstart_string(ks_in):
     )
 
 
-def check_kickstart_interface(test, interface, ks_in, ks_out=None, ks_valid=True, ks_tmp=None):
+def check_kickstart_interface(interface, ks_in=None, ks_out=None, ks_valid=True):
     """Test the parsing and generating of a kickstart module.
 
-    :param test: instance of TestCase
     :param interface: instance of KickstartModuleInterface
-    :param ks_in: string with the input kickstart
-    :param ks_out: string with the output kickstart
+    :param ks_in: string with the input kickstart or None
+    :param ks_out: string with the output kickstart or None
     :param ks_valid: True if the input kickstart is valid, otherwise False
-    :param ks_tmp: string with the temporary output kickstart
     """
     callback = PropertiesChangedCallback()
     interface.PropertiesChanged.connect(callback)
@@ -101,7 +107,7 @@ def check_kickstart_interface(test, interface, ks_in, ks_out=None, ks_valid=True
         result = KickstartReport.from_structure(
             interface.ReadKickstart(ks_in)
         )
-        test.assertEqual(ks_valid, result.is_valid())
+        assert ks_valid == result.is_valid()
 
     if not ks_valid:
         return result
@@ -112,21 +118,13 @@ def check_kickstart_interface(test, interface, ks_in, ks_out=None, ks_valid=True
     # Generate a kickstart
     ks_out = dedent(ks_out).strip()
     ks_generated = clear_version_from_kickstart_string(interface.GenerateKickstart()).strip()
-    test.assertEqual(ks_out, ks_generated)
+    assert ks_out == ks_generated
 
     # Test the properties changed callback.
     if ks_in is not None:
         callback.assert_any_call(KICKSTART_MODULE.interface_name, {'Kickstarted': True}, [])
     else:
-        test.assertEqual(interface.Kickstarted, False)
         callback.assert_not_called()
-
-    # Test the temporary kickstart.
-    if ks_tmp is None:
-        return
-
-    ks_tmp = dedent(ks_tmp).strip()
-    test.assertEqual(ks_tmp, interface.GenerateTemporaryKickstart().strip())
 
     return result
 
@@ -142,11 +140,10 @@ class PropertiesChangedCallback(Mock):
         )
 
 
-def check_dbus_property(test, interface_id, interface, property_name,
+def check_dbus_property(interface_id, interface, property_name,
                         in_value, out_value=None, getter=None, setter=None, changed=None):
     """Check DBus property.
 
-    :param test: instance of TestCase
     :param interface_id: instance of DBusInterfaceIdentifier
     :param interface: instance of a DBus interface
     :param property_name: a DBus property name
@@ -164,9 +161,9 @@ def check_dbus_property(test, interface_id, interface, property_name,
 
     # Set the property.
     if not setter:
-        setter = getattr(interface, "Set{}".format(property_name))
-
-    setter(in_value)
+        setattr(interface, property_name, in_value)
+    else:
+        setter(in_value)
 
     if not changed:
         changed = {property_name: out_value}
@@ -177,28 +174,26 @@ def check_dbus_property(test, interface_id, interface, property_name,
     if not getter:
         getter = lambda: getattr(interface, property_name)
 
-    test.assertEqual(getter(), out_value)
+    assert getter() == out_value
 
 
-def check_task_creation(test, task_path, publisher, task_class, index=0):
+def check_task_creation(task_path, publisher, task_class, index=0):
     """Check that the DBus task is correctly created.
 
-    :param test: instance of TestCase
     :param task_path: DBus path of the task
     :param publisher: Mock instance of the publish_object method
     :param task_class: class of the tested task
     :param index: an index of the published object
     :return: instance of the task
     """
-    obj = check_dbus_object_creation(test, task_path, publisher, task_class, index)
-    test.assertIsInstance(obj, TaskInterface)
+    obj = check_dbus_object_creation(task_path, publisher, task_class, index)
+    assert isinstance(obj, TaskInterface)
     return obj
 
 
-def check_task_creation_list(test, task_paths, publisher, task_classes):
+def check_task_creation_list(task_paths, publisher, task_classes):
     """Check that the list of DBus task is correctly created.
 
-    :param test: instance of TestCase
     :param task_paths: DBus paths of the tasks
     :type task_paths: [str]
     :param publisher: Mock instance of the publish_object method
@@ -210,33 +205,32 @@ def check_task_creation_list(test, task_paths, publisher, task_classes):
     task_count = len(task_paths)
 
     # Check the number of published tasks.
-    test.assertEqual(task_count, publisher.call_count)
-    test.assertEqual(task_count, len(task_classes))
+    assert task_count == publisher.call_count
+    assert task_count == len(task_classes)
 
     # Check each published task.
     for i in range(task_count):
-        task_proxy = check_task_creation(test, task_paths[i], publisher, task_classes[i], i)
+        task_proxy = check_task_creation(task_paths[i], publisher, task_classes[i], i)
         task_proxies.append(task_proxy)
 
     return task_proxies
 
 
-def check_dbus_object_creation(test, path, publisher, klass, index=0):
+def check_dbus_object_creation(path, publisher, klass, index=0):
     """Check that the custom DBus object is correctly created.
 
-    :param test: instance of TestCase
     :param path: DBus path of the published object
     :param publisher: Mock instance of the publish_object method
     :param klass: class of the tested DBus object
     :param index: an index of the published object
     """
     # A valid index of a call should be less than the number of calls.
-    test.assertLess(index, publisher.call_count)
+    assert index < publisher.call_count
     object_path, obj = publisher.call_args_list[index][0]
 
-    test.assertEqual(path, object_path)
-    test.assertIsInstance(obj.implementation, klass)
-    test.assertIsInstance(obj, BasicInterfaceTemplate)
+    assert path == object_path
+    assert isinstance(obj.implementation, klass)
+    assert isinstance(obj, BasicInterfaceTemplate)
     return obj
 
 
@@ -294,6 +288,16 @@ def patch_dbus_get_proxy_with_cache(func):
         return proxies[(service_name, object_path)]
 
     return patch('pyanaconda.core.dbus.DBus.get_proxy', side_effect=mock_get)(func)
+
+
+def reset_dbus_container(container):
+    """Reset a DBus container.
+
+    :param DBusContainer container: a container to reset
+    """
+    container._container = {}
+    container._published = set()
+    container._counter = 0
 
 
 class reset_boot_loader_factory(ContextDecorator):

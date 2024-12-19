@@ -21,46 +21,71 @@ import logging
 import os
 import tempfile
 import unittest
-from unittest.mock import patch, Mock, PropertyMock
+from unittest.mock import Mock, PropertyMock, patch
 
-from blivet.devices import NVDIMMNamespaceDevice
-from blivet.formats import get_format
+import pytest
+from blivet.devices import StorageDevice
 from blivet.formats.fs import BTRFS
-from blivet.size import Size
-
-from pyanaconda.modules.storage.bootloader import BootLoaderFactory
-from pyanaconda.modules.storage.bootloader.extlinux import EXTLINUX
-from pyanaconda.core.constants import PARTITIONING_METHOD_AUTOMATIC, PARTITIONING_METHOD_MANUAL, \
-    PARTITIONING_METHOD_INTERACTIVE, PARTITIONING_METHOD_CUSTOM
 from dasbus.server.container import DBusContainerError
+from dasbus.typing import *  # pylint: disable=wildcard-import
+from pykickstart.base import RemovedCommand
+from pykickstart.errors import KickstartParseError
+
+from pyanaconda.core.constants import (
+    PARTITIONING_METHOD_AUTOMATIC,
+    PARTITIONING_METHOD_CUSTOM,
+    PARTITIONING_METHOD_INTERACTIVE,
+    PARTITIONING_METHOD_MANUAL,
+)
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.containers import PartitioningContainer
-from pyanaconda.modules.storage.initialization import enable_installer_mode
-from pyanaconda.modules.storage.partitioning.automatic.automatic_module import \
-    AutoPartitioningModule
-from pyanaconda.modules.storage.partitioning.manual.manual_module import ManualPartitioningModule
-from pyanaconda.modules.storage.partitioning.base import PartitioningModule
-from pyanaconda.modules.storage.partitioning.constants import PartitioningMethod
-from pyanaconda.modules.storage.partitioning.interactive.interactive_module import \
-    InteractivePartitioningModule
-from pyanaconda.modules.storage.devicetree import create_storage
-from pyanaconda.modules.storage.platform import S390
-from tests.unit_tests.pyanaconda_tests import check_kickstart_interface, check_task_creation, \
-    patch_dbus_publish_object, check_dbus_property, patch_dbus_get_proxy, reset_boot_loader_factory
-
-from pyanaconda.modules.storage.bootloader.grub2 import IPSeriesGRUB2, GRUB2
-from pyanaconda.modules.storage.bootloader.zipl import ZIPL
-from dasbus.typing import *  # pylint: disable=wildcard-import
 from pyanaconda.modules.common.errors.storage import InvalidStorageError
 from pyanaconda.modules.common.task import TaskInterface
-from pyanaconda.modules.storage.installation import CreateStorageLayoutTask, \
-    MountFilesystemsTask, WriteConfigurationTask
+from pyanaconda.modules.storage.bootloader import BootLoaderFactory
+from pyanaconda.modules.storage.bootloader.extlinux import EXTLINUX
+from pyanaconda.modules.storage.bootloader.grub2 import GRUB2, IPSeriesGRUB2
+from pyanaconda.modules.storage.bootloader.zipl import ZIPL
+from pyanaconda.modules.storage.checker.utils import StorageCheckerReport
+from pyanaconda.modules.storage.devicetree import create_storage
+from pyanaconda.modules.storage.initialization import enable_installer_mode
+from pyanaconda.modules.storage.installation import (
+    CreateStorageLayoutTask,
+    MountFilesystemsTask,
+    WriteConfigurationTask,
+)
+from pyanaconda.modules.storage.kickstart import (
+    StorageKickstartSpecification,
+    fips_check_luks_passphrase,
+)
+from pyanaconda.modules.storage.partitioning.automatic.automatic_module import (
+    AutoPartitioningModule,
+)
+from pyanaconda.modules.storage.partitioning.base import PartitioningModule
+from pyanaconda.modules.storage.partitioning.constants import PartitioningMethod
+from pyanaconda.modules.storage.partitioning.interactive.interactive_module import (
+    InteractivePartitioningModule,
+)
+from pyanaconda.modules.storage.partitioning.manual.manual_module import (
+    ManualPartitioningModule,
+)
 from pyanaconda.modules.storage.partitioning.validate import StorageValidateTask
+from pyanaconda.modules.storage.platform import S390
 from pyanaconda.modules.storage.reset import ScanDevicesTask
 from pyanaconda.modules.storage.storage import StorageService
 from pyanaconda.modules.storage.storage_interface import StorageInterface
-from pyanaconda.modules.storage.teardown import UnmountFilesystemsTask, TeardownDiskImagesTask
-from pyanaconda.modules.storage.checker.utils import StorageCheckerReport
+from pyanaconda.modules.storage.teardown import (
+    TeardownDiskImagesTask,
+    UnmountFilesystemsTask,
+)
+from tests.unit_tests.pyanaconda_tests import (
+    check_dbus_property,
+    check_kickstart_interface,
+    check_task_creation,
+    patch_dbus_get_proxy,
+    patch_dbus_publish_object,
+    reset_boot_loader_factory,
+    reset_dbus_container,
+)
 
 
 class StorageInterfaceTestCase(unittest.TestCase):
@@ -74,7 +99,6 @@ class StorageInterfaceTestCase(unittest.TestCase):
 
     def _check_dbus_property(self, *args, **kwargs):
         check_dbus_property(
-            self,
             STORAGE,
             self.storage_interface,
             *args, **kwargs
@@ -85,15 +109,15 @@ class StorageInterfaceTestCase(unittest.TestCase):
         object_path, obj = publisher.call_args[0]
 
         partitioning_modules = self.storage_module.created_partitioning
-        self.assertEqual(len(partitioning_modules), 1, "Too many partitioning modules.")
+        assert len(partitioning_modules) == 1, "Too many partitioning modules."
 
         partitioning_module = partitioning_modules[-1]
-        self.assertEqual(partitioning_module.partitioning_method, expected_method)
+        assert partitioning_module.partitioning_method == expected_method
 
         partitioning_path = self.storage_interface.CreatedPartitioning[-1]
-        self.assertEqual(partitioning_path, object_path)
-        self.assertIsInstance(obj.implementation, PartitioningModule)
-        self.assertEqual(partitioning_module, obj.implementation)
+        assert partitioning_path == object_path
+        assert isinstance(obj.implementation, PartitioningModule)
+        assert partitioning_module == obj.implementation
 
     def _apply_partitioning_when_created(self):
         """Apply each partitioning emitted by created_partitioning_changed.
@@ -105,6 +129,10 @@ class StorageInterfaceTestCase(unittest.TestCase):
         self.storage_module.created_partitioning_changed.connect(
             self.storage_module._set_applied_partitioning
         )
+
+    def _add_device(self, device):
+        """Add a device to the device tree."""
+        self.storage_module.storage.devicetree._add_device(device)
 
     def test_initialization(self):
         """Test the Blivet initialization."""
@@ -118,12 +146,12 @@ class StorageInterfaceTestCase(unittest.TestCase):
         storage_reset_callback = Mock()
         self.storage_module.partitioning_reset.connect(storage_reset_callback)
 
-        self.assertIsNotNone(self.storage_module.storage)
+        assert self.storage_module.storage is not None
         storage_changed_callback.assert_not_called()
         storage_reset_callback.assert_not_called()
 
         self.storage_module._current_storage = None
-        self.assertIsNotNone(self.storage_module.storage)
+        assert self.storage_module.storage is not None
         storage_changed_callback.assert_called_once()
         storage_reset_callback.assert_not_called()
 
@@ -132,9 +160,9 @@ class StorageInterfaceTestCase(unittest.TestCase):
         """Test ScanDevicesWithTask."""
         task_path = self.storage_interface.ScanDevicesWithTask()
 
-        obj = check_task_creation(self, task_path, publisher, ScanDevicesTask)
+        obj = check_task_creation(task_path, publisher, ScanDevicesTask)
 
-        self.assertIsNotNone(obj.implementation._storage)
+        assert obj.implementation._storage is not None
 
         # Check the side affects.
         storage_changed_callback = Mock()
@@ -150,38 +178,38 @@ class StorageInterfaceTestCase(unittest.TestCase):
     @patch_dbus_publish_object
     def test_create_partitioning(self, published):
         """Test CreatePartitioning."""
-        PartitioningContainer._counter = 0
+        reset_dbus_container(PartitioningContainer)
 
         path = self.storage_interface.CreatePartitioning(PARTITIONING_METHOD_AUTOMATIC)
-        self.assertEqual(path, "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/1")
+        assert path == "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/1"
 
         published.assert_called_once()
         published.reset_mock()
 
         obj = PartitioningContainer.from_object_path(path)
-        self.assertIsInstance(obj, AutoPartitioningModule)
+        assert isinstance(obj, AutoPartitioningModule)
 
         path = self.storage_interface.CreatePartitioning(PARTITIONING_METHOD_MANUAL)
-        self.assertEqual(path, "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/2")
+        assert path == "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/2"
 
         published.assert_called_once()
         published.reset_mock()
 
         obj = PartitioningContainer.from_object_path(path)
-        self.assertIsInstance(obj, ManualPartitioningModule)
+        assert isinstance(obj, ManualPartitioningModule)
 
         path = self.storage_interface.CreatePartitioning(PARTITIONING_METHOD_INTERACTIVE)
-        self.assertEqual(path, "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/3")
+        assert path == "/org/fedoraproject/Anaconda/Modules/Storage/Partitioning/3"
 
         published.assert_called_once()
 
         obj = PartitioningContainer.from_object_path(path)
-        self.assertIsInstance(obj, InteractivePartitioningModule)
+        assert isinstance(obj, InteractivePartitioningModule)
 
     @patch_dbus_publish_object
     def test_created_partitioning(self, publisher):
         """Test the property CreatedPartitioning."""
-        PartitioningContainer._counter = 0
+        reset_dbus_container(PartitioningContainer)
 
         self._check_dbus_property(
             "CreatedPartitioning",
@@ -210,23 +238,23 @@ class StorageInterfaceTestCase(unittest.TestCase):
         storage_checker.check.return_value = report
 
         self.storage_module._set_storage(storage_1)
-        self.assertEqual(self.storage_module.storage, storage_1)
+        assert self.storage_module.storage == storage_1
 
         object_path = self.storage_interface.CreatePartitioning(PARTITIONING_METHOD_AUTOMATIC)
         partitioning = self.storage_module.created_partitioning[-1]
-        self.assertEqual(partitioning.storage, storage_2)
+        assert partitioning.storage == storage_2
 
         self.storage_interface.ApplyPartitioning(object_path)
-        self.assertEqual(self.storage_module.storage, storage_3)
+        assert self.storage_module.storage == storage_3
 
-        with self.assertRaises(DBusContainerError):
+        with pytest.raises(DBusContainerError):
             self.storage_interface.ApplyPartitioning(ObjPath("invalid"))
 
         report.add_warning("The partitioning might not be valid.")
         self.storage_interface.ApplyPartitioning(object_path)
 
         report.add_error("The partitioning is not valid.")
-        with self.assertRaises(InvalidStorageError):
+        with pytest.raises(InvalidStorageError):
             self.storage_interface.ApplyPartitioning(object_path)
 
     @patch_dbus_publish_object
@@ -239,7 +267,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         storage_checker.check.return_value = report
 
         self.storage_module._set_storage(storage)
-        self.assertEqual(self.storage_interface.AppliedPartitioning, "")
+        assert self.storage_interface.AppliedPartitioning == ""
 
         self._check_dbus_property(
             "AppliedPartitioning",
@@ -259,25 +287,25 @@ class StorageInterfaceTestCase(unittest.TestCase):
         storage_checker.check.return_value = report
 
         self.storage_module._set_storage(storage_1)
-        self.assertEqual(self.storage_module.storage, storage_1)
+        assert self.storage_module.storage == storage_1
 
         partitioning = self.storage_interface.CreatePartitioning(
             PARTITIONING_METHOD_AUTOMATIC
         )
         partitioning_module = self.storage_module.created_partitioning[-1]
-        self.assertEqual(partitioning_module.storage, storage_2)
+        assert partitioning_module.storage == storage_2
 
         self.storage_interface.ApplyPartitioning(partitioning)
-        self.assertEqual(self.storage_interface.AppliedPartitioning, partitioning)
-        self.assertEqual(self.storage_module.storage, storage_3)
+        assert self.storage_interface.AppliedPartitioning == partitioning
+        assert self.storage_module.storage == storage_3
 
         storage_4 = Mock()
         storage_1.copy.return_value = storage_4
 
         self.storage_interface.ResetPartitioning()
-        self.assertEqual(self.storage_interface.AppliedPartitioning, "")
-        self.assertEqual(self.storage_module.storage, storage_1)
-        self.assertEqual(partitioning_module.storage, storage_4)
+        assert self.storage_interface.AppliedPartitioning == ""
+        assert self.storage_module.storage == storage_1
+        assert partitioning_module.storage == storage_4
 
     @patch("pyanaconda.modules.storage.storage.platform", S390())
     def test_collect_requirements(self):
@@ -287,7 +315,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         storage.packages = ["lvm2"]
 
         self.storage_module._set_storage(storage)
-        self.assertEqual(self.storage_interface.CollectRequirements(), [
+        assert self.storage_interface.CollectRequirements() == [
             {
                 "type": get_variant(Str, "package"),
                 "name": get_variant(Str, "lvm2"),
@@ -303,7 +331,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
                 "name": get_variant(Str, "grub2-tools"),
                 "reason": get_variant(Str, "Necessary for the bootloader configuration.")
             }
-        ])
+        ]
 
     @patch_dbus_publish_object
     def test_install_with_tasks(self, publisher):
@@ -317,21 +345,21 @@ class StorageInterfaceTestCase(unittest.TestCase):
 
         # Check the number of installation tasks.
         task_number = len(task_classes)
-        self.assertEqual(task_number, len(task_paths))
-        self.assertEqual(task_number, publisher.call_count)
+        assert task_number == len(task_paths)
+        assert task_number == publisher.call_count
 
         # Check the tasks.
         for i in range(task_number):
             object_path, obj = publisher.call_args_list[i][0]
-            self.assertEqual(object_path, task_paths[i])
-            self.assertIsInstance(obj, TaskInterface)
-            self.assertIsInstance(obj.implementation, task_classes[i])
+            assert object_path == task_paths[i]
+            assert isinstance(obj, TaskInterface)
+            assert isinstance(obj.implementation, task_classes[i])
 
     @patch_dbus_publish_object
     def test_write_configuration_with_task(self, publisher):
         """Test WriteConfigurationWithTask."""
         task_path = self.storage_interface.WriteConfigurationWithTask()
-        check_task_creation(self, task_path, publisher, WriteConfigurationTask)
+        check_task_creation(task_path, publisher, WriteConfigurationTask)
 
     @patch_dbus_publish_object
     def test_teardown_with_tasks(self, publisher):
@@ -346,20 +374,19 @@ class StorageInterfaceTestCase(unittest.TestCase):
 
         # Check the number of teardown tasks.
         task_number = len(task_classes)
-        self.assertEqual(task_number, len(task_paths))
-        self.assertEqual(task_number, publisher.call_count)
+        assert task_number == len(task_paths)
+        assert task_number == publisher.call_count
 
         # Check the tasks.
         for i in range(task_number):
             object_path, obj = publisher.call_args_list[i][0]
-            self.assertEqual(object_path, task_paths[i])
-            self.assertIsInstance(obj, TaskInterface)
-            self.assertIsInstance(obj.implementation, task_classes[i])
+            assert object_path == task_paths[i]
+            assert isinstance(obj, TaskInterface)
+            assert isinstance(obj.implementation, task_classes[i])
 
     def test_kickstart_properties(self):
         """Test kickstart properties."""
-        self.assertEqual(
-            self.storage_interface.KickstartCommands,
+        assert self.storage_interface.KickstartCommands == \
             [
                 'autopart',
                 'bootloader',
@@ -382,12 +409,11 @@ class StorageInterfaceTestCase(unittest.TestCase):
                 'zfcp',
                 'zipl',
             ]
-        )
-        self.assertEqual(self.storage_interface.KickstartSections, [])
-        self.assertEqual(self.storage_interface.KickstartAddons, [])
+        assert self.storage_interface.KickstartSections == []
+        assert self.storage_interface.KickstartAddons == []
 
     def _test_kickstart(self, ks_in, ks_out, **kwargs):
-        check_kickstart_interface(self, self.storage_interface, ks_in, ks_out, **kwargs)
+        check_kickstart_interface(self.storage_interface, ks_in, ks_out, **kwargs)
 
     def test_no_kickstart(self):
         """Test with no kickstart."""
@@ -712,7 +738,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         bootloader --location=mbr --extlinux
         """
         self._test_kickstart(ks_in, ks_out)
-        self.assertEqual(BootLoaderFactory.get_default_class(), EXTLINUX)
+        assert BootLoaderFactory.get_default_class() == EXTLINUX
 
     def test_bootloader_nombr_kickstart(self):
         """Test the bootloader command with the nombr option."""
@@ -882,6 +908,19 @@ class StorageInterfaceTestCase(unittest.TestCase):
         self._check_dbus_partitioning(publisher, PartitioningMethod.AUTOMATIC)
 
     @patch_dbus_publish_object
+    def test_autopart_hibernation_kickstart(self, publisher):
+        """Test the autopart command with the hibernation option."""
+        ks_in = """
+        autopart --hibernation
+        """
+        ks_out = """
+        autopart --hibernation
+        """
+        self._apply_partitioning_when_created()
+        self._test_kickstart(ks_in, ks_out)
+        self._check_dbus_partitioning(publisher, PartitioningMethod.AUTOMATIC)
+
+    @patch_dbus_publish_object
     def test_mount_kickstart(self, publisher):
         """Test the mount command."""
         ks_in = """
@@ -891,6 +930,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         # Mount points configuration
         mount /dev/sda1 /boot
         """
+        self._add_device(StorageDevice("sda1"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -905,6 +945,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         # Mount points configuration
         mount /dev/sda1 none
         """
+        self._add_device(StorageDevice("sda1"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -919,6 +960,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         # Mount points configuration
         mount /dev/sda1 /boot --mountoptions="user"
         """
+        self._add_device(StorageDevice("sda1"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -933,6 +975,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         # Mount points configuration
         mount /dev/sda1 /boot --reformat
         """
+        self._add_device(StorageDevice("sda1"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -947,6 +990,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         # Mount points configuration
         mount /dev/sda1 /boot --reformat=xfs --mkfsoptions="-L BOOT"
         """
+        self._add_device(StorageDevice("sda1"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -967,6 +1011,10 @@ class StorageInterfaceTestCase(unittest.TestCase):
         mount /dev/sdb1 /home
         mount /dev/sdb2 none
         """
+        self._add_device(StorageDevice("sda1"))
+        self._add_device(StorageDevice("sda2"))
+        self._add_device(StorageDevice("sdb1"))
+        self._add_device(StorageDevice("sdb2"))
         self._apply_partitioning_when_created()
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.MANUAL)
@@ -1259,65 +1307,6 @@ class StorageInterfaceTestCase(unittest.TestCase):
         """
         self._test_kickstart(ks_in, ks_out)
 
-    def _add_nvdimm_device(self, name, namespace):
-        """Add a fake NVDIMM device."""
-        storage = self.storage_module.storage
-        device = NVDIMMNamespaceDevice(
-            name,
-            fmt=get_format("disklabel"),
-            size=Size("10 GiB"),
-            mode="sector",
-            devname=namespace,
-            sector_size=512,
-            id_path="pci-0000:00:00.0-bla-1",
-            exists=True
-        )
-        storage.devicetree._add_device(device)
-
-    @patch("pyanaconda.modules.storage.kickstart.nvdimm")
-    def test_nvdimm_kickstart(self, nvdimm):
-        """Test the nvdimm command."""
-        ks_in = """
-        nvdimm use --namespace=namespace0.0
-        nvdimm reconfigure --namespace=namespace1.0 --mode=sector --sectorsize=512
-        """
-        ks_out = """
-        # NVDIMM devices setup
-        nvdimm reconfigure --namespace=namespace1.0 --mode=sector --sectorsize=512
-        nvdimm use --namespace=namespace0.0
-        """
-
-        self._add_nvdimm_device("dev1", "namespace0.0")
-        self._add_nvdimm_device("dev2", "namespace1.0")
-
-        nvdimm.namespaces = ["namespace0.0", "namespace1.0"]
-        self._test_kickstart(ks_in, ks_out)
-
-        nvdimm.namespaces = ["namespace0.0"]
-        self._test_kickstart(ks_in, ks_out, ks_valid=False)
-
-        nvdimm.namespaces = ["namespace1.0"]
-        self._test_kickstart(ks_in, ks_out, ks_valid=False)
-
-    @patch("pyanaconda.modules.storage.kickstart.device_matches")
-    def test_nvdimm_blockdevs_kickstart(self, device_matches):
-        """Test the nvdimm command with blockdevs."""
-        ks_in = """
-        nvdimm use --blockdevs=pmem0
-        """
-        ks_out = """
-        # NVDIMM devices setup
-        nvdimm use --namespace=namespace0.0
-        """
-
-        self._add_nvdimm_device("dev1", "namespace0.0")
-
-        device_matches.return_value = ["pmem0"]
-        self._test_kickstart(ks_in, ks_out)
-
-        device_matches.return_value = []
-        self._test_kickstart(ks_in, ks_out, ks_valid=False)
-
     def test_snapshot_kickstart(self):
         """Test the snapshot command."""
         ks_in = """
@@ -1412,6 +1401,7 @@ class StorageInterfaceTestCase(unittest.TestCase):
         self._test_kickstart(ks_in, ks_out)
         self._check_dbus_partitioning(publisher, PartitioningMethod.CUSTOM)
 
+    @unittest.skipIf(isinstance(StorageKickstartSpecification.commands["btrfs"](), RemovedCommand), "btrfs is not supported")
     @patch_dbus_publish_object
     @patch.object(BTRFS, "supported", new_callable=PropertyMock)
     @patch.object(BTRFS, "formattable", new_callable=PropertyMock)
@@ -1436,6 +1426,52 @@ class StorageInterfaceTestCase(unittest.TestCase):
         formattable.return_value = False
         self._test_kickstart(ks_in, ks_out, ks_valid=False)
 
+    @patch_dbus_publish_object
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_autopart_fips_passphrase_bad_kickstart(self, kargs, publisher):
+        """Test the autopart command with too weak LUKS password in FIPS mode."""
+        kargs.is_enabled.return_value=True
+        ks_in = """
+        autopart --passphrase=weak
+        """
+        ks_out = """
+        autopart --passphrase=weak
+        """
+        self._test_kickstart(ks_in, ks_out, ks_valid=False)
+
+    @patch_dbus_publish_object
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_logvol_fips_passphrase_bad_kickstart(self, kargs, publisher):
+        """Test the logvol command with too weak LUKS password in FIPS mode."""
+        kargs.is_enabled.return_value = True
+        ks_in = """
+        logvol / --name=root  --vgname=fedora --size=4000 --passphrase=weak
+        """
+        ks_out = ""
+        self._test_kickstart(ks_in, ks_out, ks_valid=False)
+
+    @patch_dbus_publish_object
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_raid_fips_passphrase_bad_kickstart(self, kargs, publisher):
+        """Test the raid command with too weak LUKS password in FIPS mode."""
+        kargs.is_enabled.return_value = True
+        ks_in = """
+        raid / --level=1 --device=0 raid.01 raid.02 --passphrase=weak
+        """
+        ks_out = ""
+        self._test_kickstart(ks_in, ks_out, ks_valid=False)
+
+    @patch_dbus_publish_object
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_part_fips_passphrase_bad_kickstart(self, kargs, publisher):
+        """Test the part command with too weak LUKS password in FIPS mode."""
+        kargs.is_enabled.return_value = True
+        ks_in = """
+        part / --fstype=ext4 --size=3000 --passphrase=weak
+        """
+        ks_out = ""
+        self._test_kickstart(ks_in, ks_out, ks_valid=False)
+
 
 class StorageModuleTestCase(unittest.TestCase):
     """Test the storage module."""
@@ -1447,18 +1483,18 @@ class StorageModuleTestCase(unittest.TestCase):
     def test_on_protected_devices(self):
         """Test on_protected_devices_changed."""
         # Don't fail without the storage.
-        self.assertIsNone(self.storage_module._storage_playground)
+        assert self.storage_module._storage_playground is None
         self.storage_module._disk_selection_module.set_protected_devices(["a"])
 
         # Create the storage.
-        self.assertIsNotNone(self.storage_module.storage)
+        assert self.storage_module.storage is not None
 
         # Protect the devices.
         self.storage_module._disk_selection_module.set_protected_devices(["a", "b"])
-        self.assertEqual(self.storage_module.storage.protected_devices, ["a", "b"])
+        assert self.storage_module.storage.protected_devices == ["a", "b"]
 
         self.storage_module._disk_selection_module.set_protected_devices(["b", "c"])
-        self.assertEqual(self.storage_module.storage.protected_devices, ["b", "c"])
+        assert self.storage_module.storage.protected_devices == ["b", "c"]
 
 
 class StorageTasksTestCase(unittest.TestCase):
@@ -1486,41 +1522,38 @@ class StorageTasksTestCase(unittest.TestCase):
 
     @patch("os.chmod")
     @patch("os.makedirs")
-    @patch("blivet.util._run_program")
+    @patch("blivet.tasks.fsmount.FSMount.do_task")
     @patch("pyanaconda.core.util._run_program")
-    def test_mount_filesystems(self, core_run_program, blivet_run_program, makedirs, chmod):
+    def test_mount_filesystems(self, core_run_program, blivet_mount, makedirs, chmod):
         """Test MountFilesystemsTask."""
         storage = create_storage()
         storage._bootloader = Mock()
-        blivet_run_program.return_value = (0, "")
+        blivet_mount.return_value = None
         core_run_program.return_value = (0, "")
 
         task = MountFilesystemsTask(storage)
         task.run()
 
         # created mount points
-        makedirs.assert_any_call('/mnt/sysimage/dev', 0o755)
         makedirs.assert_any_call('/mnt/sysimage/tmp')
 
         # fixed permissions
         chmod.assert_any_call('/mnt/sysimage/tmp', 0o1777)
 
         # mounted devices
-        blivet_run_program.assert_any_call([
-            'mount', '-t', 'bind', '-o', 'bind,defaults', '/dev', '/mnt/sysimage/dev'
-        ])
+        blivet_mount.assert_any_call('/mnt/sysimage/dev', options='defaults')
 
         # remounted the root filesystem
         core_run_program.assert_any_call(
                 ['mount', '--rbind', '/mnt/sysimage', '/mnt/sysroot'],
-                stdin=None, stdout=None, root='/', env_prune=None,
-                log_output=True, binary_output=False)
+                stdin=None, stdout=None, root='/', env_prune=None, env_add=None,
+                log_output=True, binary_output=False, do_preexec=True)
 
     @patch_dbus_get_proxy
     @patch("pyanaconda.modules.storage.installation.conf")
     def test_write_configuration(self, patched_conf, dbus):
         """Test WriteConfigurationTask."""
-        storage = Mock(devices=[])
+        storage = Mock(devices=[], devicetree=Mock(_hidden=[]))
 
         with tempfile.TemporaryDirectory() as d:
             patched_conf.target.system_root = d
@@ -1528,11 +1561,56 @@ class StorageTasksTestCase(unittest.TestCase):
 
             patched_conf.target.is_directory = True
             WriteConfigurationTask(storage).run()
-            self.assertFalse(os.path.exists("{}/etc".format(d)))
+            assert not os.path.exists("{}/etc".format(d))
 
             patched_conf.target.is_directory = False
             WriteConfigurationTask(storage).run()
-            self.assertTrue(os.path.exists("{}/etc".format(d)))
+            assert os.path.exists("{}/etc".format(d))
+
+    @patch("pyanaconda.modules.storage.installation.conf")
+    @patch("pyanaconda.modules.storage.installation.os.path.exists", return_value=False)
+    def test_lvm_devices_file(self, exists_mock, patched_conf):
+        """Test writing the LVM devices file"""
+        dev1 = Mock()
+        dev1.format.type = "lvmpv"
+        dev2 = Mock()
+        dev2.format.type = "blah"
+        dev3 = Mock()
+        dev3.format.type = "lvmpv"
+        dev4 = Mock()
+        dev4.format.type = "ext4"
+        storage = Mock(devices=[dev1, dev2], devicetree=Mock(_hidden=[dev3, dev4]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # lvm devices file: disabled, image installation: False
+            with patch("pyanaconda.modules.storage.installation.HAVE_LVMDEVICES", new=False):
+                patched_conf.target.is_image = False
+                WriteConfigurationTask._write_lvm_devices_file(storage, tmp)
+                dev1.format.lvmdevices_add.assert_not_called()
+                dev2.format.lvmdevices_add.assert_not_called()
+                dev3.format.lvmdevices_add.assert_not_called()
+                dev4.format.lvmdevices_add.assert_not_called()
+                exists_mock.assert_not_called()
+
+            # lvm devices file: enabled, image installation: True
+            with patch("pyanaconda.modules.storage.installation.HAVE_LVMDEVICES", new=True):
+                patched_conf.target.is_image = True
+                WriteConfigurationTask._write_lvm_devices_file(storage, tmp)
+                dev1.format.lvmdevices_add.assert_not_called()
+                dev2.format.lvmdevices_add.assert_not_called()
+                dev3.format.lvmdevices_add.assert_not_called()
+                dev4.format.lvmdevices_add.assert_not_called()
+                exists_mock.assert_not_called()
+
+            # lvm devices file: enabled, image installation: False
+            with patch("pyanaconda.modules.storage.installation.HAVE_LVMDEVICES", new=True):
+                patched_conf.target.is_image = False
+                WriteConfigurationTask._write_lvm_devices_file(storage, tmp)
+                dev1.format.lvmdevices_add.assert_called_once_with()
+                dev2.format.lvmdevices_add.assert_not_called()
+                dev3.format.lvmdevices_add.assert_called_once_with()
+                dev4.format.lvmdevices_add.assert_not_called()
+                exists_mock.assert_called_once_with("/etc/lvm/devices/system.devices")
 
 
 class StorageValidationTasksTestCase(unittest.TestCase):
@@ -1547,9 +1625,9 @@ class StorageValidationTasksTestCase(unittest.TestCase):
         storage_checker.check.return_value = report
 
         report = StorageValidateTask(storage).run()
-        self.assertEqual(report.is_valid(), True)
-        self.assertEqual(report.error_messages, [])
-        self.assertEqual(report.warning_messages, [])
+        assert report.is_valid() is True
+        assert report.error_messages == []
+        assert report.warning_messages == []
 
     @patch('pyanaconda.modules.storage.partitioning.validate.storage_checker')
     def test_validation_failed(self, storage_checker):
@@ -1563,6 +1641,49 @@ class StorageValidationTasksTestCase(unittest.TestCase):
         storage_checker.check.return_value = report
 
         report = StorageValidateTask(storage).run()
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(report.error_messages, ["Fake error."])
-        self.assertEqual(report.warning_messages, ["Fake warning.", "Fake another warning."])
+        assert report.is_valid() is False
+        assert report.error_messages == ["Fake error."]
+        assert report.warning_messages == ["Fake warning.", "Fake another warning."]
+
+
+class StorageHelpersTestCase(unittest.TestCase):
+    """Test the storage module helpers."""
+
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_fips_luks_passphrase_nofips(self, mock_kargs):
+        """Test fips_check_luks_passphrase without FIPS."""
+        mock_kargs.is_enabled.return_value = False
+
+        fips_check_luks_passphrase("", "command name", 0)
+        mock_kargs.is_enabled.assert_not_called()
+
+        fips_check_luks_passphrase("a", "command name", 0)
+        mock_kargs.is_enabled.assert_called_once_with("fips")
+
+        fips_check_luks_passphrase("weak", "command name", 0)
+
+        fips_check_luks_passphrase("whatever", "command name", 0)
+
+        fips_check_luks_passphrase("king kong strong", "command name", 0)
+
+    @patch("pyanaconda.modules.storage.kickstart.kernel_arguments")
+    def test_fips_luks_passphrase_fips(self, mock_kargs):
+        """Test fips_check_luks_passphrase with FIPS."""
+        mock_kargs.is_enabled.return_value = True
+
+        fips_check_luks_passphrase("", "command name", 0)
+        mock_kargs.is_enabled.assert_not_called()
+
+        with pytest.raises(KickstartParseError):
+            fips_check_luks_passphrase("a", "command name", 0)
+        mock_kargs.is_enabled.assert_called_once_with("fips")
+
+        with pytest.raises(KickstartParseError):
+            fips_check_luks_passphrase("weak", "command name", 0)
+
+        with pytest.raises(KickstartParseError):
+            fips_check_luks_passphrase("short", "command name", 0)
+
+        fips_check_luks_passphrase("whatever", "command name", 0)
+
+        fips_check_luks_passphrase("king kong strong", "command name", 0)

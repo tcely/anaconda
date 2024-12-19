@@ -19,6 +19,7 @@
 #
 import unittest
 
+import pytest
 from blivet.devices import DiskDevice
 from blivet.formats import get_format
 from blivet.size import Size
@@ -26,9 +27,11 @@ from blivet.size import Size
 from pyanaconda.modules.common.constants.objects import DISK_SELECTION
 from pyanaconda.modules.common.errors.storage import UnavailableStorageError
 from pyanaconda.modules.common.structures.validation import ValidationReport
-from pyanaconda.modules.storage.disk_selection import DiskSelectionModule
-from pyanaconda.modules.storage.disk_selection.selection_interface import DiskSelectionInterface
 from pyanaconda.modules.storage.devicetree import create_storage
+from pyanaconda.modules.storage.disk_selection import DiskSelectionModule
+from pyanaconda.modules.storage.disk_selection.selection_interface import (
+    DiskSelectionInterface,
+)
 from tests.unit_tests.pyanaconda_tests import check_dbus_property
 
 
@@ -42,7 +45,6 @@ class DiskSelectionInterfaceTestCase(unittest.TestCase):
 
     def _check_dbus_property(self, *args, **kwargs):
         check_dbus_property(
-            self,
             DISK_SELECTION,
             self.disk_selection_interface,
             *args, **kwargs
@@ -88,50 +90,50 @@ class DiskSelectionInterfaceTestCase(unittest.TestCase):
             self.disk_selection_interface.ValidateSelectedDisks([])
         )
 
-        self.assertEqual(report.is_valid(), True)
+        assert report.is_valid() is True
 
         report = ValidationReport.from_structure(
             self.disk_selection_interface.ValidateSelectedDisks(["devX"])
         )
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(report.error_messages, [
+        assert report.is_valid() is False
+        assert report.error_messages == [
             "The selected disk devX is not recognized."
-        ])
-        self.assertEqual(report.warning_messages, [])
+        ]
+        assert report.warning_messages == []
 
         report = ValidationReport.from_structure(
             self.disk_selection_interface.ValidateSelectedDisks(["dev1"])
         )
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(report.error_messages, [
+        assert report.is_valid() is False
+        assert report.error_messages == [
             "You selected disk dev1, which contains devices that also use "
             "unselected disks dev2, dev3. You must select or de-select "
             "these disks as a set."
-        ])
-        self.assertEqual(report.warning_messages, [])
+        ]
+        assert report.warning_messages == []
 
         report = ValidationReport.from_structure(
             self.disk_selection_interface.ValidateSelectedDisks(["dev1", "dev2"])
         )
 
-        self.assertEqual(report.is_valid(), False)
-        self.assertEqual(report.error_messages, [
+        assert report.is_valid() is False
+        assert report.error_messages == [
             "You selected disk dev1, which contains devices that also "
             "use unselected disk dev3. You must select or de-select "
             "these disks as a set.",
             "You selected disk dev2, which contains devices that also "
             "use unselected disk dev3. You must select or de-select "
             "these disks as a set."
-        ])
-        self.assertEqual(report.warning_messages, [])
+        ]
+        assert report.warning_messages == []
 
         report = ValidationReport.from_structure(
             self.disk_selection_interface.ValidateSelectedDisks(["dev1", "dev2", "dev3"])
         )
 
-        self.assertEqual(report.is_valid(), True)
+        assert report.is_valid() is True
 
     def test_exclusive_disks_property(self):
         """Test the exclusive disks property."""
@@ -166,8 +168,8 @@ class DiskSelectionInterfaceTestCase(unittest.TestCase):
 
     def test_get_usable_disks(self):
         """Test the GetUsableDisks method."""
-        with self.assertRaises(UnavailableStorageError):
+        with pytest.raises(UnavailableStorageError):
             self.disk_selection_interface.GetUsableDisks()
 
         self.disk_selection_module.on_storage_changed(create_storage())
-        self.assertEqual(self.disk_selection_interface.GetUsableDisks(), [])
+        assert self.disk_selection_interface.GetUsableDisks() == []

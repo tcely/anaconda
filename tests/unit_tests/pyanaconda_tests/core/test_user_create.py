@@ -17,14 +17,22 @@
 # Red Hat, Inc.
 #
 
-from pyanaconda.core import users
-import unittest
-import tempfile
-import shutil
 import os
-import crypt
-import platform
-import glob
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import pytest
+
+try:
+    import crypt_r
+except ImportError:
+    import crypt as crypt_r  # pylint: disable=deprecated-module
+
+from pyanaconda.core import users
+from pyanaconda.core.path import make_directories, touch
+
 
 @unittest.skipIf(os.geteuid() != 0, "user creation must be run as root")
 class UserCreateTest(unittest.TestCase):
@@ -44,14 +52,9 @@ class UserCreateTest(unittest.TestCase):
             f.write("shadow: files\n")
             f.write("group: files\n")
             f.write("initgroups: files\n")
-        if platform.architecture()[0].startswith("64"):
-            libdir = "/lib64"
-        else:
-            libdir = "/lib"
 
-        os.mkdir(self.tmpdir + libdir)
-        for lib in glob.glob(libdir + "/libnss_files*"):
-            shutil.copy(lib, self.tmpdir + lib)
+        # provide also valid login.defs so that the created data is correct
+        shutil.copyfile("/etc/login.defs", self.tmpdir + "/etc/login.defs")
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
@@ -72,12 +75,12 @@ class UserCreateTest(unittest.TestCase):
         users.create_group("test_group", root=self.tmpdir)
 
         fields = self._readFields("/etc/group", "test_group")
-        self.assertIsNotNone(fields)
-        self.assertEqual(fields[0], "test_group")
+        assert fields is not None
+        assert fields[0] == "test_group"
 
         fields = self._readFields("/etc/gshadow", "test_group")
-        self.assertIsNotNone(fields)
-        self.assertEqual(fields[0], "test_group")
+        assert fields is not None
+        assert fields[0] == "test_group"
 
     def test_create_group_gid(self):
         """Create a group with a specific GID."""
@@ -85,16 +88,16 @@ class UserCreateTest(unittest.TestCase):
 
         fields = self._readFields("/etc/group", "test_group")
 
-        self.assertIsNotNone(fields)
-        self.assertEqual(fields[0], "test_group")
-        self.assertEqual(fields[2], "47")
+        assert fields is not None
+        assert fields[0] == "test_group"
+        assert fields[2] == "47"
 
     def test_create_group_exists(self):
         """Create a group that already exists."""
         with open(self.tmpdir + "/etc/group", "w") as f:
             f.write("test_group:x:47:\n")
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             users.create_group("test_group", root=self.tmpdir)
 
     def test_create_group_gid_exists(self):
@@ -102,7 +105,7 @@ class UserCreateTest(unittest.TestCase):
         with open(self.tmpdir + "/etc/group", "w") as f:
             f.write("gid_used:x:47:\n")
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             users.create_group("test_group", gid=47, root=self.tmpdir)
 
     def test_create_user(self):
@@ -110,55 +113,55 @@ class UserCreateTest(unittest.TestCase):
         users.create_user("test_user", root=self.tmpdir)
 
         pwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(pwd_fields)
-        self.assertEqual(pwd_fields[0], "test_user")
+        assert pwd_fields is not None
+        assert pwd_fields[0] == "test_user"
 
         # Check that the fields got the right default values
         # UID + GID set to some sort of int
-        self.assertTrue(isinstance(int(pwd_fields[2]), int))
-        self.assertTrue(isinstance(int(pwd_fields[3]), int))
+        assert isinstance(int(pwd_fields[2]), int)
+        assert isinstance(int(pwd_fields[3]), int)
 
         # home is /home/username
-        self.assertEqual(pwd_fields[5], "/home/test_user")
+        assert pwd_fields[5] == "/home/test_user"
 
         # shell set to something
-        self.assertTrue(pwd_fields[6])
+        assert pwd_fields[6]
 
         shadow_fields = self._readFields("/etc/shadow", "test_user")
-        self.assertIsNotNone(shadow_fields)
-        self.assertEqual(shadow_fields[0], "test_user")
+        assert shadow_fields is not None
+        assert shadow_fields[0] == "test_user"
 
         # Ensure the password is locked
-        self.assertTrue(shadow_fields[1].startswith("!"))
+        assert shadow_fields[1].startswith("!")
 
         # Ensure the date of last password change is empty
-        self.assertEqual(shadow_fields[2], "")
+        assert shadow_fields[2] == ""
 
         # Check that the user group was created
         grp_fields = self._readFields("/etc/group", "test_user")
-        self.assertIsNotNone(grp_fields)
-        self.assertEqual(grp_fields[0], "test_user")
+        assert grp_fields is not None
+        assert grp_fields[0] == "test_user"
 
         # Check that user group's GID matches the user's GID
-        self.assertEqual(grp_fields[2], pwd_fields[3])
+        assert grp_fields[2] == pwd_fields[3]
 
         gshadow_fields = self._readFields("/etc/gshadow", "test_user")
-        self.assertIsNotNone(gshadow_fields)
-        self.assertEqual(gshadow_fields[0], "test_user")
+        assert gshadow_fields is not None
+        assert gshadow_fields[0] == "test_user"
 
     def test_create_user_text_options(self):
         """Create a user with the text fields set."""
         users.create_user("test_user", gecos="Test User", homedir="/home/users/testuser", shell="/bin/test", root=self.tmpdir)
 
         pwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(pwd_fields)
-        self.assertEqual(pwd_fields[0], "test_user")
-        self.assertEqual(pwd_fields[4], "Test User")
-        self.assertEqual(pwd_fields[5], "/home/users/testuser")
-        self.assertEqual(pwd_fields[6], "/bin/test")
+        assert pwd_fields is not None
+        assert pwd_fields[0] == "test_user"
+        assert pwd_fields[4] == "Test User"
+        assert pwd_fields[5] == "/home/users/testuser"
+        assert pwd_fields[6] == "/bin/test"
 
         # Check that the home directory was created
-        self.assertTrue(os.path.isdir(self.tmpdir + "/home/users/testuser"))
+        assert os.path.isdir(self.tmpdir + "/home/users/testuser")
 
     def test_create_user_groups(self):
         """Create a user with a list of groups."""
@@ -170,14 +173,14 @@ class UserCreateTest(unittest.TestCase):
         users.create_user("test_user", groups=["test1", "test2(5001)", "test3"], root=self.tmpdir)
 
         grp_fields1 = self._readFields("/etc/group", "test1")
-        self.assertEqual(grp_fields1[3], "test_user")
+        assert grp_fields1[3] == "test_user"
 
         grp_fields2 = self._readFields("/etc/group", "test2")
-        self.assertEqual(grp_fields2[3], "test_user")
-        self.assertEqual(grp_fields2[2], "5001")
+        assert grp_fields2[3] == "test_user"
+        assert grp_fields2[2] == "5001"
 
         grp_fields3 = self._readFields("/etc/group", "test3")
-        self.assertEqual(grp_fields3[3], "test_user")
+        assert grp_fields3[3] == "test_user"
 
     def test_create_user_groups_gid_conflict(self):
         """Create a user with a bad list of groups."""
@@ -185,7 +188,7 @@ class UserCreateTest(unittest.TestCase):
         users.create_group("test3", gid=5000, root=self.tmpdir)
 
         # Add test3 to the group list with a different GID.
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             users.create_user("test_user", groups=["test3(5002)"], root=self.tmpdir)
 
     def test_create_user_password(self):
@@ -193,22 +196,22 @@ class UserCreateTest(unittest.TestCase):
 
         users.create_user("test_user1", password="password", root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "test_user1")
-        self.assertIsNotNone(shadow_fields)
+        assert shadow_fields is not None
         # Make sure the password works
-        self.assertEqual(crypt.crypt("password", shadow_fields[1]), shadow_fields[1])
+        assert crypt_r.crypt("password", shadow_fields[1]) == shadow_fields[1]
 
         # Set the encrypted password for another user with is_crypted
         cryptpw = shadow_fields[1]
         users.create_user("test_user2", password=cryptpw, is_crypted=True, root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "test_user2")
-        self.assertIsNotNone(shadow_fields)
-        self.assertEqual(cryptpw, shadow_fields[1])
+        assert shadow_fields is not None
+        assert cryptpw == shadow_fields[1]
 
         # Set an empty password
         users.create_user("test_user3", password="", root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "test_user3")
-        self.assertIsNotNone(shadow_fields)
-        self.assertEqual("", shadow_fields[1])
+        assert shadow_fields is not None
+        assert "" == shadow_fields[1]
 
     def test_create_user_lock(self):
         """Create a locked user account."""
@@ -216,23 +219,23 @@ class UserCreateTest(unittest.TestCase):
         # Create an empty, locked password
         users.create_user("test_user1", lock=True, password="", root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "test_user1")
-        self.assertIsNotNone(shadow_fields)
-        self.assertEqual("!", shadow_fields[1])
+        assert shadow_fields is not None
+        assert "!" == shadow_fields[1]
 
         # Create a locked password and ensure it can be unlocked (by removing the ! at the front)
         users.create_user("test_user2", lock=True, password="password", root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "test_user2")
-        self.assertIsNotNone(shadow_fields)
-        self.assertTrue(shadow_fields[1].startswith("!"))
-        self.assertEqual(crypt.crypt("password", shadow_fields[1][1:]), shadow_fields[1][1:])
+        assert shadow_fields is not None
+        assert shadow_fields[1].startswith("!")
+        assert crypt_r.crypt("password", shadow_fields[1][1:]) == shadow_fields[1][1:]
 
     def test_create_user_uid(self):
         """Create a user with a specific UID."""
 
         users.create_user("test_user", uid=1047, root=self.tmpdir)
         pwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(pwd_fields)
-        self.assertEqual(pwd_fields[2], "1047")
+        assert pwd_fields is not None
+        assert pwd_fields[2] == "1047"
 
     def test_create_user_gid(self):
         """Create a user with a specific GID."""
@@ -240,19 +243,19 @@ class UserCreateTest(unittest.TestCase):
         users.create_user("test_user", gid=1047, root=self.tmpdir)
 
         pwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(pwd_fields)
-        self.assertEqual(pwd_fields[3], "1047")
+        assert pwd_fields is not None
+        assert pwd_fields[3] == "1047"
 
         grp_fields = self._readFields("/etc/group", "test_user")
-        self.assertIsNotNone(grp_fields)
-        self.assertEqual(grp_fields[2], "1047")
+        assert grp_fields is not None
+        assert grp_fields[2] == "1047"
 
     def test_create_user_exists(self):
         """Create a user that already exists."""
         with open(self.tmpdir + "/etc/passwd", "w") as f:
             f.write("test_user:x:1000:1000::/:/bin/sh\n")
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             users.create_user("test_user", root=self.tmpdir)
 
     def test_create_user_uid_exists(self):
@@ -260,7 +263,7 @@ class UserCreateTest(unittest.TestCase):
         with open(self.tmpdir + "/etc/passwd", "w") as f:
             f.write("conflict:x:1000:1000::/:/bin/sh\n")
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             users.create_user("test_user", uid=1000, root=self.tmpdir)
 
     def test_create_user_gid_exists(self):
@@ -269,21 +272,27 @@ class UserCreateTest(unittest.TestCase):
         users.create_user("test_user", gid=5000, root=self.tmpdir)
 
         passwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(passwd_fields)
-        self.assertEqual(passwd_fields[3], "5000")
+        assert passwd_fields is not None
+        assert passwd_fields[3] == "5000"
 
     def test_set_user_ssh_key(self):
         keydata = "THIS IS TOTALLY A SSH KEY"
 
         users.create_user("test_user", homedir="/home/test_user", root=self.tmpdir)
-        users.set_user_ssh_key("test_user", keydata, root=self.tmpdir)
+        with patch("pyanaconda.core.users.util.restorecon") as restorecon_mock:
+            users.set_user_ssh_key("test_user", keydata, root=self.tmpdir)
+
+        restorecon_mock.assert_called_once_with(
+            ["/home/test_user/.ssh"],
+            root=self.tmpdir
+        )
 
         keyfile = self.tmpdir + "/home/test_user/.ssh/authorized_keys"
-        self.assertTrue(os.path.isfile(keyfile))
+        assert os.path.isfile(keyfile)
         with open(keyfile) as f:
             output_keydata = f.read()
 
-        self.assertEqual(keydata, output_keydata.strip())
+        assert keydata == output_keydata.strip()
 
     def test_set_root_password(self):
         password = "password1"
@@ -297,20 +306,20 @@ class UserCreateTest(unittest.TestCase):
 
         users.set_root_password(password, root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "root")
-        self.assertEqual(crypt.crypt(password, shadow_fields[1]), shadow_fields[1])
+        assert crypt_r.crypt(password, shadow_fields[1]) == shadow_fields[1]
 
         # Try a different password with lock=True
         password = "password2"
         users.set_root_password(password, lock=True, root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "root")
-        self.assertTrue(shadow_fields[1].startswith("!"))
-        self.assertEqual(crypt.crypt(password, shadow_fields[1][1:]), shadow_fields[1][1:])
+        assert shadow_fields[1].startswith("!")
+        assert crypt_r.crypt(password, shadow_fields[1][1:]) == shadow_fields[1][1:]
 
         # Try an encrypted password
         password = "$1$asdf$password"
         users.set_root_password(password, is_crypted=True, root=self.tmpdir)
         shadow_fields = self._readFields("/etc/shadow", "root")
-        self.assertEqual(password, shadow_fields[1])
+        assert password == shadow_fields[1]
 
     def test_create_user_reuse_home(self):
         # Create a user, reusing an old home directory
@@ -318,15 +327,25 @@ class UserCreateTest(unittest.TestCase):
         os.makedirs(self.tmpdir + "/home/test_user")
         os.chown(self.tmpdir + "/home/test_user", 500, 500)
 
-        users.create_user("test_user", homedir="/home/test_user", uid=1000, gid=1000, root=self.tmpdir)
+        with patch("pyanaconda.core.util.restorecon") as restorecon_mock:
+            users.create_user(
+                "test_user",
+                homedir="/home/test_user",
+                uid=1000,
+                gid=1000,
+                root=self.tmpdir
+            )
+
+        restorecon_mock.assert_called_once_with(["/home/test_user"], root=self.tmpdir)
+
         passwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(passwd_fields)
-        self.assertEqual(passwd_fields[2], "1000")
-        self.assertEqual(passwd_fields[3], "1000")
+        assert passwd_fields is not None
+        assert passwd_fields[2] == "1000"
+        assert passwd_fields[3] == "1000"
 
         stat_fields = os.stat(self.tmpdir + "/home/test_user")
-        self.assertEqual(stat_fields.st_uid, 1000)
-        self.assertEqual(stat_fields.st_gid, 1000)
+        assert stat_fields.st_uid == 1000
+        assert stat_fields.st_gid == 1000
 
     def test_create_user_gid_in_group_list(self):
         """Create a user with a GID equal to that of one of the requested groups"""
@@ -335,10 +354,67 @@ class UserCreateTest(unittest.TestCase):
 
         # Ensure that the user's GID is equal to the GID requested
         pwd_fields = self._readFields("/etc/passwd", "test_user")
-        self.assertIsNotNone(pwd_fields)
-        self.assertEqual(pwd_fields[3], "1047")
+        assert pwd_fields is not None
+        assert pwd_fields[3] == "1047"
 
         # and that the requested group has the right GID
         grp_fields = self._readFields("/etc/group", "test_group")
-        self.assertIsNotNone(grp_fields)
-        self.assertEqual(grp_fields[2], "1047")
+        assert grp_fields is not None
+        assert grp_fields[2] == "1047"
+
+
+class ReownHomedirTest(unittest.TestCase):
+    """Tests for _reown_homedir"""
+    def _make_dir(self, root, name, uid, gid):
+        make_directories(root + name)
+        os.chown(root + name, uid, gid)
+
+    def _make_file(self, root, name, uid, gid):
+        touch(root + name)
+        os.chown(root + name, uid, gid)
+
+    def _check_path(self, root, name, expected_uid, expected_gid):
+        stats = os.stat(root + name)
+        assert stats.st_uid == expected_uid
+        assert stats.st_gid == expected_gid
+
+    @patch("pyanaconda.core.users._getpwnam", return_value=["sam", "x", "2022", "2022"])
+    @patch("pyanaconda.core.util.restorecon")
+    @patch("pyanaconda.core.util.execWithRedirect")
+    def test_reown_homedir(self, exec_mock, restorecon_mock, getpwnam_mock):
+        """Test re-owning a home directory.
+
+        We have "sam" who was uid/gid 1492 and now will be 2022.
+        """
+        with tempfile.TemporaryDirectory() as sysroot:
+            # set up various stuff in the home dir to work on
+            self._make_dir(sysroot, "/home/sam", 1492, 1492)  # main dir, uid/gid taken from here
+            self._make_dir(sysroot, "/home/sam/Downloads", 1492, 1492)  # empty dir
+            self._make_dir(sysroot, "/home/sam/Documents", 1492, 1492)  # full dir
+            self._make_file(sysroot, "/home/sam/Documents/mine", 1492, 1492)   # own file
+            self._make_file(sysroot, "/home/sam/Documents/theirs", 1881, 1881)  # other file
+            self._make_file(sysroot, "/home/sam/Documents/oops", 1492, 2000)  # mixed file
+            self._make_dir(sysroot, "/home/sam/root_owns_you", 10000, 10000)  # other dir
+            self._make_file(sysroot, "/home/sam/root_owns_you/thoroughly", 10000, 10000)
+
+            users._reown_homedir(sysroot, "/home/sam", "sam")
+
+            exec_mock.assert_called_once_with(
+                "chown",
+                ["--recursive", "--no-dereference", "--from=1492:1492", "2022:2022",
+                 sysroot + "/home/sam"]
+            )
+            restorecon_mock.assert_called_once_with(["/home/sam"], root=sysroot)
+
+            # now also run the same thing as was mocked, to make sure the expectations are met
+            os.system("chown --recursive --no-dereference --from=1492:1492 2022:2022"
+                      " {}/home/sam".format(sysroot))
+
+            self._check_path(sysroot, "/home/sam", 2022, 2022)
+            self._check_path(sysroot, "/home/sam/Downloads", 2022, 2022)
+            self._check_path(sysroot, "/home/sam/Documents", 2022, 2022)
+            self._check_path(sysroot, "/home/sam/Documents/mine", 2022, 2022)
+            self._check_path(sysroot, "/home/sam/Documents/theirs", 1881, 1881)
+            self._check_path(sysroot, "/home/sam/Documents/oops", 1492, 2000)
+            self._check_path(sysroot, "/home/sam/root_owns_you", 10000, 10000)
+            self._check_path(sysroot, "/home/sam/root_owns_you/thoroughly", 10000, 10000)

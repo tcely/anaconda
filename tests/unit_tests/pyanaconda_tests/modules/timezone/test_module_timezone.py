@@ -17,28 +17,43 @@
 #
 # Red Hat Author(s): Vendula Poncova <vponcova@redhat.com>
 #
-import os
-import tempfile
 import unittest
-from shutil import copytree, copyfile
-from unittest.mock import patch
+from collections import OrderedDict
+from unittest.mock import MagicMock, patch
 
 from dasbus.structure import compare_data
 from dasbus.typing import *  # pylint: disable=wildcard-import
 
-from pyanaconda.core.constants import TIME_SOURCE_SERVER, TIME_SOURCE_POOL
+from pyanaconda.core.constants import (
+    TIME_SOURCE_POOL,
+    TIME_SOURCE_SERVER,
+    TIMEZONE_PRIORITY_DEFAULT,
+    TIMEZONE_PRIORITY_GEOLOCATION,
+    TIMEZONE_PRIORITY_KICKSTART,
+    TIMEZONE_PRIORITY_LANGUAGE,
+    TIMEZONE_PRIORITY_USER,
+)
 from pyanaconda.modules.common.constants.services import TIMEZONE
-from pyanaconda.modules.common.errors.installation import TimezoneConfigurationError
 from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.common.structures.timezone import TimeSourceData
-from pyanaconda.modules.timezone.installation import ConfigureNTPTask, ConfigureTimezoneTask
-from pyanaconda.modules.common.structures.kickstart import KickstartReport
+from pyanaconda.modules.common.structures.timezone import (
+    GeolocationData,
+    TimeSourceData,
+)
+from pyanaconda.modules.timezone.initialization import GeolocationTask
+from pyanaconda.modules.timezone.installation import (
+    ConfigureHardwareClockTask,
+    ConfigureNTPTask,
+    ConfigureTimezoneTask,
+)
 from pyanaconda.modules.timezone.timezone import TimezoneService
 from pyanaconda.modules.timezone.timezone_interface import TimezoneInterface
-from pyanaconda.ntp import NTP_CONFIG_FILE, NTPconfigError
-from tests.unit_tests.pyanaconda_tests import check_kickstart_interface, \
-    patch_dbus_publish_object, PropertiesChangedCallback, check_task_creation_list, \
-    check_dbus_property
+from pyanaconda.timezone import get_timezone
+from tests.unit_tests.pyanaconda_tests import (
+    check_dbus_property,
+    check_kickstart_interface,
+    check_task_creation_list,
+    patch_dbus_publish_object,
+)
 
 
 class TimezoneInterfaceTestCase(unittest.TestCase):
@@ -50,13 +65,8 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
         self.timezone_module = TimezoneService()
         self.timezone_interface = TimezoneInterface(self.timezone_module)
 
-        # Connect to the properties changed signal.
-        self.callback = PropertiesChangedCallback()
-        self.timezone_interface.PropertiesChanged.connect(self.callback)
-
     def _check_dbus_property(self, *args, **kwargs):
         check_dbus_property(
-            self,
             TIMEZONE,
             self.timezone_interface,
             *args, **kwargs
@@ -64,29 +74,30 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
 
     def test_kickstart_properties(self):
         """Test kickstart properties."""
-        self.assertEqual(self.timezone_interface.KickstartCommands, ["timezone", "timesource"])
-        self.assertEqual(self.timezone_interface.KickstartSections, [])
-        self.assertEqual(self.timezone_interface.KickstartAddons, [])
-        self.callback.assert_not_called()
+        assert self.timezone_interface.KickstartCommands == ["timezone", "timesource"]
+        assert self.timezone_interface.KickstartSections == []
+        assert self.timezone_interface.KickstartAddons == []
 
     def test_timezone_property(self):
         """Test the Timezone property."""
-        self.timezone_interface.SetTimezone("Europe/Prague")
-        self.assertEqual(self.timezone_interface.Timezone, "Europe/Prague")
-        self.callback.assert_called_once_with(
-            TIMEZONE.interface_name, {'Timezone': 'Europe/Prague'}, [])
+        self._check_dbus_property(
+            "Timezone",
+            "Europe/Prague"
+        )
 
     def test_utc_property(self):
         """Test the IsUtc property."""
-        self.timezone_interface.SetIsUTC(True)
-        self.assertEqual(self.timezone_interface.IsUTC, True)
-        self.callback.assert_called_once_with(TIMEZONE.interface_name, {'IsUTC': True}, [])
+        self._check_dbus_property(
+            "IsUTC",
+            True
+        )
 
     def test_ntp_property(self):
         """Test the NTPEnabled property."""
-        self.timezone_interface.SetNTPEnabled(False)
-        self.assertEqual(self.timezone_interface.NTPEnabled, False)
-        self.callback.assert_called_once_with(TIMEZONE.interface_name, {'NTPEnabled': False}, [])
+        self._check_dbus_property(
+            "NTPEnabled",
+            False
+        )
 
     def test_time_sources_property(self):
         """Test the TimeSources property."""
@@ -107,8 +118,52 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
             [server, pool]
         )
 
+    def test_timezone_priority_constants(self):
+        """Test the timezone priority constants are in correct order."""
+        # assert order of priorities is correct AND nothing equals
+        assert TIMEZONE_PRIORITY_DEFAULT \
+               < TIMEZONE_PRIORITY_LANGUAGE \
+               < TIMEZONE_PRIORITY_GEOLOCATION \
+               < TIMEZONE_PRIORITY_KICKSTART \
+               < TIMEZONE_PRIORITY_USER
+
+    def test_timezone_priority(self):
+        """Test the SetTimezoneWithPriority function."""
+        # initialize priority to a low value, which is impossible via the interface as other
+        # tests set just Timezone which uses the highest priority
+        self.timezone_module._timezone = "Default/Default"
+        self.timezone_module._priority = TIMEZONE_PRIORITY_DEFAULT
+        assert self.timezone_interface.Timezone == "Default/Default"  # as initialized
+        # check higher priority overwrites
+        self.timezone_interface.SetTimezoneWithPriority(
+            "Language/Spoke",
+            TIMEZONE_PRIORITY_LANGUAGE
+        )
+        assert self.timezone_interface.Timezone == "Language/Spoke"
+        # check same priority overwrites
+        self.timezone_interface.SetTimezoneWithPriority(
+            "More/Lang",
+            TIMEZONE_PRIORITY_LANGUAGE
+        )
+        assert self.timezone_interface.Timezone == "More/Lang"
+        # check lower priority does not overwrite
+        self.timezone_interface.SetTimezoneWithPriority(
+            "Back/To/Defaults",
+            TIMEZONE_PRIORITY_DEFAULT
+        )
+        assert self.timezone_interface.Timezone == "More/Lang"
+        # check that the unprioritized property uses the highest priority
+        # order of constants is guaranteed by testing elsewhere
+        self.timezone_interface.Timezone = "Highest"
+        assert self.timezone_interface.Timezone == "Highest"
+        self.timezone_interface.SetTimezoneWithPriority(
+            "Kick/Start",
+            TIMEZONE_PRIORITY_KICKSTART
+        )
+        assert self.timezone_interface.Timezone == "Highest"
+
     def _test_kickstart(self, ks_in, ks_out):
-        check_kickstart_interface(self, self.timezone_interface, ks_in, ks_out)
+        check_kickstart_interface(self.timezone_interface, ks_in, ks_out)
 
     def test_no_kickstart(self):
         """Test with no kickstart."""
@@ -136,27 +191,14 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
         """
         self._test_kickstart(ks_in, ks_out)
 
-    def test_kickstart2(self):
-        """Test the timezone command with flags."""
+    def test_kickstart_utc(self):
+        """Test the timezone command with the UTC flag."""
         ks_in = """
-        timezone --utc --nontp Europe/Prague
-        """
-        ks_out = """
-        timesource --ntp-disable
-        # System timezone
         timezone Europe/Prague --utc
         """
-        self._test_kickstart(ks_in, ks_out)
-
-    def test_kickstart3(self):
-        """Test the timezone command with ntp servers."""
-        ks_in = """
-        timezone --ntpservers ntp.cesnet.cz Europe/Prague
-        """
         ks_out = """
-        timesource --ntp-server=ntp.cesnet.cz
         # System timezone
-        timezone Europe/Prague
+        timezone Europe/Prague --utc
         """
         self._test_kickstart(ks_in, ks_out)
 
@@ -212,66 +254,52 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
         """
         self._test_kickstart(ks_in, ks_out)
 
-    def test_kickstart_timezone_timesource(self):
-        """Test the combination of timezone and timesource commands."""
-        ks_in = """
-        timezone --ntpservers ntp.cesnet.cz,0.fedora.pool.ntp.org Europe/Prague
-        timesource --ntp-server ntp.cesnet.cz --nts
-        timesource --ntp-pool 0.fedora.pool.ntp.org
-        """
-        ks_out = """
-        timesource --ntp-server=ntp.cesnet.cz
-        timesource --ntp-server=0.fedora.pool.ntp.org
-        timesource --ntp-server=ntp.cesnet.cz --nts
-        timesource --ntp-pool=0.fedora.pool.ntp.org
-        # System timezone
-        timezone Europe/Prague
-        """
-        self._test_kickstart(ks_in, ks_out)
-
     def test_collect_requirements(self):
         """Test the requirements of the Timezone module."""
         # Check the default requirements.
         requirements = Requirement.from_structure_list(
             self.timezone_interface.CollectRequirements()
         )
-        self.assertEqual(len(requirements), 1)
-        self.assertEqual(requirements[0].type, "package")
-        self.assertEqual(requirements[0].name, "chrony")
+        assert len(requirements) == 1
+        assert requirements[0].type == "package"
+        assert requirements[0].name == "chrony"
 
         # Check requirements with disabled NTP service.
-        self.timezone_interface.SetNTPEnabled(False)
+        self.timezone_interface.NTPEnabled = False
         requirements = Requirement.from_structure_list(
             self.timezone_interface.CollectRequirements()
         )
-        self.assertEqual(len(requirements), 0)
+        assert len(requirements) == 0
 
     @patch_dbus_publish_object
     def test_install_with_tasks_default(self, publisher):
         """Test install tasks - module in default state."""
         task_classes = [
+            ConfigureHardwareClockTask,
             ConfigureTimezoneTask,
             ConfigureNTPTask,
         ]
         task_paths = self.timezone_interface.InstallWithTasks()
-        task_objs = check_task_creation_list(self, task_paths, publisher, task_classes)
+        task_objs = check_task_creation_list(task_paths, publisher, task_classes)
 
-        # ConfigureTimezoneTask
+        # ConfigureHardwareClockTask
         obj = task_objs[0]
-        self.assertEqual(obj.implementation._timezone, "America/New_York")
-        self.assertEqual(obj.implementation._is_utc, False)
-        # ConfigureNTPTask
+        assert obj.implementation._is_utc is False
+        # ConfigureTimezoneTask
         obj = task_objs[1]
-        self.assertEqual(obj.implementation._ntp_enabled, True)
-        self.assertEqual(obj.implementation._ntp_servers, [])
+        assert obj.implementation._timezone == "America/New_York"
+        assert obj.implementation._is_utc is False
+        # ConfigureNTPTask
+        obj = task_objs[2]
+        assert obj.implementation._ntp_enabled is True
+        assert obj.implementation._ntp_servers == []
 
     @patch_dbus_publish_object
     def test_install_with_tasks_configured(self, publisher):
         """Test install tasks - module in configured state."""
-
-        self.timezone_interface.SetIsUTC(True)
-        self.timezone_interface.SetTimezone("Asia/Tokyo")
-        self.timezone_interface.SetNTPEnabled(False)
+        self.timezone_interface.IsUTC = True
+        self.timezone_interface.Timezone = "Asia/Tokyo"
+        self.timezone_interface.NTPEnabled = False
         # --nontp and --ntpservers are mutually exclusive in kicstart but
         # there is no such enforcement in the module so for testing this is ok
 
@@ -284,305 +312,84 @@ class TimezoneInterfaceTestCase(unittest.TestCase):
         pool.type = TIME_SOURCE_POOL
         pool.hostname = "clock2.example.com"
 
-        self.timezone_interface.SetTimeSources(
+        self.timezone_interface.TimeSources = \
             TimeSourceData.to_structure_list([server, pool])
-        )
 
         task_classes = [
+            ConfigureHardwareClockTask,
             ConfigureTimezoneTask,
             ConfigureNTPTask,
         ]
         task_paths = self.timezone_interface.InstallWithTasks()
-        task_objs = check_task_creation_list(self, task_paths, publisher, task_classes)
+        task_objs = check_task_creation_list(task_paths, publisher, task_classes)
+
+        # ConfigureHardwareClockTask
+        obj = task_objs[0]
+        assert obj.implementation._is_utc is True
 
         # ConfigureTimezoneTask
-        obj = task_objs[0]
-        self.assertEqual(obj.implementation._timezone, "Asia/Tokyo")
-        self.assertEqual(obj.implementation._is_utc, True)
+        obj = task_objs[1]
+        assert obj.implementation._timezone == "Asia/Tokyo"
+        assert obj.implementation._is_utc is True
 
         # ConfigureNTPTask
-        obj = task_objs[1]
-        self.assertEqual(obj.implementation._ntp_enabled, False)
-        self.assertEqual(len(obj.implementation._ntp_servers), 2)
-        self.assertTrue(compare_data(obj.implementation._ntp_servers[0], server))
-        self.assertTrue(compare_data(obj.implementation._ntp_servers[1], pool))
+        obj = task_objs[2]
+        assert obj.implementation._ntp_enabled is False
+        assert len(obj.implementation._ntp_servers) == 2
+        assert compare_data(obj.implementation._ntp_servers[0], server)
+        assert compare_data(obj.implementation._ntp_servers[1], pool)
 
-    def test_deprecated_warnings(self):
-        response = self.timezone_interface.ReadKickstart("timezone --isUtc Europe/Bratislava")
-        report = KickstartReport.from_structure(response)
+    @patch_dbus_publish_object
+    def test_geoloc_interface(self, publisher):
+        """Test geolocation-related interface and implementation of Timezone"""
+        task_path = self.timezone_interface.StartGeolocationWithTask()
+        check_task_creation_list([task_path], publisher, [GeolocationTask])
 
-        warning = "The option --isUtc will be deprecated in future releases. " \
-                  "Please modify your kickstart file to replace this option with " \
-                  "its preferred alias --utc."
+        # without any actions, we should get empty GeolocationData
+        new = GeolocationData.from_structure(self.timezone_interface.GeolocationResult)
+        assert new.is_empty()
 
-        self.assertEqual(len(report.warning_messages), 1)
-        self.assertEqual(report.warning_messages[0].message, warning)
+    def test_geoloc_result_callback(self):
+        """Test geolocation task result callback"""
+        result = GeolocationData.from_values(territory="", timezone="")
+        self.timezone_module._set_geolocation_result(result)
+        assert self.timezone_module.geolocation_result == result
 
+    @patch("pyanaconda.modules.timezone.timezone.get_all_regions_and_timezones")
+    def test_get_timezones(self, get_all_tz):
+        """Test getting a listing of all valid timezones."""
+        get_all_tz.return_value = OrderedDict([("foo", {"bar", "baz"})])
+        # as the timezones for a region are listed as a set, we need to be a bit careful
+        # when comparing the results
+        result = self.timezone_interface.GetAllValidTimezones()
+        assert list(result.keys()) == ["foo"]
+        assert sorted(result["foo"]) == ['bar', 'baz']
+        get_all_tz.assert_called_once()
 
-class TimezoneTasksTestCase(unittest.TestCase):
-    """Test the D-Bus Timezone (Timezone only) tasks."""
+    @patch("pyanaconda.modules.timezone.timezone.datetime")
+    def test_get_system_date_time(self, fake_datetime):
+        """Test getting system date and time."""
+        # use a non-default timezone
+        self.timezone_module._timezone = "Antarctica/South_Pole"
+        # fake date object returned by now() call
+        fake_date = MagicMock()
+        fake_date.isoformat.return_value = "2023-06-22T18:49:36.878200"
 
-    def test_timezone_task_success(self):
-        """Test the "full success" code paths in timezone D-Bus task."""
-        self._test_timezone_inputs(input_zone="Europe/Prague",
-                                   input_isutc=False,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/Europe/Prague",
-                                   expected_adjtime_last_line="LOCAL")
-        self._test_timezone_inputs(input_zone="Africa/Bissau",
-                                   input_isutc=True,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/Africa/Bissau",
-                                   expected_adjtime_last_line="UTC")
-        self._test_timezone_inputs(input_zone="Etc/GMT-12",
-                                   input_isutc=True,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/Etc/GMT-12",
-                                   expected_adjtime_last_line="UTC")
-        self._test_timezone_inputs(input_zone="Etc/GMT+3",
-                                   input_isutc=True,
-                                   make_adjtime=False,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/Etc/GMT+3",
-                                   expected_adjtime_last_line="UTC")
+        def fake_now(value):
+            assert value == get_timezone("Antarctica/South_Pole")
+            return fake_date
 
-    def test_timezone_task_correction(self):
-        """Test nonsensical time zone correction in timezone D-Bus task."""
-        self._test_timezone_inputs(input_zone="",
-                                   input_isutc=True,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/America/New_York",
-                                   expected_adjtime_last_line="UTC")
-        self._test_timezone_inputs(input_zone="BahBlah",
-                                   input_isutc=True,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/America/New_York",
-                                   expected_adjtime_last_line="UTC")
-        self._test_timezone_inputs(input_zone=None,
-                                   input_isutc=True,
-                                   make_adjtime=True,
-                                   make_zoneinfo=True,
-                                   expected_symlink="../usr/share/zoneinfo/America/New_York",
-                                   expected_adjtime_last_line="UTC")
+        fake_datetime.datetime.now.side_effect = fake_now
+        assert self.timezone_interface.GetSystemDateTime() == "2023-06-22T18:49:36.878200"
+        fake_date.isoformat.assert_called_once()
 
-    @patch('pyanaconda.modules.timezone.installation.arch.is_s390', return_value=True)
-    def test_timezone_task_s390(self, mock_is_s390):
-        """Test skipping writing /etc/adjtime on s390"""
-        with tempfile.TemporaryDirectory() as sysroot:
-            self._setup_environment(sysroot, False, True)
-            self._execute_task(sysroot, "Africa/Bissau", False)
-            self._check_timezone_symlink(sysroot, "../usr/share/zoneinfo/Africa/Bissau")
-            self.assertFalse(os.path.exists(sysroot + "/etc/adjtime"))
-        mock_is_s390.assert_called_once()
-        # expected state: calling it only once in the check for architecture
-
-    def test_timezone_task_timezone_missing(self):
-        """Test failure when setting a valid but missing timezone."""
-        with tempfile.TemporaryDirectory() as sysroot:
-            self._setup_environment(sysroot, False, True)
-            os.remove(sysroot + "/usr/share/zoneinfo/Asia/Ulaanbaatar")
-            with self.assertLogs("anaconda.modules.timezone.installation", level="ERROR"):
-                self._execute_task(sysroot, "Asia/Ulaanbaatar", False)
-            self.assertFalse(os.path.exists(sysroot + "/etc/localtime"))
-
-    @patch("pyanaconda.modules.timezone.installation.os.symlink", side_effect=OSError)
-    def test_timezone_task_symlink_failure(self, mock_os_symlink):
-        """Test failure when symlinking the time zone."""
-        with tempfile.TemporaryDirectory() as sysroot:
-            self._setup_environment(sysroot, False, True)
-            with self.assertLogs("anaconda.modules.timezone.installation", level="ERROR"):
-                self._execute_task(sysroot, "Asia/Ulaanbaatar", False)
-            self.assertFalse(os.path.exists(sysroot + "/etc/localtime"))
-
-    @patch('pyanaconda.modules.timezone.installation.open', side_effect=OSError)
-    def test_timezone_task_write_adjtime_failure(self, mock_open):
-        """Test failure when writing the /etc/adjtime file."""
-        # Note the first open() in the target code should not fail due to mocking, but it would
-        # anyway due to /etc/adjtime missing from env. setup, so it's ok if it does.
-        with tempfile.TemporaryDirectory() as sysroot:
-            with self.assertRaises(TimezoneConfigurationError):
-                self._setup_environment(sysroot, False, True)
-                self._execute_task(sysroot, "Atlantic/Faroe", False)
-            self.assertFalse(os.path.exists(sysroot + "/etc/adjtime"))
-            self.assertTrue(os.path.exists(sysroot + "/etc/localtime"))
-
-    def _test_timezone_inputs(self, input_zone, input_isutc, make_adjtime, make_zoneinfo,
-                              expected_symlink, expected_adjtime_last_line):
-        with tempfile.TemporaryDirectory() as sysroot:
-            self._setup_environment(sysroot, make_adjtime, make_zoneinfo)
-            self._execute_task(sysroot, input_zone, input_isutc)
-            self._check_timezone_symlink(sysroot, expected_symlink)
-            self._check_utc_lastline(sysroot, expected_adjtime_last_line)
-
-    def _setup_environment(self, sysroot, make_adjtime, make_zoneinfo):
-        os.mkdir(sysroot + "/etc")
-        if make_adjtime:
-            copyfile("/etc/adjtime", sysroot + "/etc/adjtime")
-        if make_zoneinfo:
-            copytree("/usr/share/zoneinfo", sysroot + "/usr/share/zoneinfo")
-
-    def _execute_task(self, sysroot, timezone, is_utc):
-        task = ConfigureTimezoneTask(
-            sysroot=sysroot,
-            timezone=timezone,
-            is_utc=is_utc
-        )
-        task.run()
-
-    def _check_timezone_symlink(self, sysroot, expected_symlink):
-        """Check if the right timezone is set as the symlink."""
-        link_target = os.readlink(sysroot + "/etc/localtime")
-        self.assertEqual(expected_symlink, link_target)
-
-    def _check_utc_lastline(self, sysroot, expected_adjtime_last_line):
-        """Check that the UTC was saved"""
-        with open(os.path.normpath(sysroot + "/etc/adjtime"), "r") as fobj:
-            # Careful, this can die on huge files accidentally stuffed there instead.
-            lines = fobj.readlines()
-            # It must be last line because we write it so and nothing should have touched
-            # it in test environment.
-            last_line = lines[-1].strip()
-            self.assertEqual(expected_adjtime_last_line, last_line)
-
-
-class NTPTasksTestCase(unittest.TestCase):
-    """Test the D-Bus NTP tasks from the Timezone module."""
-
-    def test_ntp_task_success(self):
-        """Test the success cases for NTP setup D-Bus task."""
-        self._test_ntp_inputs(
-            make_chronyd=False,
-            ntp_enabled=False
-        )
-        self._test_ntp_inputs(
-            make_chronyd=False,
-            ntp_enabled=True
-        )
-
-    def test_ntp_overwrite(self):
-        """Test overwriting existing config for NTP setup D-Bus task."""
-        self._test_ntp_inputs(
-            make_chronyd=True,
-            ntp_enabled=True
-        )
-        self._test_ntp_inputs(
-            make_chronyd=True,
-            ntp_enabled=False
-        )
-
-    def test_ntp_service(self):
-        """Test enabling of the NTP service in a D-Bus task."""
-        self._test_ntp_inputs(
-            ntp_enabled=False,
-            ntp_installed=True
-        )
-        self._test_ntp_inputs(
-            ntp_enabled=True,
-            ntp_installed=True
-        )
-
-    @patch("pyanaconda.modules.timezone.installation.ntp.save_servers_to_config")
-    def test_ntp_save_failure(self, save_servers):
-        """Test failure when saving NTP config in D-Bus task."""
-        save_servers.side_effect = NTPconfigError
-
-        with self.assertLogs("anaconda.modules.timezone.installation", level="WARNING"):
-            self._test_ntp_inputs(
-                make_chronyd=True,
-                ntp_enabled=True,
-                ntp_config_error=True
-            )
-
-        with self.assertLogs("anaconda.modules.timezone.installation", level="WARNING"):
-            self._test_ntp_inputs(
-                make_chronyd=False,
-                ntp_enabled=True,
-                ntp_config_error=True
-            )
-
-        save_servers.assert_called()
-
-    def _get_test_sources(self):
-        """Get a list of sources"""
-        server = TimeSourceData()
-        server.type = TIME_SOURCE_SERVER
-        server.hostname = "unique.ntp.server"
-        server.options = ["iburst"]
-
-        pool = TimeSourceData()
-        pool.type = TIME_SOURCE_POOL
-        pool.hostname = "another.unique.server"
-
-        return [server, pool]
-
-    def _get_expected_lines(self):
-        return [
-            "server unique.ntp.server iburst\n",
-            "pool another.unique.server\n"
-        ]
-
-    def _test_ntp_inputs(self, make_chronyd=False, ntp_enabled=True, ntp_installed=False,
-                         ntp_config_error=False):
-        ntp_servers = self._get_test_sources()
-        expected_lines = self._get_expected_lines()
-
-        with tempfile.TemporaryDirectory() as sysroot:
-            self._setup_environment(sysroot, make_chronyd)
-
-            with patch("pyanaconda.modules.timezone.installation.util") as mock_util:
-                mock_util.is_service_installed.return_value = ntp_installed
-                self._execute_task(sysroot, ntp_enabled, ntp_servers)
-                self._validate_ntp_service(sysroot, mock_util, ntp_installed, ntp_enabled)
-
-            if ntp_config_error:
-                return
-
-            self._validate_ntp_config(sysroot, make_chronyd, ntp_enabled, expected_lines)
-
-    def _setup_environment(self, sysroot, make_chronyd):
-        os.mkdir(sysroot + "/etc")
-        if make_chronyd:
-            copyfile(NTP_CONFIG_FILE, sysroot + NTP_CONFIG_FILE)
-
-    def _execute_task(self, sysroot, ntp_enabled, ntp_servers):
-        task = ConfigureNTPTask(
-            sysroot=sysroot,
-            ntp_enabled=ntp_enabled,
-            ntp_servers=ntp_servers
-        )
-        task.run()
-
-    def _validate_ntp_service(self, sysroot, mock_util, ntp_installed, ntp_enabled):
-        mock_util.is_service_installed.assert_called_once_with(
-            "chronyd", root=sysroot
-        )
-
-        if not ntp_installed:
-            mock_util.enable_service.assert_not_called()
-            mock_util.disable_service.assert_not_called()
-        elif ntp_enabled:
-            mock_util.enable_service.assert_called_once_with(
-                "chronyd", root=sysroot
-            )
-            mock_util.disable_service.assert_not_called()
-        else:
-            mock_util.enable_service.assert_not_called()
-            mock_util.disable_service.assert_called_once_with(
-                "chronyd", root=sysroot
-            )
-
-    def _validate_ntp_config(self, sysroot, was_present, was_enabled, expected_lines):
-        if was_enabled:
-            with open(sysroot + NTP_CONFIG_FILE) as fobj:
-                all_lines = fobj.readlines()
-
-            for line in expected_lines:
-                self.assertIn(line, all_lines)
-
-        elif not was_present:
-            self.assertFalse(os.path.exists(sysroot + NTP_CONFIG_FILE))
+    @patch("pyanaconda.modules.timezone.timezone.set_system_date_time")
+    def test_set_system_date_time(self, fake_set_time):
+        """Test setting system date and time."""
+        self.timezone_interface.SetSystemDateTime("2023-06-22T18:49:36.878200")
+        fake_set_time.assert_called_once_with(year=2023,
+                                              month=6,
+                                              day=22,
+                                              hour=18,
+                                              minute=49,
+                                              tz="America/New_York")

@@ -17,12 +17,17 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import unittest
 import re
+import unittest
 
 from regexcheck import regex_match
-from pyanaconda.core.regexes import HOSTNAME_PATTERN_WITHOUT_ANCHORS, \
-                                    IPV4_PATTERN_WITHOUT_ANCHORS, IPV6_PATTERN_WITHOUT_ANCHORS
+
+from pyanaconda.core.regexes import (
+    HOSTNAME_PATTERN_WITHOUT_ANCHORS,
+    IPV4_PATTERN_WITHOUT_ANCHORS,
+    IPV6_PATTERN_WITHOUT_ANCHORS,
+)
+
 
 class HostnameRegexTestCase(unittest.TestCase):
     def test_hostname(self):
@@ -80,7 +85,7 @@ class IPv4RegexTestCase(unittest.TestCase):
                 ]
 
         ipv4_re = re.compile('^(' + IPV4_PATTERN_WITHOUT_ANCHORS + ')$')
-        self.assertTrue(regex_match(ipv4_re, good_tests, bad_tests))
+        assert regex_match(ipv4_re, good_tests, bad_tests)
 
 
 class IPv6RegexTestCase(unittest.TestCase):
@@ -169,4 +174,4 @@ class IPv6RegexTestCase(unittest.TestCase):
                 ]
 
         ipv6_re = re.compile('^(' + IPV6_PATTERN_WITHOUT_ANCHORS + ')$')
-        self.assertTrue(regex_match(ipv6_re, good_tests, bad_tests))
+        assert regex_match(ipv6_re, good_tests, bad_tests)

@@ -17,39 +17,62 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import gi
+from dasbus.client.observer import DBusObserver
+
 from pyanaconda.core.async_utils import run_in_loop
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.configuration.network import NetworkOnBoot
+from pyanaconda.core.constants import NETWORK_CAPABILITY_TEAM
+from pyanaconda.core.dbus import DBus
 from pyanaconda.core.kernel import kernel_arguments
-from pyanaconda.core.dbus import DBus, SystemBus
 from pyanaconda.core.signal import Signal
 from pyanaconda.modules.common.base import KickstartService
+from pyanaconda.modules.common.constants.services import HOSTNAME, NETWORK
 from pyanaconda.modules.common.containers import TaskContainer
-from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.common.constants.services import NETWORK, HOSTNAME
-from pyanaconda.modules.network.network_interface import NetworkInterface
-from pyanaconda.modules.network.kickstart import NetworkKickstartSpecification, \
-    update_network_hostname_data, update_network_data_with_default_device, \
-    DEFAULT_DEVICE_SPECIFICATION, update_first_network_command_activate_value
-from pyanaconda.modules.network.firewall import FirewallModule
-from pyanaconda.modules.network.device_configuration import DeviceConfigurations, \
-    supported_device_types, supported_wired_device_types
-from pyanaconda.modules.network.nm_client import devices_ignore_ipv6, get_connections_dump, \
-    get_dracut_arguments_from_connection, is_ibft_connection, get_kickstart_network_data
-from pyanaconda.modules.network.config_file import get_config_files_content, \
-    is_config_file_for_system
-from pyanaconda.modules.network.installation import NetworkInstallationTask, \
-    ConfigureActivationOnBootTask, HostnameConfigurationTask
-from pyanaconda.modules.network.initialization import ApplyKickstartTask, \
-    DumpMissingConfigFilesTask
-from pyanaconda.modules.network.utils import get_default_route_iface
 from pyanaconda.modules.common.structures.network import NetworkDeviceInfo
+from pyanaconda.modules.common.structures.requirement import Requirement
+from pyanaconda.modules.network.config_file import (
+    get_config_files_content,
+    is_config_file_for_system,
+)
+from pyanaconda.modules.network.device_configuration import (
+    DeviceConfigurations,
+    supported_device_types,
+    supported_wired_device_types,
+)
+from pyanaconda.modules.network.firewall import FirewallModule
+from pyanaconda.modules.network.initialization import (
+    ApplyKickstartTask,
+    DumpMissingConfigFilesTask,
+)
+from pyanaconda.modules.network.installation import (
+    ConfigureActivationOnBootTask,
+    HostnameConfigurationTask,
+    NetworkInstallationTask,
+)
+from pyanaconda.modules.network.kickstart import (
+    DEFAULT_DEVICE_SPECIFICATION,
+    NetworkKickstartSpecification,
+    update_first_network_command_activate_value,
+    update_network_data_with_default_device,
+    update_network_hostname_data,
+)
+from pyanaconda.modules.network.network_interface import NetworkInterface
+from pyanaconda.modules.network.nm_client import (
+    devices_ignore_ipv6,
+    get_connections_dump,
+    get_dracut_arguments_from_connection,
+    get_kickstart_network_data,
+    get_new_nm_client,
+)
+from pyanaconda.modules.network.utils import get_default_route_iface
 
-import gi
 gi.require_version("NM", "1.0")
 from gi.repository import NM
 
 from pyanaconda.anaconda_loggers import get_module_logger
+
 log = get_module_logger(__name__)
 
 
@@ -65,20 +88,22 @@ class NetworkService(KickstartService):
         self._hostname = ""
 
         self.current_hostname_changed = Signal()
-        self._hostname_service_proxy = None
+        self._hostname_service_proxy = self._get_hostname_proxy()
+
+        self._capabilities = []
+        self.capabilities_changed = Signal()
 
         self.connected_changed = Signal()
-        self.nm_client = None
         # TODO fallback solution - use Gio/GNetworkMonitor ?
-        if SystemBus.check_connection():
-            nm_client = NM.Client.new(None)
-            if nm_client.get_nm_running():
-                self.nm_client = nm_client
-                self.nm_client.connect("notify::%s" % NM.CLIENT_STATE, self._nm_state_changed)
-                initial_state = self.nm_client.get_state()
-                self.set_connected(self._nm_state_connected(initial_state))
-            else:
-                log.debug("NetworkManager is not running.")
+        self.nm_client = get_new_nm_client()
+        if self.nm_client:
+            self.nm_client.connect("notify::%s" % NM.CLIENT_STATE, self._nm_state_changed)
+            initial_state = self.nm_client.get_state()
+            self.set_connected(self._nm_state_connected(initial_state))
+            self.nm_client.connect("notify::%s" % NM.CLIENT_CAPABILITIES,
+                                   self._nm_capabilities_changed)
+            nm_capabilities = self.nm_client.get_capabilities()
+            self.set_capabilities(self._get_capabilities_from_nm(nm_capabilities))
 
         self._original_network_data = []
         self._device_configurations = None
@@ -101,7 +126,7 @@ class NetworkService(KickstartService):
 
     def run(self):
         """Run the loop."""
-        run_in_loop(self._connect_to_hostname_service)
+        run_in_loop(self._connect_to_hostname_service_once_available)
         super().run()
 
     @property
@@ -204,19 +229,51 @@ class NetworkService(KickstartService):
         self.hostname_changed.emit()
         log.debug("Hostname is set to %s", hostname)
 
-    def _connect_to_hostname_service(self):
-        """Connect to the hostname service."""
-        log.debug("Connecting to the hostnamed service.")
+    @staticmethod
+    def _get_hostname_proxy():
+        """Get a proxy of the hostname service.
 
+        It won't activate the hostnamed service if it is deactivated.
+        See `man systemd-hostnamed.service`.
+        """
         if not conf.system.provides_system_bus:
             log.debug("Not using hostnamed service: system does not "
                       "provide system bus according to configuration.")
-            return
+            return None
 
-        self._hostname_service_proxy = HOSTNAME.get_proxy()
-        self._hostname_service_proxy.PropertiesChanged.connect(
-            self._hostname_service_properties_changed
+        return HOSTNAME.get_proxy()
+
+    def _connect_to_hostname_service_once_available(self):
+        """Connect to the hostname service once available.
+
+        It won't activate the hostnamed service if it is deactivated.
+        See `man systemd-hostnamed.service`.
+        """
+        log.debug("Watching the hostnamed service.")
+
+        observer = DBusObserver(
+            HOSTNAME.message_bus,
+            HOSTNAME.service_name
         )
+        observer.service_available.connect(
+            self._connect_to_hostname_service
+        )
+        observer.connect_once_available()
+
+    def _connect_to_hostname_service(self, observer):
+        """Connect to the hostname service.
+
+        It will activate the hostnamed service if it is deactivated.
+        See `man systemd-hostnamed.service`.
+        """
+        log.debug("Connecting to the hostnamed service.")
+
+        if self._hostname_service_proxy:
+            self._hostname_service_proxy.PropertiesChanged.connect(
+                self._hostname_service_properties_changed
+            )
+
+        observer.disconnect()
 
     def _hostname_service_properties_changed(self, interface, changed, invalid):
         if interface == HOSTNAME.interface_name and "Hostname" in changed:
@@ -225,7 +282,11 @@ class NetworkService(KickstartService):
             log.debug("Current hostname changed to %s", hostname)
 
     def get_current_hostname(self):
-        """Return current hostname of the system."""
+        """Return current hostname of the system.
+
+        It will activate the hostnamed service if it is deactivated.
+        See `man systemd-hostnamed.service`.
+        """
         if self._hostname_service_proxy:
             return self._hostname_service_proxy.Hostname
 
@@ -233,13 +294,17 @@ class NetworkService(KickstartService):
         return ""
 
     def set_current_hostname(self, hostname):
-        """Set current system hostname."""
+        """Set current system hostname.
+
+        It will activate the hostnamed service if it is deactivated.
+        See `man systemd-hostnamed.service`.
+        """
         if not self._hostname_service_proxy:
             log.debug("Current hostname cannot be set.")
             return
 
-        self._hostname_service_proxy.SetHostname(hostname, False)
-        log.debug("Current hostname is set to %s", hostname)
+        self._hostname_service_proxy.SetStaticHostname(hostname, False)
+        log.debug("Current static hostname is set to %s", hostname)
 
     @property
     def nm_available(self):
@@ -268,6 +333,35 @@ class NetworkService(KickstartService):
         else:
             log.debug("Connectivity state can't be determined, assuming not connecting.")
             return False
+
+    @property
+    def capabilities(self):
+        """Capabilities of the network backend."""
+        if not self.nm_available:
+            log.debug("Capabilities can't be determined.")
+            return []
+
+        return self._capabilities
+
+    def set_capabilities(self, capabilities):
+        """Set network capabilities."""
+        self._capabilities = capabilities
+        self.capabilities_changed.emit()
+        self.module_properties_changed.emit()
+        log.debug("Capabilities: %s", capabilities)
+
+    @staticmethod
+    def _get_capabilities_from_nm(nm_capabilities):
+        capabilities = []
+        if NM.Capability.TEAM in nm_capabilities:
+            capabilities.append(NETWORK_CAPABILITY_TEAM)
+
+        return capabilities
+
+    def _nm_capabilities_changed(self, *args):
+        nm_capabilities = self.nm_client.get_capabilities()
+        log.debug("NeworkManager capabilities changed to %s", nm_capabilities)
+        self.set_capabilities(self._get_capabilities_from_nm(nm_capabilities))
 
     @staticmethod
     def _nm_state_connected(state):
@@ -309,6 +403,12 @@ class NetworkService(KickstartService):
                 "teamd",
                 reason="Necessary for network team device configuration."
             ))
+        # infiniband device configuration support
+        if self.get_infiniband_devices():
+            requirements.append(Requirement.for_package(
+                "rdma-core",
+                reason="Necessary for network infiniband device configuration."
+            ))
         # prefixdevname
         if self._is_using_persistent_device_names(kernel_arguments):
             requirements.append(Requirement.for_package(
@@ -345,7 +445,6 @@ class NetworkService(KickstartService):
         all_onboot_ifaces = list(set(onboot_ifaces + onboot_ifaces_by_policy))
 
         task = ConfigureActivationOnBootTask(
-            self.nm_client,
             all_onboot_ifaces
         )
         task.succeeded_signal.connect(lambda: self.log_task_result(task))
@@ -521,6 +620,14 @@ class NetworkService(KickstartService):
         return [dev for dev in self.get_supported_devices()
                 if dev.device_type == NM.DeviceType.TEAM]
 
+    def get_infiniband_devices(self):
+        """Get existing infiniband network devices.
+
+        :return: basic information about existing infiniband devices
+        :rtype: list(NetworkDeviceInfo)
+        """
+        return [dev for dev in self.get_supported_devices()
+                if dev.device_type == NM.DeviceType.INFINIBAND]
     @property
     def bootif(self):
         """Get the value of kickstart --device bootif option."""
@@ -560,9 +667,9 @@ class NetworkService(KickstartService):
         :returns: a task applying the kickstart
         """
         supported_devices = [dev_info.device_name for dev_info in self.get_supported_devices()]
-        task = ApplyKickstartTask(self.nm_client,
-                                  self._original_network_data,
+        task = ApplyKickstartTask(self._original_network_data,
                                   supported_devices,
+                                  self.capabilities,
                                   self.bootif,
                                   self.ifname_option_values)
         task.succeeded_signal.connect(lambda: self.log_task_result(task, check_result=True))
@@ -589,8 +696,7 @@ class NetworkService(KickstartService):
         """
         data = self.get_kickstart_handler()
         default_network_data = data.NetworkData(onboot=False, ipv6="auto")
-        task = DumpMissingConfigFilesTask(self.nm_client,
-                                          default_network_data,
+        task = DumpMissingConfigFilesTask(default_network_data,
                                           self.ifname_option_values)
         task.succeeded_signal.connect(lambda: self.log_task_result(task, check_result=True))
         return task
@@ -623,11 +729,10 @@ class NetworkService(KickstartService):
             log.error("Get dracut arguments for %s: device not found", iface)
             return dracut_args
 
-        target_connections = []
         if ibft:
-            target_connections = [con for con in self.nm_client.get_connections()
-                                  if is_ibft_connection(con)]
+            dracut_args.append('rd.iscsi.ibft')
         else:
+            target_connections = []
             if self._device_configurations:
                 for cfg in self._device_configurations.get_for_device(iface):
                     uuid = cfg.connection_uuid
@@ -644,24 +749,23 @@ class NetworkService(KickstartService):
                     if active_connection:
                         target_connections = [active_connection.get_connection()]
 
-        if target_connections:
-            if len(target_connections) > 1:
-                log.debug("Get dracut arguments: "
-                          "multiple connections found for traget %s: %s, taking the first one",
-                          [con.get_uuid() for con in target_connections], target_ip)
-            connection = target_connections[0]
-        else:
-            log.error("Get dracut arguments: can't find connection for target %s", target_ip)
-            return dracut_args
+            if target_connections:
+                if len(target_connections) > 1:
+                    log.debug("Get dracut arguments: "
+                              "multiple connections found for target %s: %s, taking the first one",
+                              [con.get_uuid() for con in target_connections], target_ip)
+                connection = target_connections[0]
+            else:
+                log.error("Get dracut arguments: can't find connection for target %s", target_ip)
+                return dracut_args
 
-        dracut_args = list(get_dracut_arguments_from_connection(
-            self.nm_client,
-            connection,
-            iface,
-            target_ip,
-            hostname,
-            ibft
-        ))
+            dracut_args = list(get_dracut_arguments_from_connection(
+                self.nm_client,
+                connection,
+                iface,
+                target_ip,
+                hostname
+            ))
         return dracut_args
 
     def _apply_boot_options(self, kernel_args):

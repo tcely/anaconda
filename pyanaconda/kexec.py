@@ -18,19 +18,23 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import shlex
 import shutil
 from collections import namedtuple
 
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.util import execReadlines, execWithRedirect
-from pyanaconda.simpleconfig import unquote
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
 class GrubbyInfoError(Exception):
     pass
+
+
+def unquote(s):
+    return ' '.join(shlex.split(s))
 
 
 def run_grubby(args=None):

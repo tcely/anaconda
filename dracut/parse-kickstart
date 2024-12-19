@@ -6,7 +6,7 @@
 # Requires python 2.7 or later.
 #
 #
-# Copyright (C) 2012-2014 Red Hat, Inc.
+# Copyright (C) 2012-2023 Red Hat, Inc.
 #
 # This copyrighted material is made available to anyone wishing to use,
 # modify, copy, or redistribute it subject to the terms and conditions of
@@ -41,7 +41,7 @@ from pykickstart.constants import *
 from collections import OrderedDict
 
 # Import the kickstart version.
-from pykickstart.version import DEVEL as VERSION
+from kickstart_version import VERSION
 
 # Import all kickstart commands as version-less.
 from pykickstart.commands.cdrom import FC3_Cdrom as Cdrom
@@ -52,9 +52,9 @@ from pykickstart.commands.url import F30_Url as Url
 from pykickstart.commands.updates import F34_Updates as Updates
 from pykickstart.commands.mediacheck import FC4_MediaCheck as MediaCheck
 from pykickstart.commands.driverdisk import F14_DriverDisk as DriverDisk
-from pykickstart.commands.network import F27_Network as Network
+from pykickstart.commands.network import F39_Network as Network
 from pykickstart.commands.displaymode import F26_DisplayMode as DisplayMode
-from pykickstart.commands.bootloader import F34_Bootloader as Bootloader
+from pykickstart.commands.bootloader import F39_Bootloader as Bootloader
 
 # Default logging: none
 log = logging.getLogger('parse-kickstart').addHandler(logging.NullHandler())
@@ -112,7 +112,7 @@ def setting_only_hostname(net, args):
 
 proc_cmdline = read_cmdline("/proc/cmdline")
 
-class DracutArgsMixin(object):
+class DracutArgsMixin():
     """A mixin class to make a Command generate dracut args."""
     def dracut_args(self, args, lineno, obj):
         raise NotImplementedError
@@ -157,7 +157,7 @@ class DracutURL(Url, DracutArgsMixin):
         if self.noverifyssl:
             args.append("rd.noverifyssl")
         if self.proxy:
-            args.append("inst.proxy=%s" % self.proxy)
+            args.append("proxy=%s" % self.proxy)
 
         return "\n".join(args)
 
@@ -413,7 +413,6 @@ def process_kickstart(ksfile):
         log.debug("ksdevice argument is not available")
     parser = KickstartParser(handler, missingIncludeIsFatal=False, errorsAreFatal=False)
     parser.registerSection(NullSection(handler, sectionOpen="%addon"))
-    parser.registerSection(NullSection(handler, sectionOpen="%anaconda"))
     log.info("processing kickstart file %s", ksfile)
     processed_file = preprocessKickstart(ksfile)
     try:

@@ -22,7 +22,8 @@ import unittest
 
 from pyanaconda.lifecycle import Controller
 
-class TestModule(object):
+
+class TestModule:
     def __init__(self):
         self._test = 1
 
@@ -62,7 +63,7 @@ class InstallTasksTestCase(unittest.TestCase):
         # initialization as done the init_done signal of the
         # controller should be triggered. So check that
         # it really happened.
-        self.assertEqual(self._test_variable1, 1)
+        assert self._test_variable1 == 1
 
     def test_controller_robustness(self):
         """Check of controller handles various edge cases."""
@@ -89,7 +90,7 @@ class InstallTasksTestCase(unittest.TestCase):
         ctrl.module_init_done(module5)
         ctrl.module_init_done(module4)
         # check that the init_done has not yet been triggered
-        self.assertEqual(self._test_variable1, 0)
+        assert self._test_variable1 == 0
 
         # mark the modules as being initialized
         ctrl.module_init_start(module1)
@@ -106,7 +107,7 @@ class InstallTasksTestCase(unittest.TestCase):
         ctrl.module_init_done(module6)
 
         # check that the init_done has not yet been triggered
-        self.assertEqual(self._test_variable1, 0)
+        assert self._test_variable1 == 0
 
         # report modules initialization as being finished
         # - order should not matter
@@ -123,4 +124,4 @@ class InstallTasksTestCase(unittest.TestCase):
         ctrl.module_init_done(module8)
 
         # check that the init_done signal has been triggered only once
-        self.assertEqual(self._test_variable1, 1)
+        assert self._test_variable1 == 1

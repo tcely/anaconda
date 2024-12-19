@@ -40,31 +40,39 @@ EXTRA_DIST += $(top_srcdir)/translation-canary/translation_canary/*.py \
 	      $(top_srcdir)/translation-canary/translation_canary/*/*.py
 
 UNIT_TESTS_PATTERN ?= ""
-PEP8_TARGETS ?= ""
 
 # Test scripts need to be listed both here and in TESTS
-dist_check_SCRIPTS = $(srcdir)/glade_tests/*.py \
-		     $(srcdir)/lib/*.py \
-		     $(srcdir)/lib/*.sh \
-		     unit_tests.sh \
-		     rpm_tests.sh \
-		     pylint/runpylint.py \
-		     cppcheck/runcppcheck.sh \
-		     testenv.sh \
-		     $(srcdir)/gettext_tests/*.py \
-		     gettext_tests/canary_tests.sh \
-		     $(srcdir)/*_tests/*.py \
-		     $(srcdir)/unit_tests/*_tests/*.py \
-		     pep8/runpep8.sh
+dist_check_SCRIPTS = \
+	$(srcdir)/glade_tests/*.py \
+	$(srcdir)/lib/*.py \
+	unit_tests/unit_tests.sh \
+	rpm_tests/rpm_tests.sh \
+	pylint/runpylint \
+	cppcheck/runcppcheck.sh \
+	testenv.sh \
+	$(srcdir)/gettext_tests/*.py \
+	gettext_tests/canary_tests.sh \
+	$(srcdir)/*_tests/*.py \
+	$(srcdir)/*_tests/*/*.py \
+	$(srcdir)/*_tests/*/*/*.py \
+	$(srcdir)/*_tests/*/*/*/*.py \
+	$(srcdir)/unit_tests/*_tests/*.py \
+	shellcheck/*.sh \
+	ruff/run_ruff.sh \
+	vulture/run_vulture.sh
 
-TESTS = unit_tests.sh \
-	pylint/runpylint.py \
+TESTS = \
 	cppcheck/runcppcheck.sh \
 	gettext_tests/click.py \
 	gettext_tests/style_guide.py \
 	gettext_tests/contexts.py \
 	gettext_tests/canary_tests.sh \
-	glade_tests.sh
+	glade_tests/glade_tests.sh \
+	shellcheck/run_shellcheck.sh \
+	ruff/run_ruff.sh \
+	pylint/runpylint.py \
+	vulture/run_vulture.sh \
+	unit_tests/unit_tests.sh
 
 clean-local:
 	-rm -rf pylint/.pylint.d

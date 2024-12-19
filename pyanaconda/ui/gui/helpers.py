@@ -21,21 +21,23 @@
 # functionality. See also pyanaconda.ui.helpers.
 
 from pyanaconda.anaconda_loggers import get_module_logger
+
 log = get_module_logger(__name__)
 
 from abc import ABCMeta, abstractmethod
 
 import gi
+
 gi.require_version("Gtk", "3.0")
 
 from gi.repository import Gtk
 
-from pyanaconda.flags import flags
-from pyanaconda.ui.helpers import InputCheck, InputCheckHandler
-from pyanaconda.ui.gui.utils import timed_action
+from pyanaconda.core import constants
 from pyanaconda.core.i18n import _
 from pyanaconda.errors import NonInteractiveError
-from pyanaconda.core import constants
+from pyanaconda.flags import flags
+from pyanaconda.ui.gui.utils import timed_action
+from pyanaconda.ui.helpers import InputCheck, InputCheckHandler
 
 
 def autoinstall_stopped(reason):
@@ -107,18 +109,6 @@ class GUIInputCheckHandler(InputCheckHandler, metaclass=ABCMeta):
 
         return checkRef
 
-    def can_go_back_focus_if_not(self):
-        """Check whether the input validation checks allow the spoke to be exited.
-
-        Return True if yes, otherwise focus the problematic input field and return False.
-        """
-        failed_check = next(self.failed_checks, None)
-        if failed_check:
-            failed_check.input_obj.grab_focus()
-            return False
-        else:
-            return True
-
 
 class GUIDialogInputCheckHandler(GUIInputCheckHandler, metaclass=ABCMeta):
     """Provide InputCheckHandler functionality for Gtk dialogs.
@@ -128,7 +118,7 @@ class GUIDialogInputCheckHandler(GUIInputCheckHandler, metaclass=ABCMeta):
        check result. A method on_ok_clicked is provided to determine whether
        the dialog can be exited, similar to on_back_clicked for spokes.
 
-       It's not possible (or at least not easy) to prent a GtkDialog from
+       It's not possible (or at least not easy) to prevent a GtkDialog from
        returning a response, so the caller of gtk_dialog_run needs to check
        whether the input is valid and decide based on that whether to destroy
        the dialog or call gtk_dialog_run again.
@@ -155,7 +145,7 @@ class GUIDialogInputCheckHandler(GUIInputCheckHandler, metaclass=ABCMeta):
             inputcheck.input_obj.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "")
         else:
             inputcheck.input_obj.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY,
-                    "dialog-error")
+                    "dialog-error-symbolic")
             inputcheck.input_obj.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY,
                 inputcheck.check_status)
 

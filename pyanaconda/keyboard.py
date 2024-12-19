@@ -21,15 +21,16 @@ This module provides functions for dealing with keyboard layouts/keymaps in Anac
 """
 
 import re
+
 import langtable
 
-from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda import localization
-from pyanaconda.core.constants import DEFAULT_KEYBOARD
-from pyanaconda.modules.common.task import sync_run_task
-from pyanaconda.modules.common.constants.services import LOCALIZATION
-
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import DEFAULT_KEYBOARD
+from pyanaconda.modules.common.constants.services import LOCALIZATION
+from pyanaconda.modules.common.task import sync_run_task
+
 log = get_module_logger(__name__)
 
 
@@ -53,6 +54,17 @@ class InvalidLayoutVariantSpec(Exception):
     """
 
     pass
+
+
+def can_configure_keyboard():
+    """Can we configure the keyboard?
+
+    NOTE:
+    This function could be inlined, however, this give us a possibility for future limitation
+    when needed. For example we could use this method to limit keyboard configuration if we
+    are able to detect that current system doesn't support localed keyboard layout switching.
+    """
+    return conf.system.can_configure_keyboard
 
 
 def parse_layout_variant(layout_variant_str):
@@ -157,7 +169,7 @@ def set_x_keyboard_defaults(localization_proxy, xkl_wrapper):
     for layout in x_layouts:
         if xkl_wrapper.is_valid_layout(layout):
             valid_layouts.append(layout)
-    localization_proxy.SetXLayouts(valid_layouts)
+    localization_proxy.XLayouts = valid_layouts
 
     if valid_layouts:
         # do not add layouts if there are any specified in the kickstart
@@ -170,7 +182,9 @@ def set_x_keyboard_defaults(localization_proxy, xkl_wrapper):
         # take the first locale (with highest rank) from the list and
         # store it normalized
         new_layouts = [normalize_layout_variant(layouts[0])]
-        if not langtable.supports_ascii(layouts[0]):
+        # annoyingly, langtable expects *no* space between layout and
+        # (variant) here
+        if not langtable.supports_ascii(layouts[0].replace(" ", "")):
             # The default keymap setting should have "us" before the native layout
             # which does not support ascii,
             # refer: https://bugzilla.redhat.com/show_bug.cgi?id=1039185
@@ -179,21 +193,16 @@ def set_x_keyboard_defaults(localization_proxy, xkl_wrapper):
         log.error("Failed to get layout for chosen locale '%s'", locale)
         new_layouts = [DEFAULT_KEYBOARD]
 
-    localization_proxy.SetXLayouts(new_layouts)
-    if conf.system.can_configure_keyboard:
-        xkl_wrapper.replace_layouts(new_layouts)
+    localization_proxy.XLayouts = new_layouts
 
-    # the console layout configured should be "native" by default,
-    # setting that explicitly for non-ascii layouts where we prepend "us"
-    # refer: https://bugzilla.redhat.com/show_bug.cgi?id=1912609
-    if len(new_layouts) >= 2 and not langtable.supports_ascii(new_layouts[1]):
-        localization_proxy.SetVirtualConsoleKeymap(new_layouts[1])
+    if can_configure_keyboard():
+        xkl_wrapper.replace_layouts(new_layouts)
 
     if len(new_layouts) >= 2 and not localization_proxy.LayoutSwitchOptions:
         # initialize layout switching if needed
-        localization_proxy.SetLayoutSwitchOptions(["grp:alt_shift_toggle"])
+        localization_proxy.LayoutSwitchOptions = ["grp:alt_shift_toggle"]
 
-        if conf.system.can_configure_keyboard:
+        if can_configure_keyboard():
             xkl_wrapper.set_switching_options(["grp:alt_shift_toggle"])
             # activate the language-default layout instead of the additional
             # one

@@ -15,17 +15,14 @@
 # subject to the GNU General Public License and may only be used or replicated
 # with the express permission of Red Hat, Inc.
 
-import unittest
 import os
 import re
+import unittest
+from functools import reduce
+from os.path import dirname
 
 import pyanaconda
-
-from os.path import dirname
-from functools import reduce
-
-from pyanaconda.core.util import join_paths
-
+from pyanaconda.core.path import join_paths
 
 REPO_DIR = dirname(os.path.realpath(pyanaconda.__file__))
 
@@ -36,7 +33,7 @@ class SourcesTestCase(unittest.TestCase):
     def test_find_rw_mounts(self):
         """Test that only RO mounts of install sources are in Dracut."""
         # everything what starts by string in this list will not be tested
-        ignore_prefixes = ("Makefile", "README", "python-deps", "module-setup.sh")
+        ignore_prefixes = ("Makefile", "README", "python-deps", "module-setup.sh", "dd")
         # define false positives
         false_positives = (re.compile(r'\bmount +(--move|--make-rprivate)'),
                            re.compile(r'\bmount /dev/mapper/live-rw'),
@@ -88,7 +85,11 @@ class SourcesTestCase(unittest.TestCase):
                     if not mount_line_regex.search(line):
                         continue
 
+                    # skip all lines which are just logging
+                    if line.strip().startswith("log.debug"):
+                        continue
+
                     # fail on every line which does not have 'mount -o ro'
-                    self.assertRegex(line, r'\bmount +-o *[a-z,]*ro',
-                                     "Dracut mount in '{}' on line '{}' is not read-only!"
-                                     .format(path, num))
+                    assert re.search(r'\bmount +-o *[a-z,]*ro', line), \
+                        "Dracut mount in '{}' on line '{}' is not read-only!" \
+                        .format(path, num)

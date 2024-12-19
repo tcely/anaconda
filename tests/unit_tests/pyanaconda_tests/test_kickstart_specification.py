@@ -21,23 +21,30 @@ import unittest
 import warnings
 from textwrap import dedent
 
+import pytest
 from pykickstart.base import RemovedCommand
-from pykickstart.errors import KickstartParseError
 from pykickstart.commands.skipx import FC3_SkipX
-from pykickstart.commands.user import F24_User, F19_UserData
+from pykickstart.commands.user import F19_UserData, F24_User
+from pykickstart.errors import KickstartParseError
 from pykickstart.options import KSOptionParser
 from pykickstart.parser import Packages
 from pykickstart.sections import PackageSection
 from pykickstart.version import F30
+from pykickstart.version import isRHEL as is_rhel
 
 from pyanaconda import kickstart
 from pyanaconda.core.kickstart.addon import AddonData, AddonRegistry
-from pyanaconda.core.kickstart.specification import KickstartSpecification,\
-    KickstartSpecificationHandler, KickstartSpecificationParser
+from pyanaconda.core.kickstart.specification import (
+    KickstartSpecification,
+    KickstartSpecificationHandler,
+    KickstartSpecificationParser,
+)
+from pyanaconda.core.kickstart.version import VERSION
 from pyanaconda.kickstart import AnacondaKickstartSpecification
 from pyanaconda.modules.localization.kickstart import LocalizationKickstartSpecification
 from pyanaconda.modules.network.kickstart import NetworkKickstartSpecification
 from pyanaconda.modules.payloads.kickstart import PayloadKickstartSpecification
+from pyanaconda.modules.runtime.kickstart import RuntimeKickstartSpecification
 from pyanaconda.modules.security.kickstart import SecurityKickstartSpecification
 from pyanaconda.modules.services.kickstart import ServicesKickstartSpecification
 from pyanaconda.modules.storage.kickstart import StorageKickstartSpecification
@@ -216,7 +223,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         parser.readKickstartFromString(dedent(kickstart_input))
 
         if kickstart_output is not None:
-            self.assertEqual(str(handler).strip(), dedent(kickstart_output).strip())
+            assert str(handler).strip() == dedent(kickstart_output).strip()
 
         return handler
 
@@ -225,7 +232,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         specification = self.SpecificationA
         self.parse_kickstart(specification, "")
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, "skipx")
 
     def test_command_specification(self):
@@ -234,7 +241,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         self.parse_kickstart(specification, "")
         self.parse_kickstart(specification, "skipx")
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, "xconfig")
 
     def test_command_with_data_specification(self):
@@ -243,7 +250,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         self.parse_kickstart(specification, "")
         self.parse_kickstart(specification, "user --name John")
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, "xconfig")
 
     def test_section_specification(self):
@@ -254,7 +261,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         self.parse_kickstart(specification, "%packages\n%end")
         self.parse_kickstart(specification, "%packages\na\nb\nc\n%end")
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, "xconfig")
 
     def test_full_specification(self):
@@ -276,7 +283,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         %end
         """))
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, "xconfig")
 
     def test_first_addon_specification(self):
@@ -291,9 +298,9 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         %end
         """
         handler = self.parse_kickstart(specification, ks_in, ks_out)
-        self.assertEqual(handler.addons.my_test_1.foo, None)
-        self.assertEqual(handler.addons.my_test_1.bar, False)
-        self.assertEqual(handler.addons.my_test_1.lines, [])
+        assert handler.addons.my_test_1.foo is None
+        assert handler.addons.my_test_1.bar is False
+        assert handler.addons.my_test_1.lines == []
 
         ks_in = """
         %addon my_test_1 --foo=10 --bar
@@ -310,11 +317,11 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         %end
         """
         handler = self.parse_kickstart(specification, ks_in, ks_out)
-        self.assertEqual(handler.addons.my_test_1.foo, 10)
-        self.assertEqual(handler.addons.my_test_1.bar, True)
-        self.assertEqual(handler.addons.my_test_1.lines, ["1", "2", "3"])
+        assert handler.addons.my_test_1.foo == 10
+        assert handler.addons.my_test_1.bar is True
+        assert handler.addons.my_test_1.lines == ["1", "2", "3"]
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, """
             %addon my_test_1 --invalid-arg
             %end
@@ -332,7 +339,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         %end
         """
         handler = self.parse_kickstart(specification, ks_in, ks_out)
-        self.assertEqual(handler.addons.my_test_2.args, [])
+        assert handler.addons.my_test_2.args == []
 
         ks_in = """
         %addon my_test_2 --arg1 --arg2 --arg3
@@ -343,9 +350,9 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         %end
         """
         handler = self.parse_kickstart(specification, ks_in, ks_out)
-        self.assertEqual(handler.addons.my_test_2.args, ["--arg1", "--arg2", "--arg3"])
+        assert handler.addons.my_test_2.args == ["--arg1", "--arg2", "--arg3"]
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, """
             %addon my_test_2
             Invalid line!
@@ -356,9 +363,9 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         specification = self.SpecificationF
 
         handler = self.parse_kickstart(specification, "", "")
-        self.assertIsInstance(handler.addons, AddonRegistry)
-        self.assertIsInstance(handler.addons.my_test_1, TestData1)
-        self.assertIsInstance(handler.addons.my_test_2, TestData2)
+        assert isinstance(handler.addons, AddonRegistry)
+        assert isinstance(handler.addons.my_test_1, TestData1)
+        assert isinstance(handler.addons.my_test_2, TestData2)
 
         ks_in = """
         %addon my_test_1 --foo=10 --bar
@@ -378,7 +385,7 @@ class KickstartSpecificationTestCase(unittest.TestCase):
         """
         self.parse_kickstart(specification, ks_in, ks_out)
 
-        with self.assertRaises(KickstartParseError):
+        with pytest.raises(KickstartParseError):
             self.parse_kickstart(specification, """
            %addon my_test_unknown
            %end
@@ -399,6 +406,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         SubscriptionKickstartSpecification,
         TimezoneKickstartSpecification,
         UsersKickstartSpecification,
+        RuntimeKickstartSpecification,
     ]
 
     # Names of the kickstart commands and data that should be temporarily ignored.
@@ -407,7 +415,6 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
 
     # Names of shared kickstart commands and data that should be temporarily ignored.
     IGNORED_SHARED_NAMES = {
-        "liveimg"
     }
 
     # Names of possibly missing kickstart commands and data that should be ignored.
@@ -423,6 +430,9 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
 
     def assert_compare_versions(self, children, parents):
         """Check if children inherit from parents."""
+        if is_rhel(VERSION):
+            pytest.skip("This test is disabled on RHEL.")
+
         for name in children:
             if name in self.IGNORED_NAMES:
                 warnings.warn("Skipping the ignored name: {}".format(name))
@@ -433,7 +443,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
                 continue
 
             print("Checking command {}...".format(name))
-            self.assertIsInstance(children[name](), parents[name])
+            assert isinstance(children[name](), parents[name])
 
     def test_version(self):
         """Check versions of kickstart commands and data objects."""
@@ -452,7 +462,10 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         specified = set()
 
         for specification in self.SPECIFICATIONS:
-            specified.update(specification.commands.keys())
+            spec_commands = specification.commands.items()
+            specified.update(
+                name for name, obj in spec_commands if not issubclass(obj, RemovedCommand)
+            )
 
         # Collect the expected commands.
         expected = set()
@@ -471,7 +484,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
                 specified.discard(name)
 
         # Check the differences.
-        self.assertEqual(specified, expected)
+        assert specified == expected
 
     def test_disjoint_commands(self):
         """Check if the commands are specified at most once."""
@@ -480,7 +493,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         for specification in self.SPECIFICATIONS:
             print("Checking specification {}...".format(specification.__name__))
 
-            for name in specification.commands.keys():
+            for name in specification.commands:
                 if name in self.IGNORED_SHARED_NAMES:
                     warnings.warn("Skipping the shared name {}.".format(name))
                     continue
@@ -497,7 +510,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         for specification in self.SPECIFICATIONS:
             print("Checking specification {}...".format(specification.__name__))
 
-            for name in specification.commands_data.keys():
+            for name in specification.commands_data:
                 if name in specified:
                     self.fail("Data object {} is specified more then once!".format(name))
 
@@ -510,7 +523,7 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         for specification in self.SPECIFICATIONS:
             print("Checking specification {}...".format(specification.__name__))
 
-            for name in specification.sections.keys():
+            for name in specification.sections:
                 if name in specified:
                     self.fail("Section {} is specified more then once!".format(name))
 
@@ -556,6 +569,6 @@ class ModuleSpecificationsTestCase(unittest.TestCase):
         # Otherwise, they has to be handled by the main process.
         for name, command in kickstart.commandMap.items():
             if issubclass(command, kickstart.UselessCommand):
-                self.assertIn(name, module_names)
+                assert name in module_names
             else:
-                self.assertIn(name, anaconda_names)
+                assert name in anaconda_names

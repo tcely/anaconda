@@ -15,14 +15,21 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from time import sleep
+import math
+from time import perf_counter, sleep
 
+from pyanaconda.modules.common.task.task import AbstractTask, Task, ValidationTask
 from pyanaconda.modules.common.task.task_interface import TaskInterface
-from pyanaconda.modules.common.task.task import Task, AbstractTask
-from pyanaconda.modules.common.task.meta import DBusMetaTask
 
-__all__ = ["sync_run_task", "async_run_task", "AbstractTask", "Task", "TaskInterface",
-           "DBusMetaTask"]
+__all__ = [
+    "AbstractTask",
+    "Task",
+    "TaskInterface",
+    "ValidationTask",
+    "async_run_task",
+    "sync_run_task",
+    "wait_for_task",
+]
 
 
 def sync_run_task(task_proxy, callback=None):
@@ -41,7 +48,7 @@ def sync_run_task(task_proxy, callback=None):
         if callback:
             callback(task_proxy)
 
-        sleep(1)
+        sleep(0.1)
 
     task_proxy.Finish()
 
@@ -69,3 +76,26 @@ def async_run_task(task_proxy, callback):
 
     task_proxy.Stopped.connect(_callback)
     task_proxy.Start()
+
+
+def wait_for_task(task_proxy, timeout=math.inf):
+    """Wait for an existing and running task with optional timeout.
+
+    If the timeout exception is raised, the task is not done. To call its Finish method and
+    receive potential errors from its run, you can attach callbacks to the tasks's signals.
+    Alternatively, you can give up re-raising the errors entirely.
+
+    :param task_proxy: a proxy of the remote task
+    :param float timeout: stop waiting after this time in seconds
+    :raise TimeoutError: when the task did not finish before timeout
+    """
+    start = perf_counter()
+    end = start + timeout
+
+    while task_proxy.IsRunning and perf_counter() <= end:
+        sleep(0.1)
+
+    if task_proxy.IsRunning:
+        raise TimeoutError()
+
+    task_proxy.Finish()

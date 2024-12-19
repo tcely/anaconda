@@ -19,22 +19,35 @@
 #
 import langtable
 
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.dbus import DBus
 from pyanaconda.core.signal import Signal
+from pyanaconda.localization import (
+    get_available_translations,
+    get_common_languages,
+    get_english_name,
+    get_language_id,
+    get_language_locales,
+    get_native_name,
+)
 from pyanaconda.modules.common.base import KickstartService
 from pyanaconda.modules.common.constants.services import LOCALIZATION
 from pyanaconda.modules.common.containers import TaskContainer
-from pyanaconda.modules.common.structures.requirement import Requirement
-from pyanaconda.modules.localization.localization_interface import LocalizationInterface
+from pyanaconda.modules.common.structures.language import LanguageData, LocaleData
+from pyanaconda.modules.localization.installation import (
+    KeyboardInstallationTask,
+    LanguageInstallationTask,
+)
 from pyanaconda.modules.localization.kickstart import LocalizationKickstartSpecification
-from pyanaconda.modules.localization.installation import LanguageInstallationTask, \
-    KeyboardInstallationTask
-from pyanaconda.modules.localization.runtime import GetMissingKeyboardConfigurationTask, \
-    ApplyKeyboardTask, AssignGenericKeyboardSettingTask
 from pyanaconda.modules.localization.localed import LocaledWrapper
+from pyanaconda.modules.localization.localization_interface import LocalizationInterface
+from pyanaconda.modules.localization.runtime import (
+    ApplyKeyboardTask,
+    AssignGenericKeyboardSettingTask,
+    GetMissingKeyboardConfigurationTask,
+)
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
@@ -63,6 +76,9 @@ class LocalizationService(KickstartService):
 
         self.keyboard_seen_changed = Signal()
         self._keyboard_seen = False
+
+        self.compositor_selected_layout_changed = Signal()
+        self.compositor_layouts_changed = Signal()
 
         self._localed_wrapper = None
 
@@ -105,6 +121,61 @@ class LocalizationService(KickstartService):
         data.keyboard.vc_keymap = self.vc_keymap
         data.keyboard.x_layouts = self.x_layouts
         data.keyboard.switch_options = self.switch_options
+
+    def get_languages(self):
+        """Get languages with available translations.
+
+        For example: ["en", "cs"]
+
+        :return: a list of language ids
+        """
+        return get_available_translations()
+
+    def get_language_data(self, language_id):
+        """Get data about the specified language.
+
+        :param: a language id (for example, "en")
+        :return: a language data
+        """
+        tdata = LanguageData()
+        tdata.english_name = get_english_name(language_id)
+        tdata.is_common = language_id in get_common_languages()
+        tdata.language_id = language_id
+        tdata.native_name = get_native_name(language_id)
+
+        return tdata
+
+    def get_locales(self, language_id):
+        """Get locales available for the specified language.
+
+        For example: ["de_DE.UTF-8", "de_AT.UTF-8", ... ]
+
+        :return: a list of locale ids
+        """
+        return get_language_locales(language_id)
+
+    def get_common_locales(self):
+        """Get a list of the most commonly used locales.
+
+        For example: ["ar_EG.UTF-8", "en_US.UTF-8", "en_GB.UTF-8", ...]
+
+        :return: a list of common locale IDs
+        """
+        return langtable.list_common_locales()
+
+    def get_locale_data(self, locale_id):
+        """Get data about the specified locale.
+
+        :param: a locale id (for example, "en_US.UTF-8")
+        :return: a locale data
+        """
+        tdata = LocaleData()
+        tdata.english_name = get_english_name(locale_id)
+        tdata.language_id = get_language_id(locale_id)
+        tdata.locale_id = locale_id
+        tdata.native_name = get_native_name(locale_id)
+
+        return tdata
 
     @property
     def language(self):
@@ -187,25 +258,14 @@ class LocalizationService(KickstartService):
     def localed_wrapper(self):
         if not self._localed_wrapper:
             self._localed_wrapper = LocaledWrapper()
+
+            self._localed_wrapper.compositor_selected_layout_changed.connect(
+                self.compositor_selected_layout_changed.emit
+            )
+            self._localed_wrapper.compositor_layouts_changed.connect(
+                self.compositor_layouts_changed.emit
+            )
         return self._localed_wrapper
-
-    def collect_requirements(self):
-        """Return installation requirements for this module.
-
-        :return: a list of requirements
-        """
-        requirements = []
-
-        # Install support for non-ascii keyboard layouts (#1919483)
-        # and special case "fi" layout (#1955793)
-        if self.vc_keymap and (self.vc_keymap == "fi" or
-                               not langtable.supports_ascii(self.vc_keymap)):
-            requirements.append(Requirement.for_package(
-                package_name="kbd-legacy",
-                reason="Required to support the '{}' keymap.".format(self.vc_keymap)
-            ))
-
-        return requirements
 
     def install_with_tasks(self):
         """Return the installation tasks of this module.
@@ -276,3 +336,18 @@ class LocalizationService(KickstartService):
         )
         result = task.run()
         self._update_settings_from_task(result)
+
+    def get_compositor_selected_layout(self):
+        return self.localed_wrapper.current_layout_variant
+
+    def set_compositor_selected_layout(self, layout_variant):
+        return self.localed_wrapper.set_current_layout(layout_variant)
+
+    def select_next_compositor_layout(self):
+        return self.localed_wrapper.select_next_layout()
+
+    def get_compositor_layouts(self):
+        return self.localed_wrapper.layouts_variants
+
+    def set_compositor_layouts(self, layout_variants, options):
+        self.localed_wrapper.set_layouts(layout_variants, options)

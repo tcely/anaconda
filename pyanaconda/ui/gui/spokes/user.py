@@ -18,30 +18,33 @@
 #
 import os
 
-from pyanaconda.core.constants import PASSWORD_POLICY_USER
-from pyanaconda.flags import flags
-from pyanaconda.core.i18n import _, CN_
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.users import crypt_password, guess_username, check_groupname
 from pyanaconda import input_checking
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core import constants
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import PASSWORD_POLICY_USER
+from pyanaconda.core.i18n import CN_, _
+from pyanaconda.core.regexes import GROUPLIST_FANCY_PARSE
+from pyanaconda.core.users import check_groupname, crypt_password, guess_username
+from pyanaconda.flags import flags
 from pyanaconda.modules.common.constants.services import USERS
 from pyanaconda.modules.common.util import is_module_available
-from pyanaconda.ui.gui.spokes import NormalSpoke
-from pyanaconda.ui.gui import GUIObject
 from pyanaconda.ui.categories.user_settings import UserSettingsCategory
 from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda.ui.helpers import InputCheck
-from pyanaconda.ui.gui.helpers import GUISpokeInputCheckHandler, GUIDialogInputCheckHandler
-from pyanaconda.ui.gui.utils import blockedHandler, set_password_visibility
 from pyanaconda.ui.communication import hubQ
+from pyanaconda.ui.gui import GUIObject
+from pyanaconda.ui.gui.helpers import (
+    GUIDialogInputCheckHandler,
+    GUISpokeInputCheckHandler,
+)
+from pyanaconda.ui.gui.spokes import NormalSpoke
+from pyanaconda.ui.gui.utils import blockedHandler, set_password_visibility
+from pyanaconda.ui.helpers import InputCheck
 from pyanaconda.ui.lib.users import get_user_list, set_user_list
-from pyanaconda.core.regexes import GROUPLIST_FANCY_PARSE
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
-__all__ = ["UserSpoke", "AdvancedUserDialog"]
+__all__ = ["AdvancedUserDialog", "UserSpoke"]
 
 
 class AdvancedUserDialog(GUIObject, GUIDialogInputCheckHandler):
@@ -114,6 +117,9 @@ class AdvancedUserDialog(GUIObject, GUIDialogInputCheckHandler):
             homedir = self.user.homedir
         elif self.user.name:
             homedir = "/home/" + self.user.name
+        else:
+            # this state shouldn't happen
+            raise ValueError("Can't resolve home directory")
 
         self._tHome.set_text(homedir)
         self._origHome = homedir
@@ -224,12 +230,14 @@ class UserSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler):
     mainWidgetName = "userCreationWindow"
     focusWidgetName = "fullname_entry"
     uiFile = "spokes/user.glade"
-    helpFile = "UserSpoke.xml"
-
     category = UserSettingsCategory
-
     icon = "avatar-default-symbolic"
     title = CN_("GUI|Spoke", "_User Creation")
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "user-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -375,12 +383,6 @@ class UserSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler):
         self._advanced_user_dialog = AdvancedUserDialog(self)
         self._advanced_user_dialog.initialize()
 
-        # set the visibility of the password entries
-        # - without this the password visibility toggle icon will
-        #   not be shown
-        set_password_visibility(self.password_entry, False)
-        set_password_visibility(self.password_confirmation_entry, False)
-
         # report that we are done
         self.initialize_done()
 
@@ -525,6 +527,16 @@ class UserSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler):
         """Called by Gtk callback when the icon of a password entry is clicked."""
         set_password_visibility(entry, not entry.get_visibility())
 
+    def on_password_entry_map(self, entry):
+        """Called when a password entry widget is going to be displayed.
+
+        - Without this the password visibility toggle icon would not be shown.
+        - The password should be hidden every time the entry widget is displayed
+          to avoid showing the password in plain text in case the user previously
+          displayed the password and then left the spoke, for example.
+        """
+        set_password_visibility(entry, False)
+
     def on_username_set_by_user(self, editable, data=None):
         """Called by Gtk on user-driven changes to the username field.
 
@@ -629,8 +641,11 @@ class UserSpoke(FirstbootSpokeMixIn, NormalSpoke, GUISpokeInputCheckHandler):
                 self.show_warning_message(error_message)
             else:
                 # add suffix for the click twice logic
-                self.show_warning_message("{} {}".format(error_message,
-                                                         _(constants.PASSWORD_DONE_TWICE)))
+                self.show_warning_message(
+                    _(constants.PASSWORD_ERROR_CONCATENATION).format(
+                        error_message,
+                        _(constants.PASSWORD_DONE_TWICE))
+                )
 
         # check if the spoke can be exited after the latest round of checks
         self._check_spoke_exit_conditions(unwaivable_check_failed)

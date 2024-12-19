@@ -14,14 +14,19 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-import unittest
 import importlib
 import os
 import shutil
 import sys
 import tempfile
+import unittest
 import warnings
+
+import pytest
+from pykickstart.version import isRHEL as is_rhel
+
 from pyanaconda import kickstart
+from pyanaconda.core.kickstart.version import VERSION
 
 
 # Verify that each kickstart command in anaconda uses the correct version of
@@ -35,6 +40,9 @@ class CommandVersionTestCase(unittest.TestCase):
 
     def assert_compare_versions(self, children, parents):
         """Check if children inherit from parents."""
+        if is_rhel(VERSION):
+            pytest.skip("This test is disabled on RHEL.")
+
         for name in children:
             if name in self.IGNORED_NAMES:
                 warnings.warn("Skipping the kickstart name {}.".format(name))
@@ -47,7 +55,7 @@ class CommandVersionTestCase(unittest.TestCase):
             if isinstance(children[name](), kickstart.UselessCommand):
                 continue
 
-            self.assertIsInstance(children[name](), parents[name])
+            assert isinstance(children[name](), parents[name])
 
     def test_commands(self):
         """Test that anaconda uses the right versions of kickstart commands"""

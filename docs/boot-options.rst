@@ -2,7 +2,7 @@ Anaconda Boot Options
 =====================
 
 :Authors:
-    Anaconda Developers <anaconda-devel-list@redhat.com>
+    Anaconda Developers <anaconda-devel@lists.fedoraproject.org>
     Will Woods <wwoods@redhat.com>
     Anne Mulhern <amulhern@redhat.com>
 
@@ -237,9 +237,11 @@ For example:
 inst.ks.all
 ^^^^^^^^^^^
 
-All locations of type http, https or ftp specified with inst.ks will be used
-sequentially one by one until the kickstart file is fetched. Other locations
-will be ignored.
+Use all locations of type ``http``, ``https`` or ``ftp`` specified with
+multiple ``inst.ks`` sequentially one by one until kickstart file is fetched.
+Locations of other types (eg. ``nfs``) will be ignored.
+
+Without this option, only last location specified by ``inst.ks`` is used.
 
 In the following example, Anaconda will try to fetch the kickstart file at
 first from ``http://a/a.ks``, then from ``http://b/b.ks`` and finally from
@@ -400,6 +402,16 @@ inst.waitfornet
     installation (after switchroot from early initramfs stage when the installer
     process is run).
 
+.. inst.net.noautodefault
+
+inst.net.noautodefault
+^^^^^^^^^^^^^^^^^^^^^^
+
+Configures NetworkManager so that it does not create default automatic
+connections, which are the wired connections created and activated for any
+Ethernet device that does not have a connection configured. These connections
+are created in installer environment by NetworkManager during its start in post
+switch-root stage of installation and are passed also to installed system.
 
 Console / Display Options
 -------------------------
@@ -502,6 +514,36 @@ Specify screen size for the installer. Use format nxm, where n is the
 number of horizontal pixels, m the number of vertical pixels. The lowest
 supported resolution is 800x600.
 
+.. inst.rdp:
+
+inst.rdp
+^^^^^^^^
+
+Enable Remote Desktop Protocol-controlled installation. You will need to connect to
+the machine using an RDP client application. An RDP install implies that the installed
+system will boot up in in multiuser.target instead of to the graphical login screen.
+
+Multiple RDP clients can connect.
+
+When using ``inst.rdp``, you also need to set RDP username and password using the
+``inst.rdp.username`` and ``inst.rdp.password`` boot options.
+
+.. inst.rdp.username:
+
+inst.rdp.username
+^^^^^^^^^^^^^^^^^
+
+Set username for the RDP session. To enable RDP access, also use the
+``inst.rdp`` and ``inst.rdp.password`` boot options.
+
+.. inst.rdp.password:
+
+inst.rdp.password
+^^^^^^^^^^^^^^^^^
+
+Set password for the RDP session. To enable RDP access, also use the
+``inst.rdp`` and ``inst.rdp.username`` boot options.
+
 .. inst.vnc:
 
 inst.vnc
@@ -513,12 +555,19 @@ may connect.
 
 A system installed with VNC will start in text mode (runlevel 3).
 
+This option is deprecated and will be removed in future releases.
+Use ``inst.rdp`` instead.
+
+
 .. inst.vncpassword:
 
 inst.vncpassword
 ^^^^^^^^^^^^^^^^
 
 Set a password on the VNC server used by the installer.
+
+This option is deprecated and will be removed in future releases.
+Use ``inst.rdp.password`` and related boot options instead.
 
 .. inst.vncconnect:
 
@@ -531,6 +580,8 @@ inst.vncconnect
 
     Use with ``vncviewer -listen``.
 
+This option is deprecated and will be removed in future releases.
+
 .. inst.xdriver:
 
 inst.xdriver
@@ -538,6 +589,8 @@ inst.xdriver
 
 Specify the X driver that should be used during installation and on the
 installed system.
+
+This boot options is deprecated and has no effect.
 
 .. inst.usefbx
 
@@ -547,6 +600,9 @@ inst.usefbx
 Use the framebuffer X driver (``fbdev``) rather than a hardware-specific driver.
 
 Equivalent to ``inst.xdriver=fbdev``.
+
+
+This boot options is deprecated and has no effect.
 
 .. inst.xtimeout:
 
@@ -644,6 +700,22 @@ will be used by default, if found.
 
 See the |anacondalogging|_ for more info on setting up logging via virtio.
 
+.. inst.wait_for_disks:
+
+inst.wait_for_disks
+^^^^^^^^^^^^^^^^^^^
+
+Because disks can take some time to appear, an additional delay of 5 seconds
+has been added.  This can be overridden by boot argument
+`inst.wait_for_disks=<value>` to let dracut wait up to <value> additional
+seconds (0 turns the feature off, causing dracut to only wait up to 500ms).
+Alternatively, if the `OEMDRV` device is known to be present but too slow to be
+autodetected, the user can boot with an argument like `inst.dd=hd:LABEL=OEMDRV`
+to indicate that dracut should expect an `OEMDRV` device and not start the
+installer until it appears.
+
+This functionality could be used to load kickstart and driverdisks.
+
 
 Boot loader options
 -------------------
@@ -656,6 +728,19 @@ inst.extlinux
 Use extlinux as the bootloader. Note that there's no attempt to validate that
 this will work for your platform or anything; it assumes that if you ask for it,
 you want to try.
+
+.. inst.sdboot:
+
+inst.sdboot
+^^^^^^^^^^^^^
+
+Use systemd-boot as the bootloader. Note that there's no attempt to validate that
+this will work for your platform or anything; it assumes that if you ask for it,
+you want to try.
+
+Note that this works only for package-based installations, where the bootloader can be chosen at
+install time. For live images, this can work only if the live image was built with systemd-boot
+instead of grub.
 
 .. inst.leavebootorder:
 
@@ -670,37 +755,21 @@ back to a local boot.
 Storage options
 ---------------
 
-.. inst.nodmraid:
+.. inst.disklabel:
 
-inst.nodmraid
-^^^^^^^^^^^^^
+inst.disklabel
+^^^^^^^^^^^^^^
 
-Disable support for dmraid.
-
-.. warning:: This option is never a good idea! If you have a disk that is
-             erroneously identified as part of a firmware RAID array, that means
-             it has some stale RAID metadata on it which must be removed using
-             an appropriate tool (dmraid and/or wipefs).
-
-.. inst.nompath:
-
-inst.nompath
-^^^^^^^^^^^^
-
-Disable support for multipath devices. This is for systems on which a
-false-positive is encountered which erroneously identifies a normal block device
-as a multipath device. There is no other reason to use this option.
-
-.. warning:: Not for use with actual multipath hardware!  Using this to attempt
-             to install to a single path of a multipath is ill-advised, and not
-             supported.
+Prefer creation of the specified disk label type. Specify ``gpt`` to prefer creation of GPT disk
+labels. Specify ``mbr`` to prefer creation of MBR disk labels if supported.
 
 .. inst.gpt:
 
 inst.gpt
 ^^^^^^^^
 
-Prefer creation of GPT disklabels.
+Prefer creation of GPT disk labels. This option is deprecated and will be removed in future
+releases. Use ``inst.disklabel=gpt`` instead.
 
 
 Other options
@@ -716,7 +785,7 @@ boot option, "selinux" and "inst.selinux" are not the same. The "selinux" option
 is picked up by both the kernel and Anaconda, but "inst.selinux" is processed
 only by Anaconda. So when "selinux=0" is used, SELinux will be disabled both in
 the installation environment and in the installed system, but when
-"inst.selinux=0" is used SELinux will only be disabled in the installed system.
+"inst.selinux=0" is used SELinux will only be disabled in the installation environment.
 Also note that while SELinux is running in the installation environment by
 default, it is running in permissive mode so disabling it there does not make
 much sense.
@@ -797,13 +866,6 @@ Deprecated Options
 These options should still be accepted by the installer, but they are
 deprecated and may be removed soon.
 
-.. method:
-
-method
-^^^^^^
-
-This is an alias for `inst.repo`_.
-
 .. dns:
 
 dns
@@ -876,6 +938,11 @@ blacklist, nofirewire
 ``modprobe.blacklist=<mod1>,<mod2>...``
 
 You can add the firewire module to a denylist with ``modprobe.blacklist=firewire_ohci``.
+
+method:
+^^^^^^
+
+Use `inst.repo`_ instead.
 
 serial
 ^^^^^^
@@ -992,20 +1059,37 @@ Anaconda does not support single language mode anymore.
 repo=nfsiso:...
 ^^^^^^^^^^^^^^^
 
-Anaconda no longer needs explicit specification that a NFS location is an ISO image.
+Anaconda no longer needs explicit specification that an NFS location is an ISO image.
 The difference between an installable tree and a dir with an ``.iso`` file is now
 automatically detected, so this is the same as ``inst.repo=nfs:``...
+
+.. inst.nodmraid:
+
+inst.nodmraid
+^^^^^^^^^^^^^
+
+Anaconda no longer supports dmraid, BIOS/Firmware RAID devices are now handled by
+``mdadm``.
+
+.. inst.nompath:
+
+inst.nompath
+^^^^^^^^^^^^
+
+This was used to disable support for multipath devices. Anaconda did not
+support proper multipath disabling for a long time, the only thing this did
+was disable parts of GUI.
 
 .. inst.product:
 
 inst.product
-++++++++++++
+^^^^^^^^^^^^
 
 Use the ``inst.profile`` option instead.
 
 .. inst.variant:
 
 inst.variant
-++++++++++++
+^^^^^^^^^^^^
 
 Use the ``inst.profile`` option instead.

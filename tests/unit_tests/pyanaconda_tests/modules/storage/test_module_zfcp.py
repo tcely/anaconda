@@ -20,12 +20,17 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.modules.common.errors.configuration import StorageDiscoveryError
 from pyanaconda.modules.storage.zfcp import ZFCPModule
 from pyanaconda.modules.storage.zfcp.discover import ZFCPDiscoverTask
 from pyanaconda.modules.storage.zfcp.zfcp_interface import ZFCPInterface
-from tests.unit_tests.pyanaconda_tests import patch_dbus_publish_object, check_task_creation
+from tests.unit_tests.pyanaconda_tests import (
+    check_task_creation,
+    patch_dbus_publish_object,
+)
 
 
 class ZFCPInterfaceTestCase(unittest.TestCase):
@@ -38,7 +43,7 @@ class ZFCPInterfaceTestCase(unittest.TestCase):
 
     @patch("pyanaconda.modules.storage.dasd.dasd.arch.is_s390", return_value=True)
     def test_is_supported(self, is_supported):
-        self.assertEqual(self.zfcp_interface.IsSupported(), True)
+        assert self.zfcp_interface.IsSupported() is True
 
     @patch_dbus_publish_object
     def test_discover_with_task(self, publisher):
@@ -49,11 +54,11 @@ class ZFCPInterfaceTestCase(unittest.TestCase):
             "0x401040a000000000"
         )
 
-        obj = check_task_creation(self, task_path, publisher, ZFCPDiscoverTask)
+        obj = check_task_creation(task_path, publisher, ZFCPDiscoverTask)
 
-        self.assertEqual(obj.implementation._device_number, "0.0.fc00")
-        self.assertEqual(obj.implementation._wwpn, "0x5105074308c212e9")
-        self.assertEqual(obj.implementation._lun, "0x401040a000000000")
+        assert obj.implementation._device_number == "0.0.fc00"
+        assert obj.implementation._wwpn == "0x5105074308c212e9"
+        assert obj.implementation._lun == "0x401040a000000000"
 
     @patch('pyanaconda.modules.storage.zfcp.zfcp.zfcp')
     @patch("pyanaconda.modules.storage.zfcp.zfcp.arch.is_s390", return_value=True)
@@ -66,17 +71,43 @@ class ZFCPInterfaceTestCase(unittest.TestCase):
 class ZFCPTasksTestCase(unittest.TestCase):
     """Test zFCP tasks."""
 
-    def test_discovery_fails(self):
-        """Test the failing discovery task."""
+    def test_discovery_missing_values(self):
+        """Test the discovery task with missing values."""
 
-        with self.assertRaises(StorageDiscoveryError):
+        with pytest.raises(StorageDiscoveryError) as cm:
             ZFCPDiscoverTask("", "", "").run()
 
-        with self.assertRaises(StorageDiscoveryError):
-            ZFCPDiscoverTask("0.0.fc00", "", "").run()
+        assert str(cm.value) == "Incorrect format of the given device number."
 
-        with self.assertRaises(StorageDiscoveryError):
+        with pytest.raises(StorageDiscoveryError) as cm:
+            ZFCPDiscoverTask("0.0.fc00", "", "0x401040a000000000").run()
+
+        msg = "Only device number or device number with WWPN and LUN are allowed."
+        assert str(cm.value) == msg
+
+        with pytest.raises(StorageDiscoveryError) as cm:
             ZFCPDiscoverTask("0.0.fc00", "0x5105074308c212e9", "").run()
+
+        msg = "Only device number or device number with WWPN and LUN are allowed."
+        assert str(cm.value) == msg
+
+    def test_discovery_invalid_values(self):
+        """Test the discovery task with invalid values."""
+
+        with pytest.raises(StorageDiscoveryError) as cm:
+            ZFCPDiscoverTask("1+2", "", "").run()
+
+        assert str(cm.value) == "Incorrect format of the given device number."
+
+        with pytest.raises(StorageDiscoveryError) as cm:
+            ZFCPDiscoverTask("0.0.fc00", "1+2", "").run()
+
+        assert str(cm.value) == "Incorrect format of the given WWPN number."
+
+        with pytest.raises(StorageDiscoveryError) as cm:
+            ZFCPDiscoverTask("0.0.fc00", "0x5105074308c212e9", "1+2").run()
+
+        assert str(cm.value) == "Incorrect format of the given LUN number."
 
     @patch('pyanaconda.modules.storage.zfcp.discover.zfcp')
     @patch('pyanaconda.modules.storage.zfcp.discover.blockdev')
@@ -93,3 +124,17 @@ class ZFCPTasksTestCase(unittest.TestCase):
         sanitized_lun = blockdev.s390.zfcp_sanitize_lun_input.return_value
 
         zfcp.add_fcp.assert_called_once_with(sanitized_dev, sanitized_wwpn, sanitized_lun)
+
+    @patch('pyanaconda.modules.storage.zfcp.discover.zfcp')
+    @patch('pyanaconda.modules.storage.zfcp.discover.blockdev')
+    def test_discovery_npiv(self, blockdev, zfcp):
+        """Test the discovery task for an NPIV enabled zFCP."""
+        ZFCPDiscoverTask("0.0.fc00", "", "").run()
+
+        blockdev.s390.sanitize_dev_input.assert_called_once_with("0.0.fc00")
+        blockdev.s390.zfcp_sanitize_wwpn_input.assert_not_called()
+        blockdev.s390.zfcp_sanitize_lun_input.assert_not_called()
+
+        sanitized_dev = blockdev.s390.sanitize_dev_input.return_value
+
+        zfcp.add_fcp.assert_called_once_with(sanitized_dev, "", "")

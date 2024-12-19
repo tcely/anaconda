@@ -17,29 +17,76 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pykickstart.constants import GROUP_REQUIRED, GROUP_ALL, KS_MISSING_IGNORE, KS_BROKEN_IGNORE, \
-    GROUP_DEFAULT
-
-from pyanaconda.core.constants import RPM_LANGUAGES_NONE, MULTILIB_POLICY_ALL, \
-    DNF_DEFAULT_TIMEOUT, DNF_DEFAULT_RETRIES, GROUP_PACKAGE_TYPES_ALL, \
-    GROUP_PACKAGE_TYPES_REQUIRED, RPM_LANGUAGES_ALL
-from pyanaconda.core.signal import Signal
-from pyanaconda.modules.common.structures.packages import PackagesConfigurationData, \
-    PackagesSelectionData
-from pyanaconda.modules.payloads.constants import PayloadType, SourceType
-from pyanaconda.modules.payloads.payload.payload_base import PayloadBase
-from pyanaconda.modules.payloads.payload.dnf.dnf_interface import DNFInterface
-from pyanaconda.modules.payloads.source.factory import SourceFactory
-
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.signal import Signal
+from pyanaconda.modules.common.structures.packages import (
+    PackagesConfigurationData,
+    PackagesSelectionData,
+)
+from pyanaconda.modules.payloads.constants import PayloadType, SourceType
+from pyanaconda.modules.payloads.kickstart import (
+    convert_ks_data_to_packages_configuration,
+    convert_ks_data_to_packages_selection,
+    convert_ks_repo_to_repo_data,
+    convert_packages_configuration_to_ksdata,
+    convert_packages_selection_to_ksdata,
+    convert_repo_data_to_ks_repo,
+)
+from pyanaconda.modules.payloads.payload.dnf.dnf_interface import DNFInterface
+from pyanaconda.modules.payloads.payload.dnf.dnf_manager import DNFManager
+from pyanaconda.modules.payloads.payload.dnf.initialization import (
+    SetUpDNFSourcesResult,
+    SetUpDNFSourcesTask,
+    TearDownDNFSourcesTask,
+    configure_dnf_logging,
+)
+from pyanaconda.modules.payloads.payload.dnf.installation import (
+    CleanUpDownloadLocationTask,
+    DownloadPackagesTask,
+    ImportRPMKeysTask,
+    InstallPackagesTask,
+    PrepareDownloadLocationTask,
+    ResolvePackagesTask,
+    SetRPMMacrosTask,
+    UpdateDNFConfigurationTask,
+    WriteRepositoriesTask,
+)
+from pyanaconda.modules.payloads.payload.dnf.tear_down import ResetDNFManagerTask
+from pyanaconda.modules.payloads.payload.dnf.utils import (
+    calculate_required_space,
+    collect_installation_devices,
+    protect_installation_devices,
+)
+from pyanaconda.modules.payloads.payload.dnf.validation import (
+    CheckPackagesSelectionTask,
+    VerifyRepomdHashesTask,
+)
+from pyanaconda.modules.payloads.payload.payload_base import PayloadBase
+from pyanaconda.modules.payloads.source.factory import SourceFactory
+from pyanaconda.modules.payloads.source.utils import has_network_protocol
+
+# Set up the modules logger.
 log = get_module_logger(__name__)
+
+# Configure the DNF logging.
+configure_dnf_logging()
+
+__all__ = ["DNFModule"]
 
 
 class DNFModule(PayloadBase):
     """The DNF payload module."""
 
     def __init__(self):
+        """Create a DNF module."""
         super().__init__()
+        self._dnf_manager = DNFManager()
+        self._internal_sources = []
+
+        self._repositories = []
+        self.repositories_changed = Signal()
+
         self._packages_configuration = PackagesConfigurationData()
         self.packages_configuration_changed = Signal()
 
@@ -48,17 +95,24 @@ class DNFModule(PayloadBase):
 
         self._packages_kickstarted = False
 
+        # Protect installation sources.
+        self._protected_devices = set()
+        self.sources_changed.connect(self._update_protected_devices)
+        self.repositories_changed.connect(self._update_protected_devices)
+
     def for_publication(self):
         """Get the interface used to publish this source."""
         return DNFInterface(self)
 
     @property
     def type(self):
-        """Get type of this payload.
-
-        :return: value of the payload.base.constants.PayloadType enum
-        """
+        """Type of this payload."""
         return PayloadType.DNF
+
+    @property
+    def default_source_type(self):
+        """Type of the default source."""
+        return SourceType(conf.payload.default_source)
 
     @property
     def supported_source_types(self):
@@ -69,10 +123,54 @@ class DNFModule(PayloadBase):
             SourceType.HMC,
             SourceType.NFS,
             SourceType.REPO_FILES,
+            SourceType.REPO_PATH,
             SourceType.CLOSEST_MIRROR,
             SourceType.CDN,
             SourceType.URL
         ]
+
+    def is_network_required(self):
+        """Do the sources and repositories require a network?
+
+        :return: True or False
+        """
+        # Check sources.
+        if super().is_network_required():
+            return True
+
+        # Check repositories.
+        for data in self.repositories:
+            if data.enabled and has_network_protocol(data.url):
+                return True
+
+        return False
+
+    @property
+    def dnf_manager(self):
+        """The DNF manager of this payload."""
+        return self._dnf_manager
+
+    def _set_dnf_manager(self, dnf_manager):
+        """Set the DNF manager of this payload."""
+        self._dnf_manager = dnf_manager
+        log.debug("The DNF manager is set.")
+
+    @property
+    def repositories(self):
+        """The configuration of repositories.
+
+        :return [RepoConfigurationData]: a list of repo configurations
+        """
+        return self._repositories
+
+    def set_repositories(self, data):
+        """Set the configuration of repositories.
+
+        :param [RepoConfigurationData] data: a list of repo configurations
+        """
+        self._repositories = data
+        self.repositories_changed.emit()
+        log.debug("Repositories are set to: %s", data)
 
     @property
     def packages_configuration(self):
@@ -126,8 +224,8 @@ class DNFModule(PayloadBase):
     def process_kickstart(self, data):
         """Process the kickstart data."""
         self._process_kickstart_sources(data)
-        self._process_kickstart_packages_selection(data)
-        self._process_kickstart_packages_configuration(data)
+        self._process_kickstart_repositories(data)
+        self._process_kickstart_packages(data)
 
     def _process_kickstart_sources(self, data):
         """Process the kickstart sources."""
@@ -140,166 +238,158 @@ class DNFModule(PayloadBase):
         source.process_kickstart(data)
         self.add_source(source)
 
-    def _process_kickstart_packages_selection(self, data):
-        """Process the kickstart packages selection."""
-        selection = PackagesSelectionData()
-        selection.core_group_enabled = not data.packages.nocore
-        selection.default_environment_enabled = data.packages.default
+    def _process_kickstart_repositories(self, data):
+        """Process the kickstart repositories."""
+        repositories = list(map(
+            convert_ks_repo_to_repo_data,
+            data.repo.dataList()
+        ))
+        self.set_repositories(repositories)
 
-        if data.packages.environment is not None:
-            selection.environment = data.packages.environment
-
-        selection.packages = data.packages.packageList
-        selection.excluded_packages = data.packages.excludedList
-
-        for group in data.packages.groupList:
-            selection.groups.append(group.name)
-
-            if group.include == GROUP_ALL:
-                selection.groups_package_types[group.name] = GROUP_PACKAGE_TYPES_ALL
-
-            if group.include == GROUP_REQUIRED:
-                selection.groups_package_types[group.name] = GROUP_PACKAGE_TYPES_REQUIRED
-
-        for group in data.packages.excludedGroupList:
-            selection.excluded_groups.append(group.name)
-
-        for module in data.module.dataList():
-            name = module.name
-
-            if module.stream:
-                name += ":" + module.stream
-
-            if module.enable:
-                selection.modules.append(name)
-            else:
-                selection.disabled_modules.append(name)
-
+    def _process_kickstart_packages(self, data):
+        """Process the kickstart packages."""
+        selection = convert_ks_data_to_packages_selection(data)
         self.set_packages_selection(selection)
         self.set_packages_kickstarted(data.packages.seen)
 
-    def _process_kickstart_packages_configuration(self, data):
-        """Process the kickstart packages configuration."""
-        configuration = PackagesConfigurationData()
-        configuration.docs_excluded = data.packages.excludeDocs
-        configuration.weakdeps_excluded = data.packages.excludeWeakdeps
-
-        if data.packages.handleMissing == KS_MISSING_IGNORE:
-            configuration.missing_ignored = True
-
-        if data.packages.handleBroken == KS_BROKEN_IGNORE:
-            configuration.broken_ignored = True
-
-        if data.packages.instLangs == "":
-            configuration.languages = RPM_LANGUAGES_NONE
-        elif data.packages.instLangs is not None:
-            configuration.languages = data.packages.instLangs
-
-        if data.packages.multiLib:
-            configuration.multilib_policy = MULTILIB_POLICY_ALL
-
-        if data.packages.timeout is not None:
-            configuration.timeout = data.packages.timeout
-
-        if data.packages.retries is not None:
-            configuration.retries = data.packages.retries
-
+        configuration = convert_ks_data_to_packages_configuration(data)
         self.set_packages_configuration(configuration)
 
     def setup_kickstart(self, data):
         """Setup the kickstart data."""
         self._set_up_kickstart_sources(data)
-        self._set_up_kickstart_packages_selection(data)
-        self._set_up_kickstart_packages_configuration(data)
+        self._set_up_kickstart_repositories(data)
+        self._set_up_kickstart_packages(data)
 
     def _set_up_kickstart_sources(self, data):
         """Set up the kickstart sources."""
         for source in self.sources:
             source.setup_kickstart(data)
 
-    def _set_up_kickstart_packages_selection(self, data):
+    def _set_up_kickstart_repositories(self, data):
+        """Set up the kickstart repositories."""
+        # Don't include disabled repositories.
+        enabled_repositories = list(filter(
+            lambda r: r.enabled, self.repositories
+        ))
+        data.repo.repoList = list(map(
+            convert_repo_data_to_ks_repo,
+            enabled_repositories
+        ))
+
+    def _set_up_kickstart_packages(self, data):
         """Set up the kickstart packages selection."""
-        selection = self.packages_selection
+        convert_packages_selection_to_ksdata(self.packages_selection, data)
+        convert_packages_configuration_to_ksdata(self.packages_configuration, data)
 
-        # The empty packages section won't be printed without seen set to True.
-        data.packages.seen = True
-        data.packages.nocore = not selection.core_group_enabled
-        data.packages.default = selection.default_environment_enabled
+    def _update_protected_devices(self):
+        """Protect devices specified by installation sources."""
+        previous_devices = self._protected_devices
+        current_devices = collect_installation_devices(
+            self.sources,
+            self.repositories,
+        )
+        protect_installation_devices(
+            previous_devices,
+            current_devices,
+        )
+        self._protected_devices = current_devices
 
-        if selection.environment:
-            data.packages.environment = selection.environment
+    def get_available_repositories(self):
+        """Get a list of available repositories.
 
-        data.packages.packageList = selection.packages
-        data.packages.excludedList = selection.excluded_packages
+        :return: a list with names of available repositories
+        """
+        return self.dnf_manager.repositories
 
-        for group_name in selection.groups:
-            package_types = selection.groups_package_types.get(
-                group_name, []
-            )
-            group_include = GROUP_DEFAULT
+    def get_enabled_repositories(self):
+        """Get a list of enabled repositories.
 
-            if set(package_types) == set(GROUP_PACKAGE_TYPES_ALL):
-                group_include = GROUP_ALL
+        :return: a list with names of enabled repositories
+        """
+        return self.dnf_manager.enabled_repositories
 
-            if set(package_types) == set(GROUP_PACKAGE_TYPES_REQUIRED):
-                group_include = GROUP_REQUIRED
+    def get_default_environment(self):
+        """Get a default environment.
 
-            group = data.packages.create_group(
-                name=group_name,
-                include=group_include
-            )
-            data.packages.groupList.append(group)
+        :return: an identifier of an environment or an empty string
+        """
+        return self.dnf_manager.default_environment or ""
 
-        for group_name in selection.excluded_groups:
-            group = data.packages.create_group(
-                name=group_name
-            )
-            data.packages.excludedGroupList.append(group)
+    def get_environments(self):
+        """Get a list of environments defined in comps.xml files.
 
-        for name in selection.modules:
-            self._set_up_kickstart_module_data(data, name)
+        :return: a list with identifiers of environments
+        """
+        return self.dnf_manager.environments
 
-        for name in selection.disabled_modules:
-            self._set_up_kickstart_module_data(data, name, False)
+    def resolve_environment(self, environment_spec):
+        """Translate the given specification to an environment identifier.
 
-    @staticmethod
-    def _set_up_kickstart_module_data(data, name, enabled=True):
-        """Set up the kickstart data for the module command."""
-        names = name.split(":", maxsplit=1) + [""]
+        :param environment_spec: an environment specification
+        :return: an identifier of an environment or an empty string
+        """
+        return self.dnf_manager.resolve_environment(environment_spec) or ""
 
-        module = data.ModuleData()
-        module.name = names[0]
-        module.stream = names[1]
-        module.enable = enabled
+    def get_environment_data(self, environment_spec):
+        """Get data about the specified environment.
 
-        data.module.dataList().append(module)
+        :param environment_spec: an environment specification
+        :return CompsEnvironmentData: the related environment data
+        :raise UnknownCompsEnvironmentError: if the environment is unknown
+        """
+        return self.dnf_manager.get_environment_data(environment_spec)
 
-    def _set_up_kickstart_packages_configuration(self, data):
-        """Set up the kickstart packages configuration."""
-        configuration = self.packages_configuration
+    def resolve_group(self, group_spec):
+        """Translate the given specification into a group identifier.
 
-        data.packages.excludeDocs = configuration.docs_excluded
-        data.packages.excludeWeakdeps = configuration.weakdeps_excluded
+        :param group_spec: a group specification
+        :return: an identifier of a group or an empty string
+        """
+        return self.dnf_manager.resolve_group(group_spec) or ""
 
-        if configuration.missing_ignored:
-            data.packages.handleMissing = KS_MISSING_IGNORE
+    def get_group_data(self, group_spec):
+        """Get data about the specified group.
 
-        if configuration.broken_ignored:
-            data.packages.handleBroken = KS_BROKEN_IGNORE
+        :param group_spec: a specification of a group
+        :return CompsGroupData: the related group data
+        :raise: UnknownCompsGroupError if the group is unknown
+        """
+        return self.dnf_manager.get_group_data(group_spec)
 
-        if configuration.languages == RPM_LANGUAGES_NONE:
-            data.packages.instLangs = ""
-        elif configuration.languages != RPM_LANGUAGES_ALL:
-            data.packages.instLangs = configuration.languages
+    def verify_repomd_hashes_with_task(self):
+        """Verify a hash of the repomd.xml file for each enabled repository with a task.
 
-        if configuration.multilib_policy == MULTILIB_POLICY_ALL:
-            data.packages.multiLib = True
+        This method tests if URL links from active repositories can be reached.
+        It is useful when network settings are changed so that we can verify if
+        repositories are still reachable. The task returns a validation report.
 
-        if configuration.timeout != DNF_DEFAULT_TIMEOUT:
-            data.packages.timeout = configuration.timeout
+        :return: a task
+        """
+        return VerifyRepomdHashesTask(self.dnf_manager)
 
-        if configuration.retries != DNF_DEFAULT_RETRIES:
-            data.packages.retries = configuration.retries
+    def validate_packages_selection_with_task(self, data):
+        """Validate the specified packages selection.
+
+        Return a task for validation of the software selection.
+        The result of the task is a validation report.
+
+        :param PackagesSelectionData data: a packages selection
+        :return: a task
+        """
+        return CheckPackagesSelectionTask(
+            dnf_manager=self.dnf_manager,
+            selection=data,
+        )
+
+    def calculate_required_space(self):
+        """Calculate space required for the installation.
+
+        :return: required size in bytes
+        :rtype: int
+        """
+        required_space = calculate_required_space(self.dnf_manager)
+        return required_space.get_bytes()
 
     def get_repo_configurations(self):
         """Get RepoConfiguration structures for all sources.
@@ -311,25 +401,110 @@ class DNFModule(PayloadBase):
         :return: RepoConfiguration structures for attached sources.
         :rtype: RepoConfigurationData instances
         """
-        structures = []
+        return list(filter(None, [s.generate_repo_configuration() for s in self.sources]))
 
-        for source in self.sources:
-            structures.append(source.generate_repo_configuration())
+    def set_up_sources_with_task(self):
+        """Set up installation sources."""
+        task = SetUpDNFSourcesTask(
+            sources=self.sources,
+            repositories=self.repositories,
+            configuration=self.packages_configuration,
+        )
+        task.succeeded_signal.connect(
+            lambda: self._set_up_sources_on_success(task.get_result())
+        )
+        return task
 
-        return structures
+    def _set_up_sources_on_success(self, result: SetUpDNFSourcesResult):
+        """Update the module based on the configured sources."""
+        self._set_dnf_manager(result.dnf_manager)
+        self.set_repositories(result.repositories)
+        self._internal_sources += result.sources
+
+    def tear_down_sources_with_task(self):
+        """Tear down installation sources."""
+        return TearDownDNFSourcesTask(
+            dnf_manager=self.dnf_manager,
+            sources=self._internal_sources + self.sources
+        )
 
     def install_with_tasks(self):
         """Install the payload.
 
         :return: list of tasks
         """
-        # TODO: Implement this method
-        return []
+        tasks = [
+            SetRPMMacrosTask(
+                configuration=self.packages_configuration
+            ),
+            ResolvePackagesTask(
+                dnf_manager=self.dnf_manager,
+                selection=self.packages_selection,
+                configuration=self.packages_configuration,
+            ),
+            PrepareDownloadLocationTask(
+                dnf_manager=self.dnf_manager,
+            ),
+            DownloadPackagesTask(
+                dnf_manager=self.dnf_manager,
+            ),
+            InstallPackagesTask(
+                dnf_manager=self.dnf_manager,
+            ),
+            CleanUpDownloadLocationTask(
+                dnf_manager=self.dnf_manager,
+            ),
+        ]
+
+        self._collect_kernels_on_success(InstallPackagesTask, tasks)
+        return tasks
+
+    def _collect_kernels_on_success(self, task_class, tasks):
+        """Collect kernel version lists from a task specified by its class.
+
+        Find an instance of the specified task class that should return
+        a kernel version list if successful. Connect to its signal and
+        update the kernel version list of the module when the task is
+        finished.
+
+        :param task_class: a class of a scheduled task
+        :param tasks: a list of scheduled tasks
+        """
+        for task in tasks:
+            if isinstance(task, task_class):
+                task.succeeded_signal.connect(
+                    lambda t=task: self.set_kernel_version_list(t.get_result())
+                )
 
     def post_install_with_tasks(self):
         """Execute post installation steps.
 
         :return: list of tasks
         """
-        # TODO: Implement this method
-        return []
+        return [
+            WriteRepositoriesTask(
+                sysroot=conf.target.system_root,
+                dnf_manager=self.dnf_manager,
+                repositories=self.repositories,
+            ),
+            ImportRPMKeysTask(
+                sysroot=conf.target.system_root,
+                gpg_keys=conf.payload.default_rpm_gpg_keys
+            ),
+            UpdateDNFConfigurationTask(
+                sysroot=conf.target.system_root,
+                configuration=self.packages_configuration,
+                dnf_manager=self.dnf_manager,
+            ),
+            ResetDNFManagerTask(
+                dnf_manager=self.dnf_manager
+            )
+        ]
+
+    def match_available_packages(self, pattern):
+        """Find available packages that match the specified pattern.
+
+        :param pattern: a pattern for package names
+        :return: a list of matched package names
+        """
+        return self.dnf_manager.match_available_packages(pattern)

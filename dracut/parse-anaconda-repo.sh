@@ -1,6 +1,8 @@
 #!/bin/bash
 # parse-repo-options.sh: parse the inst.repo= arg and set root/netroot
 
+command -v warn_critical >/dev/null || . /lib/anaconda-lib.sh
+
 # If there's a root= arg, we'll just use that
 getarg root= >/dev/null && return
 
@@ -41,7 +43,7 @@ if [ -n "$repo" ]; then
             root="anaconda-hmc"
         ;;
         *)
-            warn "Invalid value for 'inst.$arg': $repo"
+            warn_critical "Invalid value for 'inst.$arg': $repo"
         ;;
     esac
 fi
@@ -58,4 +60,5 @@ esac
 
 # We've got *some* root variable set.
 # Set rootok so we can move on to anaconda-genrules.sh.
+# shellcheck disable=SC2034  # rootok is used by dracut
 rootok=1

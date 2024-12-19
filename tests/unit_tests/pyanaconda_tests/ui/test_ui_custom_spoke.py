@@ -15,15 +15,17 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import unittest
 import copy
+import unittest
 from textwrap import dedent
 
 from blivet import devicefactory
 from blivet.size import Size
 
 from pyanaconda.modules.common.structures.device_factory import DeviceFactoryRequest
-from pyanaconda.ui.gui.spokes.lib.custom_storage_helpers import generate_request_description
+from pyanaconda.ui.gui.spokes.lib.custom_storage_helpers import (
+    generate_request_description,
+)
 
 
 class CustomStorageHelpersTestCase(unittest.TestCase):
@@ -66,10 +68,10 @@ class CustomStorageHelpersTestCase(unittest.TestCase):
         }
         """).strip()
 
-        self.assertEqual(generate_request_description(request), expected)
+        assert generate_request_description(request) == expected
 
         original = copy.deepcopy(request)
-        self.assertEqual(generate_request_description(request, original), expected)
+        assert generate_request_description(request, original) == expected
 
         request.device_name = "dev4"
         request.disks = ["dev1"]
@@ -97,4 +99,4 @@ class CustomStorageHelpersTestCase(unittest.TestCase):
         }
         """).strip()
 
-        self.assertEqual(generate_request_description(request, original), expected)
+        assert generate_request_description(request, original) == expected

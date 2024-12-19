@@ -4,13 +4,24 @@ Anaconda Kickstart Documentation
 :Authors:
     Brian C. Lane <bcl@redhat.com>
 
-Anaconda uses `kickstart <https://github.com/pykickstart/pykickstart>`_ to automate
-installation and as a data store for the user interface. It also extends the kickstart
-commands `documented here <https://pykickstart.readthedocs.io/>`_
-by adding a new kickstart section named ``%anaconda`` where commands to control the behavior
-of Anaconda will be defined.
+Anaconda uses `kickstart <https://github.com/pykickstart/pykickstart>`_ to parse and generate
+kickstart files.
+
+Automatically load the Kickstart file
+-------------------------------------
+
+If you need to load Kickstart file automatically you can store your Kickstart file as ``/ks.cfg``
+into the storage device which is accessible during the boot process and is labeled as ``OEMDRV``.
+Such a device is automatically discovered during boot and the Kickstart file will be used.
+
+%anaconda
+---------
+
+The ``%anaconda`` kickstart section contains commands to control the behavior of Anaconda.
 
 *Deprecated since Fedora 34.*
+
+*Removed since Fedora 36.*
 
 pwpolicy
 --------

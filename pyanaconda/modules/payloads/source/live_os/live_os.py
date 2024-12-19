@@ -17,19 +17,24 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-import os
-import stat
-
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.i18n import _
 from pyanaconda.core.signal import Signal
-from pyanaconda.core.util import execWithCapture
-from pyanaconda.modules.payloads.constants import SourceType, SourceState
+from pyanaconda.modules.payloads.constants import SourceState, SourceType
+from pyanaconda.modules.payloads.source.live_os.initialization import (
+    DetectLiveOSImageTask,
+    SetupLiveOSResult,
+    SetUpLiveOSSourceTask,
+)
+from pyanaconda.modules.payloads.source.live_os.live_os_interface import (
+    LiveOSSourceInterface,
+)
 from pyanaconda.modules.payloads.source.mount_tasks import TearDownMountTask
-from pyanaconda.modules.payloads.source.source_base import PayloadSourceBase, MountingSourceMixin
-from pyanaconda.modules.payloads.source.live_os.live_os_interface import LiveOSSourceInterface
-from pyanaconda.modules.payloads.source.live_os.initialization import SetUpLiveOSSourceTask
+from pyanaconda.modules.payloads.source.source_base import (
+    MountingSourceMixin,
+    PayloadSourceBase,
+)
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
 
@@ -40,12 +45,10 @@ class LiveOSSourceModule(PayloadSourceBase, MountingSourceMixin):
         super().__init__()
         self._image_path = ""
         self.image_path_changed = Signal()
-
-    def __repr__(self):
-        return "Source(type='LIVE_OS_IMAGE', image='{}')".format(self._image_path)
+        self._required_space = 0
 
     def for_publication(self):
-        """Get the interface used to publish this source."""
+        """Return a DBus representation."""
         return LiveOSSourceInterface(self)
 
     @property
@@ -73,12 +76,11 @@ class LiveOSSourceModule(PayloadSourceBase, MountingSourceMixin):
         :return: required size in bytes
         :rtype: int
         """
-        # FIXME: Implement this method.
-        return 0
+        return self._required_space
 
     @property
     def image_path(self):
-        """Path to the live OS source image.
+        """Path to the Live OS image.
 
         This image will be used as the installation source.
 
@@ -86,12 +88,8 @@ class LiveOSSourceModule(PayloadSourceBase, MountingSourceMixin):
         """
         return self._image_path
 
-    def get_state(self):
-        """Get state of this source."""
-        return SourceState.from_bool(self.get_mount_state())
-
     def set_image_path(self, image_path):
-        """Set path to the live OS source image.
+        """Set path to the Live OS image.
 
         :param image_path: path to the image
         :type image_path: str
@@ -100,39 +98,22 @@ class LiveOSSourceModule(PayloadSourceBase, MountingSourceMixin):
         self.image_path_changed.emit()
         log.debug("LiveOS image path is set to '%s'", self._image_path)
 
-    def tear_down_with_tasks(self):
-        """Tear down the installation source.
+    def detect_image_with_task(self):
+        """Detect a Live OS image with a task.
 
-        :return: list of tasks required for the source clean-up
-        :rtype: [TearDownMountTask]
+        Detect an image and set the image path of the source.
+
+        :return: a task
         """
-        task = TearDownMountTask(self._mount_point)
-        return [task]
+        task = DetectLiveOSImageTask()
+        task.succeeded_signal.connect(
+            lambda: self.set_image_path(task.get_result())
+        )
+        return task
 
-    def detect_live_os_image(self):
-        """Detect live os image in the system."""
-        log.debug("Trying to detect live os base image automatically")
-        for block_device in ["/dev/mapper/live-base", "/dev/mapper/live-osimg-min"]:
-            try:
-                if stat.S_ISBLK(os.stat(block_device)[stat.ST_MODE]):
-                    log.debug("Detected live base image %s", block_device)
-                    return block_device
-            except FileNotFoundError:
-                pass
-
-        # Is it a squashfs+overlayfs base image?
-        if os.path.exists("/run/rootfsbase"):
-            try:
-                block_device = execWithCapture("findmnt",
-                                               ["-n", "-o", "SOURCE", "/run/rootfsbase"]).strip()
-                if block_device:
-                    log.debug("Detected live base image %s", block_device)
-                    return block_device
-            except (OSError, FileNotFoundError):
-                pass
-
-        log.debug("No live base image detected")
-        return ""
+    def get_state(self):
+        """Get state of this source."""
+        return SourceState.from_bool(self.get_mount_state())
 
     def set_up_with_tasks(self):
         """Set up the installation source for installation.
@@ -140,5 +121,33 @@ class LiveOSSourceModule(PayloadSourceBase, MountingSourceMixin):
         :return: list of tasks required for the source setup
         :rtype: [Task]
         """
-        task = SetUpLiveOSSourceTask(self._image_path, self.mount_point)
+        task = SetUpLiveOSSourceTask(
+            image_path=self.image_path,
+            target_mount=self.mount_point
+        )
+
+        handler = self._handle_live_os_task_result
+        task.succeeded_signal.connect(lambda: handler(task.get_result()))
         return [task]
+
+    def _handle_live_os_task_result(self, result: SetupLiveOSResult):
+        self._required_space = result.required_space
+
+    def tear_down_with_tasks(self):
+        """Tear down the installation source.
+
+        :return: list of tasks required for the source clean-up
+        :rtype: [TearDownMountTask]
+        """
+        return [
+            TearDownMountTask(
+                target_mount=self.mount_point
+            )
+        ]
+
+    def __repr__(self):
+        """Return a string representation of the source."""
+        return "Source(type='{}', image='{}')".format(
+            self.type.value,
+            self.image_path,
+        )

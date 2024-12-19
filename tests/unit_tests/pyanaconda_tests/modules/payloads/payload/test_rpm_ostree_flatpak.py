@@ -16,12 +16,15 @@
 # Red Hat, Inc.
 #
 import unittest
-from unittest.mock import patch
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import pytest
 
 from pyanaconda.modules.common.errors.installation import PayloadInstallationError
-from pyanaconda.modules.payloads.payload.rpm_ostree.flatpak_installation import \
-    InstallFlatpaksTask
+from pyanaconda.modules.payloads.payload.rpm_ostree.flatpak_installation import (
+    InstallFlatpaksTask,
+)
 
 
 class InstallFlatpakTaskTest(unittest.TestCase):
@@ -45,6 +48,6 @@ class InstallFlatpakTaskTest(unittest.TestCase):
         fm_instance.install_all.side_effect = PayloadInstallationError
 
         with TemporaryDirectory() as temp:
-            with self.assertRaises(PayloadInstallationError):
+            with pytest.raises(PayloadInstallationError):
                 task = InstallFlatpaksTask(temp)
                 task.run()

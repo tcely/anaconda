@@ -15,25 +15,36 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import os
 import tempfile
 import unittest
-from unittest.mock import patch, Mock
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
-from dasbus.typing import get_variant, Str, Bool
+import pytest
+from dasbus.typing import Bool, Str, get_variant
 from requests import RequestException
 
-from pyanaconda.modules.common.errors.payload import SourceSetupError
-
-from pyanaconda.core.constants import SOURCE_TYPE_LIVE_IMAGE
+from pyanaconda.core.constants import NETWORK_CONNECTION_TIMEOUT, SOURCE_TYPE_LIVE_IMAGE
+from pyanaconda.core.path import join_paths, make_directories, touch
 from pyanaconda.modules.common.constants.interfaces import PAYLOAD_SOURCE_LIVE_IMAGE
+from pyanaconda.modules.common.errors.payload import SourceSetupError
 from pyanaconda.modules.common.structures.live_image import LiveImageConfigurationData
-from pyanaconda.modules.payloads.constants import SourceType, SourceState
-from pyanaconda.modules.payloads.source.live_image.initialization import \
-    SetUpLocalImageSourceTask, SetUpRemoteImageSourceTask, SetupImageResult
-from pyanaconda.modules.payloads.source.live_image.live_image import LiveImageSourceModule
-from pyanaconda.modules.payloads.source.live_image.live_image_interface import \
-    LiveImageSourceInterface
-
+from pyanaconda.modules.payloads.constants import SourceState, SourceType
+from pyanaconda.modules.payloads.source.live_image.initialization import (
+    SetupImageResult,
+    SetUpLocalImageSourceTask,
+    SetUpRemoteImageSourceTask,
+)
+from pyanaconda.modules.payloads.source.live_image.installation import (
+    InstallLiveImageTask,
+)
+from pyanaconda.modules.payloads.source.live_image.live_image import (
+    LiveImageSourceModule,
+)
+from pyanaconda.modules.payloads.source.live_image.live_image_interface import (
+    LiveImageSourceInterface,
+)
 from tests.unit_tests.pyanaconda_tests import check_dbus_property
 
 
@@ -46,7 +57,6 @@ class LiveImageSourceInterfaceTestCase(unittest.TestCase):
 
     def _check_dbus_property(self, *args, **kwargs):
         check_dbus_property(
-            self,
             PAYLOAD_SOURCE_LIVE_IMAGE,
             self.interface,
             *args, **kwargs
@@ -54,11 +64,11 @@ class LiveImageSourceInterfaceTestCase(unittest.TestCase):
 
     def test_type(self):
         """Test the Type property."""
-        self.assertEqual(SOURCE_TYPE_LIVE_IMAGE, self.interface.Type)
+        assert SOURCE_TYPE_LIVE_IMAGE == self.interface.Type
 
     def test_description(self):
         """Test the Description property."""
-        self.assertEqual("Live image", self.interface.Description)
+        assert "Live image" == self.interface.Description
 
     def test_configuration(self):
         """Test the configuration property."""
@@ -83,51 +93,51 @@ class LiveImageSourceTestCase(unittest.TestCase):
 
     def test_type(self):
         """Test the type property."""
-        self.assertEqual(SourceType.LIVE_IMAGE, self.module.type)
+        assert SourceType.LIVE_IMAGE == self.module.type
 
     def test_network_required(self):
         """Test the network_required property."""
-        self.assertEqual(self.module.network_required, False)
+        assert self.module.network_required is False
 
         self.module.configuration.url = "file://my/path"
-        self.assertEqual(self.module.network_required, False)
+        assert self.module.network_required is False
 
         self.module.configuration.url = "http://my/path"
-        self.assertEqual(self.module.network_required, True)
+        assert self.module.network_required is True
 
         self.module.configuration.url = "https://my/path"
-        self.assertEqual(self.module.network_required, True)
+        assert self.module.network_required is True
 
     def test_is_local(self):
         """Test the is_local property."""
         self.module.configuration.url = "file://my/path"
-        self.assertEqual(self.module.is_local, True)
+        assert self.module.is_local is True
 
         self.module.configuration.url = "http://my/path"
-        self.assertEqual(self.module.is_local, False)
+        assert self.module.is_local is False
 
     def test_get_state(self):
         """Test the source state."""
-        self.assertEqual(SourceState.NOT_APPLICABLE, self.module.get_state())
+        assert SourceState.NOT_APPLICABLE == self.module.get_state()
 
     def test_required_space(self):
         """Test the required_space property."""
-        self.assertEqual(self.module.required_space, 1024 * 1024 * 1024)
+        assert self.module.required_space == 1024 * 1024 * 1024
 
         self.module._required_space = 12345
-        self.assertEqual(self.module.required_space, 12345)
+        assert self.module.required_space == 12345
 
     def test_set_up_with_tasks(self):
         """Test the set-up tasks."""
         self.module.configuration.url = "file://my/path"
         tasks = self.module.set_up_with_tasks()
-        self.assertEqual(len(tasks), 1)
-        self.assertIsInstance(tasks[0], SetUpLocalImageSourceTask)
+        assert len(tasks) == 1
+        assert isinstance(tasks[0], SetUpLocalImageSourceTask)
 
         self.module.configuration.url = "http://my/path"
         tasks = self.module.set_up_with_tasks()
-        self.assertEqual(len(tasks), 1)
-        self.assertIsInstance(tasks[0], SetUpRemoteImageSourceTask)
+        assert len(tasks) == 1
+        assert isinstance(tasks[0], SetUpRemoteImageSourceTask)
 
     @patch.object(SetUpLocalImageSourceTask, "run")
     def test_handle_setup_task_result(self, runner):
@@ -140,21 +150,21 @@ class LiveImageSourceTestCase(unittest.TestCase):
             task.run_with_signals()
 
         runner.assert_called_once_with()
-        self.assertEqual(self.module.required_space, 12345)
+        assert self.module.required_space == 12345
 
     def test_tear_down_with_tasks(self):
         """Test the tear-down tasks."""
-        self.assertEqual(self.module.tear_down_with_tasks(), [])
+        assert self.module.tear_down_with_tasks() == []
 
     def test_repr(self):
         """Test the string representation."""
         self.module.configuration.url = "file://my/path"
-        self.assertEqual(repr(self.module), str(
+        assert repr(self.module) == str(
             "Source("
             "type='LIVE_IMAGE', "
             "url='file://my/path'"
             ")"
-        ))
+        )
 
 
 class SetUpLocalImageSourceTaskTestCase(unittest.TestCase):
@@ -166,10 +176,10 @@ class SetUpLocalImageSourceTaskTestCase(unittest.TestCase):
         configuration.url = "file:///my/invalid/path"
 
         task = SetUpLocalImageSourceTask(configuration)
-        with self.assertRaises(SourceSetupError) as cm:
+        with pytest.raises(SourceSetupError) as cm:
             task.run()
 
-        self.assertEqual(str(cm.exception), "File /my/invalid/path does not exist.")
+        assert str(cm.value) == "File /my/invalid/path does not exist."
 
     @patch("os.stat")
     def test_empty_image(self, os_stat):
@@ -185,8 +195,8 @@ class SetUpLocalImageSourceTaskTestCase(unittest.TestCase):
             result = task.run()
 
             # Check the result.
-            self.assertIsInstance(result, SetupImageResult)
-            self.assertEqual(result, SetupImageResult(None))
+            assert isinstance(result, SetupImageResult)
+            assert result == SetupImageResult(None)
 
     @patch("os.stat")
     def test_fake_image(self, os_stat):
@@ -206,8 +216,8 @@ class SetUpLocalImageSourceTaskTestCase(unittest.TestCase):
             result = task.run()
 
             # Check the result.
-            self.assertIsInstance(result, SetupImageResult)
-            self.assertEqual(result, SetupImageResult(3072))
+            assert isinstance(result, SetupImageResult)
+            assert result == SetupImageResult(3072)
 
 
 class SetUpRemoteImageSourceTaskTestCase(unittest.TestCase):
@@ -225,11 +235,11 @@ class SetUpRemoteImageSourceTaskTestCase(unittest.TestCase):
         configuration.url = "http://my/fake/path"
 
         task = SetUpRemoteImageSourceTask(configuration)
-        with self.assertRaises(SourceSetupError) as cm:
+        with pytest.raises(SourceSetupError) as cm:
             task.run()
 
         # Check the exception.
-        self.assertEqual(str(cm.exception), "Error while handling a request: Fake!")
+        assert str(cm.value) == "Error while handling a request: Fake!"
 
     @patch("pyanaconda.modules.payloads.source.live_image.initialization.requests_session")
     def test_invalid_response(self, session_getter):
@@ -244,11 +254,11 @@ class SetUpRemoteImageSourceTaskTestCase(unittest.TestCase):
         configuration.url = "http://my/fake/path"
 
         task = SetUpRemoteImageSourceTask(configuration)
-        with self.assertRaises(SourceSetupError) as cm:
+        with pytest.raises(SourceSetupError) as cm:
             task.run()
 
         # Check the exception.
-        self.assertEqual(str(cm.exception), "The request has failed: 303")
+        assert str(cm.value) == "The request has failed: 303"
 
     @patch("pyanaconda.modules.payloads.source.live_image.initialization.requests_session")
     def test_missing_size(self, session_getter):
@@ -268,8 +278,8 @@ class SetUpRemoteImageSourceTaskTestCase(unittest.TestCase):
         result = task.run()
 
         # Check the result.
-        self.assertIsInstance(result, SetupImageResult)
-        self.assertEqual(result, SetupImageResult(None))
+        assert isinstance(result, SetupImageResult)
+        assert result == SetupImageResult(None)
 
     @patch("pyanaconda.modules.payloads.source.live_image.initialization.requests_session")
     def test_fake_request(self, session_getter):
@@ -289,5 +299,137 @@ class SetUpRemoteImageSourceTaskTestCase(unittest.TestCase):
         result = task.run()
 
         # Check the result.
-        self.assertIsInstance(result, SetupImageResult)
-        self.assertEqual(result, SetupImageResult(4000))
+        assert isinstance(result, SetupImageResult)
+        assert result == SetupImageResult(4000)
+
+    @patch("pyanaconda.modules.payloads.source.live_image.initialization.requests_session")
+    def test_https_no_verify_ssl(self, session_getter):
+        """Test a request with ssl verification disabled."""
+        # Prepare the session.
+        session = session_getter.return_value.__enter__.return_value
+        response = session.head.return_value
+
+        response.status_code = 200
+        response.headers = {'content-length': 1000}
+
+        # Run the task.
+        configuration = LiveImageConfigurationData()
+        configuration.url = "https://my/fake/path"
+        configuration.ssl_verification_enabled = False
+
+        task = SetUpRemoteImageSourceTask(configuration)
+        result = task.run()
+
+        # Check the result.
+        assert isinstance(result, SetupImageResult)
+        session.head.assert_called_once_with(
+            url="https://my/fake/path",
+            proxies={},
+            verify=False,
+            timeout=NETWORK_CONNECTION_TIMEOUT
+        )
+
+
+class LiveImageInstallationTestCase(unittest.TestCase):
+    """Test the live image installation."""
+
+    def setUp(self):
+        """Set up the test."""
+        self.data = LiveImageConfigurationData()
+        self.directory = None
+
+    @property
+    def sysroot(self):
+        """The sysroot directory."""
+        return join_paths(self.directory, "sysroot")
+
+    @property
+    def image(self):
+        """The image path."""
+        return join_paths(self.directory, "test.img")
+
+    @property
+    def mount_point(self):
+        """The image mount point."""
+        return join_paths(self.directory, "image")
+
+    @contextmanager
+    def _create_directory(self):
+        """Create a temporary directory."""
+        with tempfile.TemporaryDirectory() as d:
+            self.directory = d
+            yield
+            self.directory = None
+
+    def _create_image(self, files, mount_task_cls):
+        """Create a fake image."""
+        # Create the image.
+        touch(self.image)
+
+        # Set up the configuration data.
+        self.data.url = "file://" + self.image
+
+        # Set up the mount point.
+        os.makedirs(self.mount_point)
+
+        for path in files:
+            file_path = join_paths(self.mount_point, path)
+            make_directories(os.path.dirname(file_path))
+            touch(file_path)
+
+        mount_task = mount_task_cls()
+        mount_task.run.return_value = self.mount_point
+
+    def _run_task(self):
+        """Run the task."""
+        os.makedirs(self.sysroot)
+
+        task = InstallLiveImageTask(
+            sysroot=self.sysroot,
+            configuration=self.data
+        )
+
+        with patch('pyanaconda.core.dbus.DBus.get_proxy'):
+            return task.run()
+
+    def _check_content(self, files):
+        """Check the sysroot content."""
+        for path in files:
+            file_path = join_paths(self.sysroot, path)
+            assert os.path.exists(file_path)
+
+    @patch("pyanaconda.modules.payloads.source.live_image.installation.TearDownMountTask")
+    @patch("pyanaconda.modules.payloads.source.live_image.installation.MountImageTask")
+    def test_install_file(self, mount_task_cls, umount_task_cls):
+        """Install a fake image with files."""
+        files = ["f1", "f2", "f3"]
+
+        with self._create_directory():
+            self._create_image(files, mount_task_cls)
+            result = self._run_task()
+            self._check_content(files)
+
+        assert result == []
+
+    @patch("pyanaconda.modules.payloads.source.live_image.installation.TearDownMountTask")
+    @patch("pyanaconda.modules.payloads.source.live_image.installation.MountImageTask")
+    def test_install_kernels(self, mount_task_cls, umount_task_cls):
+        """Install a fake image with kernels."""
+        files = [
+            "/boot/vmlinuz-5.8.15-201.fc32.x86_64",
+            "/boot/efi/EFI/default/vmlinuz-6.8.15-201.fc32.x86_64",
+            "/boot/vmlinuz-5.8.16-200.fc32.x86_64",
+            "/boot/efi/EFI/default/vmlinuz-7.8.16-200.fc32.x86_64",
+        ]
+
+        with self._create_directory():
+            self._create_image(files, mount_task_cls)
+            result = self._run_task()
+            self._check_content(files)
+
+        assert result == [
+            '5.8.15-201.fc32.x86_64',
+            '5.8.16-200.fc32.x86_64',
+            '6.8.15-201.fc32.x86_64',
+            '7.8.16-200.fc32.x86_64',
+        ]

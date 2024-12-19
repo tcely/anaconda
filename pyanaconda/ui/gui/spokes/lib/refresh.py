@@ -16,10 +16,10 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda.core.timer import Timer
-from pyanaconda.threading import threadMgr, AnacondaThread
-from pyanaconda.ui.gui import GUIObject
 from pyanaconda.core import constants
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.core.timer import Timer
+from pyanaconda.ui.gui import GUIObject
 from pyanaconda.ui.lib.storage import reset_storage
 
 __all__ = ["RefreshDialog"]
@@ -45,7 +45,7 @@ class RefreshDialog(GUIObject):
         return rc
 
     def _check_rescan(self, *args):
-        if threadMgr.get(constants.THREAD_STORAGE):
+        if thread_manager.get(constants.THREAD_STORAGE):
             self._elapsed += 1
 
             # If more than five seconds has elapsed since the rescan started,
@@ -65,7 +65,7 @@ class RefreshDialog(GUIObject):
         self._notebook.set_current_page(3)
         return False
 
-    def on_return_to_hub_link_clicked(self, label, uri):
+    def on_return_to_hub_link_clicked(self, _label, _uri):
         # The user clicked on the link that takes them back to the hub.  We need
         # to kill the _check_rescan watcher and then emit a special response ID
         # indicating the user did not press OK.
@@ -82,9 +82,11 @@ class RefreshDialog(GUIObject):
         self._notebook.set_current_page(1)
 
         # And now to fire up the storage reinitialization.
-        threadMgr.add(AnacondaThread(name=constants.THREAD_STORAGE,
-                                     target=reset_storage,
-                                     kwargs={"scan_all": True}))
+        thread_manager.add_thread(
+            name=constants.THREAD_STORAGE,
+            target=reset_storage,
+            kwargs={"scan_all": True}
+        )
 
         self._elapsed = 0
 

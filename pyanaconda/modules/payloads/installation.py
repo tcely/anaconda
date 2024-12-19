@@ -20,13 +20,14 @@ import shutil
 from glob import glob
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.kernel import kernel_arguments
-from pyanaconda.core.util import mkdirChain
+from pyanaconda.core.path import make_directories
 from pyanaconda.modules.common.task import Task
 
 log = get_module_logger(__name__)
 
-__all__ = ["PrepareSystemForInstallationTask", "CopyDriverDisksFilesTask"]
+__all__ = ["CopyDriverDisksFilesTask", "PrepareSystemForInstallationTask"]
 
 
 class PrepareSystemForInstallationTask(Task):
@@ -48,7 +49,7 @@ class PrepareSystemForInstallationTask(Task):
 
     @property
     def name(self):
-        return "Prepare System for Installation"
+        return "Prepare system for installation"
 
     def run(self):
         """Create a root and write module denylist."""
@@ -58,7 +59,7 @@ class PrepareSystemForInstallationTask(Task):
     @staticmethod
     def _create_root_dir(sysroot):
         """Create root directory on the installed system."""
-        mkdirChain(os.path.join(sysroot, "root"))
+        make_directories(os.path.join(sysroot, "root"))
 
     @staticmethod
     def _write_module_denylist(sysroot):
@@ -71,7 +72,7 @@ class PrepareSystemForInstallationTask(Task):
         if "modprobe.blacklist" not in kernel_arguments:
             return
 
-        mkdirChain(os.path.join(sysroot, "etc/modprobe.d"))
+        make_directories(os.path.join(sysroot, "etc/modprobe.d"))
         with open(os.path.join(sysroot, "etc/modprobe.d/anaconda-denylist.conf"), "w") as f:
             f.write("# Module denylist written by anaconda\n")
             for module in kernel_arguments.get("modprobe.blacklist").split():
@@ -108,10 +109,14 @@ class CopyDriverDisksFilesTask(Task):
 
     @property
     def name(self):
-        return "Copy Driver Disks Files"
+        return "Copy driver disks files"
 
     def run(self):
         """Copy files from the driver disks to the installed system."""
+        if not conf.system.can_use_driver_disks:
+            log.info("Skipping copying of driver disk files.")
+            return
+
         # Multiple driver disks may be loaded, so we need to glob for all
         # the firmware files in the common DD firmware directory
         for f in glob(self.DD_FIRMWARE_DIR + "/*"):

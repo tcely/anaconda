@@ -16,19 +16,17 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-from pyanaconda import lifecycle
-from pyanaconda.ui.tui.tuiobject import TUIObject
-from pyanaconda.ui.lib.help import get_help_path
-from pyanaconda.ui import common
-
-from simpleline.render.adv_widgets import HelpScreen
 from simpleline.render.containers import ListRowContainer
 from simpleline.render.prompt import Prompt
 from simpleline.render.screen import InputState
 from simpleline.render.screen_handler import ScreenHandler
 
-from pyanaconda.core.i18n import _, N_
+from pyanaconda import lifecycle
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.i18n import N_, _
+from pyanaconda.ui import common
+from pyanaconda.ui.tui.tuiobject import TUIObject
+
 log = get_module_logger(__name__)
 
 
@@ -137,11 +135,7 @@ class TUIHub(TUIObject, common.Hub):
                     if not spoke.completed and spoke.mandatory:
                         print(_("Please complete all spokes before continuing"))
                         return InputState.DISCARDED
-            elif key == Prompt.HELP:
-                if self.has_help:
-                    help_path = get_help_path(self.helpFile, True)
-                    ScreenHandler.push_screen_modal(HelpScreen(help_path))
-                    return InputState.PROCESSED_AND_REDRAW
+
             return key
 
     def prompt(self, args=None):
@@ -160,8 +154,5 @@ class TUIHub(TUIObject, common.Hub):
 
         if self._spoke_count == 1:
             prompt.add_option("1", _("to enter the %(spoke_title)s spoke") % {"spoke_title": list(self._spokes.values())[0].title})
-
-        if self.has_help:
-            prompt.add_help_option()
 
         return prompt

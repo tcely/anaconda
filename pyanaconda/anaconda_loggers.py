@@ -28,6 +28,7 @@
 #    than the constants module.
 
 import logging
+
 from pyanaconda.core import constants
 
 
@@ -57,11 +58,3 @@ def get_stdout_logger():
 
 def get_program_logger():
     return logging.getLogger(constants.LOGGER_PROGRAM)
-
-
-def get_packaging_logger():
-    return logging.getLogger(constants.LOGGER_PACKAGING)
-
-
-def get_sensitive_info_logger():
-    return logging.getLogger(constants.LOGGER_SENSITIVE_INFO)

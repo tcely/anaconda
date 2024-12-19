@@ -20,16 +20,24 @@
 import os
 import tempfile
 import unittest
-
 from textwrap import dedent
 from unittest.mock import patch
-from blivet.size import Size
 
-from pyanaconda.modules.storage.partitioning.automatic.utils import get_default_partitioning
-from pyanaconda.modules.storage.partitioning.specification import PartSpec
+import pytest
+from blivet.size import Size
+from pykickstart.constants import AUTOPART_TYPE_BTRFS
+
 from pyanaconda.core.configuration.anaconda import AnacondaConfiguration
-from pyanaconda.core.configuration.base import ConfigurationError, create_parser, read_config
+from pyanaconda.core.configuration.base import (
+    ConfigurationError,
+    create_parser,
+    read_config,
+)
 from pyanaconda.core.configuration.profile import ProfileLoader
+from pyanaconda.modules.storage.partitioning.automatic.utils import (
+    get_default_partitioning,
+)
+from pyanaconda.modules.storage.partitioning.specification import PartSpec
 
 PROFILE_DIR = os.path.join(os.environ.get("ANACONDA_DATA"), "profile.d")
 
@@ -65,6 +73,18 @@ WORKSTATION_PARTITIONING = [
         lv=True,
         thin=True,
         encrypted=True
+    ),
+]
+
+WORKSTATIONPLUS_PARTITIONING = WORKSTATION_PARTITIONING + [
+    PartSpec(
+        mountpoint="/var",
+        # size=Size("15GiB"),
+        btr=True,
+        lv=True,
+        thin=True,
+        encrypted=True,
+        schemes={AUTOPART_TYPE_BTRFS}
     ),
 ]
 
@@ -123,7 +143,7 @@ VIRTUALIZATION_PARTITIONING = [
     ),
     PartSpec(
         mountpoint="/var",
-        size=Size("15GiB"),
+        size=Size("5GiB"),
         btr=True,
         lv=True,
         thin=True,
@@ -148,6 +168,14 @@ VIRTUALIZATION_PARTITIONING = [
     PartSpec(
         mountpoint="/var/log/audit",
         size=Size("2GiB"),
+        btr=True,
+        lv=True,
+        thin=True,
+        encrypted=True,
+    ),
+    PartSpec(
+        mountpoint="/var/tmp",
+        size=Size("10GiB"),
         btr=True,
         lv=True,
         thin=True,
@@ -181,19 +209,22 @@ class ProfileConfigurationTestCase(unittest.TestCase):
 
     def _check_profile(self, profile_id, file_paths):
         """Check a profile."""
-        self.assertTrue(self._loader.check_profile(profile_id))
-        self.assertEqual(self._loader.collect_configurations(profile_id), file_paths)
+        assert self._loader.check_profile(profile_id)
+        assert self._loader.collect_configurations(profile_id) == file_paths
 
     def _check_detection(self, profile_id, os_id, variant_id):
         """Check the profile detection."""
-        self.assertEqual(self._loader.detect_profile(os_id, variant_id), profile_id)
+        assert self._loader.detect_profile(os_id, variant_id) == profile_id
 
     def _check_partitioning(self, config, partitioning):
         with patch("pyanaconda.modules.storage.partitioning.automatic.utils.platform") as platform:
             platform.partitions = []
 
             with patch("pyanaconda.modules.storage.partitioning.automatic.utils.conf", new=config):
-                self.assertEqual(get_default_partitioning(), partitioning)
+                default = get_default_partitioning()
+                print("Default: " + repr(default))
+                print("Supplied: " + repr(partitioning))
+                assert default == partitioning
 
     def _check_default_profile(self, profile_id, os_release_values, file_names, partitioning):
         """Check a default profile."""
@@ -210,7 +241,7 @@ class ProfileConfigurationTestCase(unittest.TestCase):
 
         self._check_detection(profile_id, *os_release_values)
         self._check_partitioning(config, partitioning)
-        self.assertEqual("{}.conf".format(profile_id), file_names[-1])
+        assert "{}.conf".format(profile_id) == file_names[-1]
 
     def _get_config(self, profile_id):
         """Get parsed config file."""
@@ -247,6 +278,30 @@ class ProfileConfigurationTestCase(unittest.TestCase):
             "fedora-silverblue",
             ("fedora", "silverblue"),
             ["fedora.conf", "fedora-workstation.conf", "fedora-silverblue.conf"],
+            WORKSTATIONPLUS_PARTITIONING
+        )
+        self._check_default_profile(
+            "fedora-kde",
+            ("fedora", "kde"),
+            ["fedora.conf", "fedora-kde.conf"],
+            WORKSTATION_PARTITIONING
+        )
+        self._check_default_profile(
+            "fedora-kinoite",
+            ("fedora", "kinoite"),
+            ["fedora.conf", "fedora-kde.conf", "fedora-kinoite.conf"],
+            WORKSTATIONPLUS_PARTITIONING
+        )
+        self._check_default_profile(
+            "fedora-sericea",
+            ("fedora", "sericea"),
+            ["fedora.conf", "fedora-sericea.conf"],
+            WORKSTATIONPLUS_PARTITIONING
+        )
+        self._check_default_profile(
+            "fedora-designsuite",
+            ("fedora", "designsuite"),
+            ["fedora.conf", "fedora-workstation.conf", "fedora-designsuite.conf"],
             WORKSTATION_PARTITIONING
         )
         self._check_default_profile(
@@ -293,6 +348,30 @@ class ProfileConfigurationTestCase(unittest.TestCase):
             ["rhel.conf", "scientific-linux.conf"],
             ENTERPRISE_PARTITIONING
         )
+        self._check_default_profile(
+            "almalinux",
+            ("almalinux", ""),
+            ["rhel.conf", "almalinux.conf"],
+            ENTERPRISE_PARTITIONING
+        )
+        self._check_default_profile(
+            "rocky",
+            ("rocky", ""),
+            ["rhel.conf", "rocky.conf"],
+            ENTERPRISE_PARTITIONING
+        )
+        self._check_default_profile(
+            "virtuozzo-linux",
+            ("virtuozzo", ""),
+            ["rhel.conf", "virtuozzo-linux.conf"],
+            ENTERPRISE_PARTITIONING
+        )
+        self._check_default_profile(
+            "circle",
+            ("circle", ""),
+            ["rhel.conf", "circle.conf"],
+            ENTERPRISE_PARTITIONING
+        )
 
     def _compare_profile_files(self, file_name, other_file_name, ignored_sections=()):
         parser = create_parser()
@@ -308,15 +387,15 @@ class ProfileConfigurationTestCase(unittest.TestCase):
         other_sections = set(other_parser.sections()).difference(ignored_sections)
 
         # Otherwise, the defined sections should be the same.
-        self.assertEqual(sections, other_sections)
+        assert sections == other_sections
 
         for section in sections:
             # The defined options should be the same.
-            self.assertEqual(parser.options(section), other_parser.options(section))
+            assert parser.options(section) == other_parser.options(section)
 
             for key in parser.options(section):
                 # The values of the options should be the same.
-                self.assertEqual(parser.get(section, key), other_parser.get(section, key))
+                assert parser.get(section, key) == other_parser.get(section, key)
 
     def test_ovirt_and_rhvh(self):
         """Test the similarity of oVirt Node Next with Red Hat Virtualization Host."""
@@ -378,13 +457,13 @@ class ProfileConfigurationTestCase(unittest.TestCase):
         self._check_detection("another-profile", "custom-os", "custom-variant")
 
     def test_invalid_profile(self):
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._load_profile("")
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._load_profile("[Profile]")
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._load_profile("[Profile Detection]")
 
         content = dedent("""
@@ -392,7 +471,7 @@ class ProfileConfigurationTestCase(unittest.TestCase):
         base_profile = custom-profile
         """)
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._load_profile(content)
 
     def test_invalid_base_profile(self):
@@ -403,10 +482,10 @@ class ProfileConfigurationTestCase(unittest.TestCase):
         """)
         self._load_profile(content)
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._loader.collect_configurations("custom-profile")
 
-        self.assertFalse(self._loader.check_profile("custom-profile"))
+        assert not self._loader.check_profile("custom-profile")
 
     def test_repeated_base_profile(self):
         content = dedent("""
@@ -416,10 +495,10 @@ class ProfileConfigurationTestCase(unittest.TestCase):
         """)
         self._load_profile(content)
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._loader.collect_configurations("custom-profile")
 
-        self.assertFalse(self._loader.check_profile("custom-profile"))
+        assert not self._loader.check_profile("custom-profile")
 
     def test_existing_profile(self):
         content = dedent("""
@@ -429,12 +508,12 @@ class ProfileConfigurationTestCase(unittest.TestCase):
 
         self._load_profile(content)
 
-        with self.assertRaises(ConfigurationError):
+        with pytest.raises(ConfigurationError):
             self._load_profile(content)
 
     def test_find_nonexistent_profile(self):
-        self.assertEqual(self._loader.check_profile("custom-profile"), False)
-        self.assertEqual(self._loader.detect_profile("custom-os", "custom-variant"), None)
+        assert self._loader.check_profile("custom-profile") is False
+        assert self._loader.detect_profile("custom-os", "custom-variant") is None
 
     def test_ignore_invalid_profile(self):
         with tempfile.TemporaryDirectory() as config_dir:
@@ -458,6 +537,6 @@ class ProfileConfigurationTestCase(unittest.TestCase):
                 """))
 
             self._loader.load_profiles(config_dir)
-            self.assertTrue(self._loader.check_profile("custom-profile-1"))
-            self.assertFalse(self._loader.check_profile("custom-profile-2"))
-            self.assertFalse(self._loader.check_profile("custom-profile-3"))
+            assert self._loader.check_profile("custom-profile-1")
+            assert not self._loader.check_profile("custom-profile-2")
+            assert not self._loader.check_profile("custom-profile-3")

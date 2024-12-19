@@ -18,18 +18,20 @@
 # Red Hat, Inc.
 #
 
-import os
 import json
+import os
 
-from pyanaconda.core import util
-from pyanaconda.core.constants import RHSM_SYSPURPOSE_FILE_PATH
-from pyanaconda.core.subscription import check_system_purpose_set
+from dasbus.error import DBusError
+from dasbus.typing import List, Str, get_variant
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import RHSM_SYSPURPOSE_FILE_PATH
+from pyanaconda.core.path import join_paths
+from pyanaconda.core.subscription import check_system_purpose_set
+
 log = get_module_logger(__name__)
 
 VALID_FIELDS_FILE_PATH = "/etc/rhsm/syspurpose/valid_fields.json"
-SYSPURPOSE_UTILITY_PATH = "/usr/sbin/syspurpose"
 
 def get_valid_fields(valid_fields_file_path=VALID_FIELDS_FILE_PATH):
     """Get valid role, sla and usage fields for system purpose use.
@@ -143,27 +145,15 @@ def process_field(syspurpose_value, valid_values, value_name):
         return ""
 
 
-def _call_syspurpose_tool(sysroot, args):
-    """Helper function for invoking the syspurpose tool with error checking.
-
-    :param str sysroot: system root path
-    :param args: list of arguments for syspurpose
-    :type args: list of str
-    :return: syspurpose tool return code (non zero means failure)
-    """
-    rc = util.execWithRedirect("syspurpose", args, root=sysroot)
-    if rc:
-        log.error("subscription: syspurpose invocation failed for args %s with rc %s", args, rc)
-    return rc
-
-
-def give_the_system_purpose(sysroot, role, sla, usage, addons):
+def give_the_system_purpose(sysroot, rhsm_syspurpose_proxy, role, sla, usage, addons):
     """Set system purpose for the installed system by calling the syspurpose tool.
 
     The tool is called in the specified system root, so this method should only
     be called once the given system root contains the syspurpose utility.
 
     :param str sysroot: system root path
+    :param rhsm_syspurpose_proxy: com.redhat.RHSM1.Syspurpose proxy
+    :type rhsm_syspurpose_proxy: dasbus DBus proxy object
     :param role: role of the system
     :type role: str or None
     :param sla: Service Level Agreement for the system
@@ -184,44 +174,30 @@ def give_the_system_purpose(sysroot, role, sla, usage, addons):
         # new and old date, if not all fields are set in the most recent
         # invocation.
         log.debug("subscription: clearing old system purpose data")
-        syspurpose_path = util.join_paths(sysroot, RHSM_SYSPURPOSE_FILE_PATH)
+        syspurpose_path = join_paths(sysroot, RHSM_SYSPURPOSE_FILE_PATH)
         os.remove(syspurpose_path)
 
     if role or sla or usage or addons:
-        # using join_paths() as both paths are absolute
-        syspurpose_sysroot_path = util.join_paths(sysroot, SYSPURPOSE_UTILITY_PATH)
-        if os.path.exists(syspurpose_sysroot_path):
-            # The syspurpose utility can only set one value at a time,
-            # so we might need to call it multiple times to set all the
-            # requested values.
-            #
-            # Also as the values can contain white space we need to make sure the
-            # values passed to arguments are all properly quoted.
-            if role:
-                args = ["set-role", role]
-                if _call_syspurpose_tool(sysroot, args):
-                    return False
-            if sla:
-                args = ["set-sla", sla]
-
-                if _call_syspurpose_tool(sysroot, args):
-                    return False
-            if usage:
-                args = ["set-usage", usage]
-                if _call_syspurpose_tool(sysroot, args):
-                    return False
-            if addons:
-                args = ["add", "addons"]
-                for addon in addons:
-                    args.append(addon)
-                if _call_syspurpose_tool(sysroot, args):
-                    return False
+        # Construct a dictionary of values to feed to the SetSyspurpose DBus method.
+        syspurpose_dict = {}
+        if role:
+            syspurpose_dict["role"] = get_variant(Str, role)
+        if sla:
+            syspurpose_dict["service_level_agreement"] = get_variant(Str, sla)
+        if usage:
+            syspurpose_dict["usage"] = get_variant(Str, usage)
+        if addons:
+            syspurpose_dict["addons"] = get_variant(List[Str], addons)
+        log.debug("subscription: setting system purpose")
+        try:
+            locale = os.environ.get("LANG", "")
+            rhsm_syspurpose_proxy.SetSyspurpose(syspurpose_dict, locale)
             log.debug("subscription: system purpose has been set")
             return True
-        else:
-            log.error("subscription: the syspurpose tool is missing, cannot set system purpose")
+        except DBusError as e:
+            log.debug("subscription: failed to set system purpose: %s", str(e))
             return False
     else:
-        log.warning("subscription: not calling syspurpose as no fields have been provided")
+        log.warning("subscription: syspurpose will not be set as no fields have been provided")
         # doing nothing is still not a failure
         return True

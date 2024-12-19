@@ -20,15 +20,22 @@ import unittest
 from unittest.mock import Mock, patch
 
 from dasbus.typing import *  # pylint: disable=wildcard-import
+from pykickstart.base import KickstartHandler
 
 from pyanaconda.core.constants import DEFAULT_LANG
+from pyanaconda.installation import RunInstallationTask
 from pyanaconda.modules.boss.boss import Boss
 from pyanaconda.modules.boss.boss_interface import BossInterface
+from pyanaconda.modules.boss.installation import CopyLogsTask, SetContextsTask
 from pyanaconda.modules.boss.module_manager.start_modules import StartModulesTask
 from pyanaconda.modules.common.structures.requirement import Requirement
-
-from tests.unit_tests.pyanaconda_tests import patch_dbus_publish_object, check_task_creation, \
-    patch_dbus_get_proxy
+from pyanaconda.payload.migrated import ActiveDBusPayload
+from tests.unit_tests.pyanaconda_tests import (
+    check_task_creation,
+    check_task_creation_list,
+    patch_dbus_get_proxy,
+    patch_dbus_publish_object,
+)
 
 
 class BossInterfaceTestCase(unittest.TestCase):
@@ -95,24 +102,24 @@ class BossInterfaceTestCase(unittest.TestCase):
 
     def test_get_modules(self):
         """Test GetModules."""
-        self.assertEqual(self.interface.GetModules(), [])
+        assert self.interface.GetModules() == []
 
         self._add_module("org.fedoraproject.Anaconda.Modules.A")
         self._add_module("org.fedoraproject.Anaconda.Modules.B")
         self._add_module("org.fedoraproject.Anaconda.Addons.C", available=False)
         self._add_module("org.fedoraproject.Anaconda.Addons.D")
 
-        self.assertEqual(self.interface.GetModules(), [
+        assert self.interface.GetModules() == [
             "org.fedoraproject.Anaconda.Modules.A",
             "org.fedoraproject.Anaconda.Modules.B",
             "org.fedoraproject.Anaconda.Addons.D"
-        ])
+        ]
 
     @patch_dbus_publish_object
     def test_start_modules_with_task(self, publisher):
         """Test StartModulesWithTask."""
         task_path = self.interface.StartModulesWithTask()
-        task_proxy = check_task_creation(self, task_path, publisher, StartModulesTask)
+        task_proxy = check_task_creation(task_path, publisher, StartModulesTask)
         task = task_proxy.implementation
 
         callback = Mock()
@@ -128,28 +135,28 @@ class BossInterfaceTestCase(unittest.TestCase):
         with tempfile.NamedTemporaryFile("r+") as f:
             report = self.interface.ReadKickstartFile(f.name)
 
-        self.assertEqual(report, {
+        assert report == {
             "error-messages": get_variant(List[Structure], []),
             "warning-messages": get_variant(List[Structure], [])
-        })
+        }
 
     def test_generate_kickstart(self):
         """Test GenerateKickstart."""
-        self.assertEqual(self.interface.GenerateKickstart(), "")
+        assert self.interface.GenerateKickstart() == ""
 
     def test_set_locale(self):
         """Test SetLocale."""
-        self.assertEqual(self.interface.SetLocale(DEFAULT_LANG), None)
+        assert self.interface.SetLocale(DEFAULT_LANG) is None
 
     def test_collect_requirements(self):
         """Test CollectRequirements."""
-        self.assertEqual(self.interface.CollectRequirements(), [])
+        assert self.interface.CollectRequirements() == []
 
         self._add_module_with_requirement("A", package_name="a")
         self._add_module_with_requirement("B", package_name="b")
         self._add_module_with_requirement("C", package_name="c", available=False)
 
-        self.assertEqual(self.interface.CollectRequirements(), [
+        assert self.interface.CollectRequirements() == [
             {
                 "type": get_variant(Str, "package"),
                 "name": get_variant(Str, "a"),
@@ -160,13 +167,24 @@ class BossInterfaceTestCase(unittest.TestCase):
                 "name": get_variant(Str, "b"),
                 "reason": get_variant(Str, "Required by B.")
             }
-        ])
+        ]
+
+    @patch_dbus_publish_object
+    @patch_dbus_get_proxy
+    def test_install_with_tasks(self, proxy_getter, publisher):
+        """Test InstallWithTasks."""
+        task_paths = self.interface.InstallWithTasks()
+        task_proxies = check_task_creation_list(task_paths, publisher, [RunInstallationTask])
+        task = task_proxies[0].implementation
+
+        assert isinstance(task._payload, ActiveDBusPayload)
+        assert isinstance(task._ksdata, KickstartHandler)
 
     @patch("pyanaconda.modules.boss.boss_interface.get_object_handler")
     @patch_dbus_get_proxy
     def test_collect_configure_runtime_tasks(self, proxy_getter, handler_getter):
         """Test CollectConfigureRuntimeTasks."""
-        self.assertEqual(self.interface.CollectConfigureRuntimeTasks(), [])
+        assert self.interface.CollectConfigureRuntimeTasks() == []
 
         self._add_module_with_tasks("A")
         self._add_module_with_tasks("B")
@@ -175,19 +193,19 @@ class BossInterfaceTestCase(unittest.TestCase):
         proxy_getter.side_effect = self._get_mocked_proxy
         handler_getter.side_effect = self._get_mocked_handler
 
-        self.assertEqual(self.interface.CollectConfigureRuntimeTasks(), [
+        assert self.interface.CollectConfigureRuntimeTasks() == [
             ("A", "/task/1"),
             ("A", "/task/2"),
             ("B", "/task/1"),
             ("B", "/task/2"),
-        ])
+        ]
 
     @patch("pyanaconda.modules.boss.boss_interface.get_object_handler")
     @patch_dbus_get_proxy
     def test_collect_configure_bootloader_tasks(self, proxy_getter, handler_getter):
         """Test CollectConfigureBootloaderTasks."""
         version = "4.17.7-200.fc28.x86_64"
-        self.assertEqual(self.interface.CollectConfigureBootloaderTasks([version]), [])
+        assert self.interface.CollectConfigureBootloaderTasks([version]) == []
 
         self._add_module_with_tasks("A")
         self._add_module_with_tasks("B")
@@ -196,18 +214,18 @@ class BossInterfaceTestCase(unittest.TestCase):
         proxy_getter.side_effect = self._get_mocked_proxy
         handler_getter.side_effect = self._get_mocked_handler
 
-        self.assertEqual(self.interface.CollectConfigureBootloaderTasks([version]), [
+        assert self.interface.CollectConfigureBootloaderTasks([version]) == [
             ("A", "/task/5"),
             ("A", "/task/6"),
             ("B", "/task/5"),
             ("B", "/task/6"),
-        ])
+        ]
 
     @patch("pyanaconda.modules.boss.boss_interface.get_object_handler")
     @patch_dbus_get_proxy
     def test_collect_install_system_tasks(self, proxy_getter, handler_getter):
         """Test CollectInstallSystemTasks."""
-        self.assertEqual(self.interface.CollectInstallSystemTasks(), [])
+        assert self.interface.CollectInstallSystemTasks() == []
 
         self._add_module_with_tasks("A")
         self._add_module_with_tasks("B")
@@ -216,13 +234,30 @@ class BossInterfaceTestCase(unittest.TestCase):
         proxy_getter.side_effect = self._get_mocked_proxy
         handler_getter.side_effect = self._get_mocked_handler
 
-        self.assertEqual(self.interface.CollectInstallSystemTasks(), [
+        assert self.interface.CollectInstallSystemTasks() == [
             ("A", "/task/3"),
             ("A", "/task/4"),
             ("B", "/task/3"),
             ("B", "/task/4"),
-        ])
+        ]
+
+    @patch_dbus_publish_object
+    def test_finish_installation_with_tasks(self, publisher):
+        """Test FinishInstallationWithTasks."""
+        task_list = self.interface.FinishInstallationWithTasks()
+
+        assert len(task_list) == 2
+
+        task_path = task_list[0]
+        task_proxy = check_task_creation(task_path, publisher, SetContextsTask, 0)
+        task = task_proxy.implementation
+        assert task.name == "Set file contexts"
+
+        task_path = task_list[1]
+        task_proxy = check_task_creation(task_path, publisher, CopyLogsTask, 1)
+        task = task_proxy.implementation
+        assert task.name == "Copy installation logs"
 
     def test_quit(self):
         """Test Quit."""
-        self.assertEqual(self.interface.Quit(), None)
+        assert self.interface.Quit() is None

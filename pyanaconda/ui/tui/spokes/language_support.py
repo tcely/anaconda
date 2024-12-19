@@ -17,18 +17,18 @@
 # Red Hat, Inc.
 #
 
-from pyanaconda.modules.common.constants.services import LOCALIZATION
-from pyanaconda.modules.common.util import is_module_available
-from pyanaconda.ui.categories.localization import LocalizationCategory
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda import localization
-from pyanaconda.core.i18n import N_, _
-
 from simpleline.render.containers import ListColumnContainer
 from simpleline.render.screen import InputState
 from simpleline.render.screen_handler import ScreenHandler
 from simpleline.render.widgets import TextWidget
+
+from pyanaconda import localization
+from pyanaconda.core.i18n import N_, _
+from pyanaconda.modules.common.constants.services import LOCALIZATION
+from pyanaconda.modules.common.util import is_module_available
+from pyanaconda.ui.categories.localization import LocalizationCategory
+from pyanaconda.ui.common import FirstbootSpokeMixIn
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
 
 # TRANSLATORS: 'b' to go back to language list
 PROMPT_BACK_DESCRIPTION = N_("to return to language list")
@@ -47,8 +47,12 @@ class LangSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
        .. inheritance-diagram:: LangSpoke
           :parts: 3
     """
-    helpFile = "LangSupportSpoke.txt"
     category = LocalizationCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "language-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -145,4 +149,4 @@ class LangSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
     def apply(self):
         """ Store the selected lang support locales """
-        self._l12_module.SetLanguage(self._selected)
+        self._l12_module.Language = self._selected

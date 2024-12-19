@@ -17,6 +17,7 @@
 #
 import os
 from collections import namedtuple
+
 from requests import RequestException
 
 from pyanaconda.anaconda_loggers import get_module_logger
@@ -25,8 +26,10 @@ from pyanaconda.core.util import requests_session
 from pyanaconda.modules.common.errors.payload import SourceSetupError
 from pyanaconda.modules.common.structures.live_image import LiveImageConfigurationData
 from pyanaconda.modules.common.task import Task
-from pyanaconda.modules.payloads.payload.live_image.utils import get_proxies_from_option, \
-    get_local_image_path_from_url
+from pyanaconda.modules.payloads.payload.live_image.utils import (
+    get_local_image_path_from_url,
+    get_proxies_from_option,
+)
 
 log = get_module_logger(__name__)
 
@@ -90,6 +93,7 @@ class SetUpRemoteImageSourceTask(Task):
         super().__init__()
         self._url = configuration.url
         self._proxy = configuration.proxy
+        self._ssl_verify = configuration.ssl_verification_enabled
 
     @property
     def name(self):
@@ -125,7 +129,7 @@ class SetUpRemoteImageSourceTask(Task):
         response = session.head(
             url=self._url,
             proxies=proxies,
-            verify=True,
+            verify=self._ssl_verify,
             timeout=NETWORK_CONNECTION_TIMEOUT
         )
 

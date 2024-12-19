@@ -15,17 +15,37 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from blivet.errors import StorageError
 from blivet.partitioning import do_partitioning, grow_lvm
 from blivet.static_data import luks_data
+from pykickstart.constants import (
+    AUTOPART_TYPE_BTRFS,
+    AUTOPART_TYPE_LVM,
+    AUTOPART_TYPE_LVM_THINP,
+    AUTOPART_TYPE_PLAIN,
+)
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.modules.common.structures.partitioning import PartitioningRequest
-from pyanaconda.modules.storage.partitioning.automatic.noninteractive_partitioning import \
-    NonInteractivePartitioningTask
-from pyanaconda.modules.storage.partitioning.automatic.utils import get_candidate_disks, \
-    schedule_implicit_partitions, schedule_volumes, schedule_partitions, get_pbkdf_args, \
-    get_default_partitioning, get_disks_for_implicit_partitions
+from pyanaconda.core.i18n import _
 from pyanaconda.core.storage import suggest_swap_size
+from pyanaconda.modules.common.structures.partitioning import PartitioningRequest
+from pyanaconda.modules.storage.devicetree.root import find_existing_installations
+from pyanaconda.modules.storage.partitioning.automatic.noninteractive_partitioning import (
+    NonInteractivePartitioningTask,
+)
+from pyanaconda.modules.storage.partitioning.automatic.utils import (
+    get_candidate_disks,
+    get_default_partitioning,
+    get_disks_for_implicit_partitions,
+    get_part_spec,
+    get_pbkdf_args,
+    schedule_implicit_partitions,
+    schedule_partitions,
+    schedule_volumes,
+)
+from pyanaconda.modules.storage.partitioning.interactive.utils import destroy_device
+from pyanaconda.modules.storage.partitioning.manual.utils import reformat_device
+from pyanaconda.modules.storage.platform import platform
 
 log = get_module_logger(__name__)
 
@@ -56,6 +76,152 @@ class AutomaticPartitioningTask(NonInteractivePartitioningTask):
         config.clear_non_existent = True
         return config
 
+    @staticmethod
+    def _get_mountpoint_device(storage, mountpoint, required=True):
+        devices = []
+        for root in storage.roots:
+            if mountpoint in root.mounts:
+                devices.append(root.mounts[mountpoint])
+        if len(devices) > 1:
+            raise StorageError(_("Multiple devices found for mount point '{}': {}")
+                               .format(mountpoint,
+                                       ", ".join([device.name for device in devices])))
+        if not devices:
+            if required:
+                raise StorageError(_("No devices found for mount point '{}'").format(mountpoint))
+            else:
+                return None
+
+        return devices[0]
+
+    @staticmethod
+    def _get_mountpoint_options(storage, mountpoint):
+        for root in storage.roots:
+            if mountpoint in root.mountopts:
+                return root.mountopts[mountpoint]
+        return None
+
+    @staticmethod
+    def _reused_devices_mountpoints(request):
+        return request.reused_mount_points + request.reformatted_mount_points
+
+    @classmethod
+    def _get_reused_device_names(cls, storage, request):
+        reused_devices = {}
+        for mountpoint in cls._reused_devices_mountpoints(request):
+            device = cls._get_mountpoint_device(storage, mountpoint)
+            reused_devices[device.name] = mountpoint
+        return reused_devices
+
+    @classmethod
+    def _reformat_mountpoint(cls, storage, mountpoint, request):
+        device = cls._get_mountpoint_device(storage, mountpoint)
+        log.debug("reformat device %s for  mountpoint: %s", device, mountpoint)
+        reused_devices = cls._get_reused_device_names(storage, request)
+        reformat_device(storage, device, dependencies=reused_devices)
+
+    @classmethod
+    def _remove_mountpoint(cls, storage, mountpoint):
+        device = cls._get_mountpoint_device(storage, mountpoint, required=False)
+        if device:
+            log.debug("remove device %s for mountpoint %s", device, mountpoint)
+            destroy_device(storage, device)
+        else:
+            log.debug("device to be removed for mountpoint %s not found", mountpoint)
+
+    @staticmethod
+    def _remove_bootloader_partitions(storage, required=True):
+        bootloader_types = ["efi", "biosboot", "appleboot", "prepboot"]
+        bootloader_parts = [part for part in platform.partitions
+                            if part.fstype in bootloader_types]
+        if len(bootloader_parts) > 1:
+            raise StorageError(_("Multiple boot loader partitions required: %s"), bootloader_parts)
+        if not bootloader_parts:
+            log.debug("No bootloader partition required")
+            return False
+        part_type = bootloader_parts[0].fstype
+
+        devices = []
+        for device in storage.devices:
+            if device.format.type == part_type:
+                devices.append(device)
+        if len(devices) > 1:
+            raise StorageError(_("Multiple devices found for boot loader partition '{}': {}")
+                               .format(part_type,
+                                       ", ".join([device.name for device in devices])))
+        if not devices:
+            if required:
+                raise StorageError(_("No devices found for boot loader partition '{}'")
+                                   .format(part_type))
+            else:
+                log.debug("No devices found for bootloader partition %s", part_type)
+            return False
+        device = devices[0]
+        log.debug("remove device %s for bootloader partition %s", device, part_type)
+        destroy_device(storage, device)
+        return True
+
+    def _clear_partitions(self, storage):
+        super()._clear_partitions(storage)
+
+        # Make sure disk selection is taken into account when finding installations
+        storage.roots = find_existing_installations(storage.devicetree)
+        log.debug("storage.roots.mounts %s", [root.mounts for root in storage.roots])
+
+        # Check that partitioning scheme matches
+        self._check_reused_scheme(storage, self._request)
+
+        self._clear_existing_mountpoints(storage, self._request)
+
+    @classmethod
+    def _check_reused_scheme(cls, storage, request):
+        scheme = request.partitioning_scheme
+        required_home_device_type = {
+            AUTOPART_TYPE_BTRFS: "btrfs subvolume",
+            AUTOPART_TYPE_LVM: "lvmlv",
+            AUTOPART_TYPE_LVM_THINP: "lvmthinlv",
+            AUTOPART_TYPE_PLAIN: "partition",
+        }
+        for mountpoint in request.reused_mount_points:
+            device = cls._get_mountpoint_device(storage, mountpoint)
+            if device.type != required_home_device_type[scheme]:
+                raise StorageError(_("Reused device type '{}' of mount point '{}' does not "
+                                     "match the required automatic partitioning scheme.")
+                                   .format(device.type, mountpoint))
+
+    @classmethod
+    def _clear_existing_mountpoints(cls, storage, request):
+        for mountpoint in request.removed_mount_points:
+            if mountpoint == "bootloader":
+                cls._remove_bootloader_partitions(storage)
+            else:
+                cls._remove_mountpoint(storage, mountpoint)
+        for mountpoint in request.reformatted_mount_points:
+            cls._reformat_mountpoint(storage, mountpoint, request)
+
+    @classmethod
+    def _schedule_reused_mountpoint(cls, storage, mountpoint):
+        device = cls._get_mountpoint_device(storage, mountpoint)
+        mountopts = cls._get_mountpoint_options(storage, mountpoint)
+        log.debug("add mount device request for reused mountpoint: %s device: %s "
+                  "with mountopts: %s",
+                  mountpoint, device, mountopts)
+        device.format.mountpoint = mountpoint
+        if mountopts:
+            device.format.options = mountopts
+
+    @classmethod
+    def _schedule_reformatted_mountpoint(cls, storage, mountpoint):
+        old_device = cls._get_mountpoint_device(storage, mountpoint)
+        # The device might have been recreated (btrfs)
+        device = storage.devicetree.resolve_device(old_device.name)
+        if device:
+            log.debug("add mount device request for reformatted mountpoint: %s device: %s",
+                      mountpoint, device)
+            device.format.mountpoint = mountpoint
+        else:
+            log.debug("device for reformatted mountpoint %s not found", mountpoint)
+
     def _configure_partitioning(self, storage):
         """Configure the partitioning.
 
@@ -85,10 +251,21 @@ class AutomaticPartitioningTask(NonInteractivePartitioningTask):
             luks_data.pbkdf_args = pbkdf_args
 
         # Get the autopart requests.
-        requests = self._get_partitioning(storage, self._request.excluded_mount_points)
+        requests = self._get_partitioning(storage, scheme, self._request)
 
         # Do the autopart.
-        self._do_autopart(storage, scheme, requests, encrypted, luks_format_args)
+        create_implicit_partitions = not self._implicit_partitions_reused(storage, self._request)
+        self._do_autopart(storage, scheme, requests, encrypted, luks_format_args,
+                          create_implicit_partitions)
+
+        self._schedule_existing_mountpoints(storage, self._request)
+
+    @classmethod
+    def _schedule_existing_mountpoints(cls, storage, request):
+        for mountpoint in request.reused_mount_points:
+            cls._schedule_reused_mountpoint(storage, mountpoint)
+        for mountpoint in request.reformatted_mount_points:
+            cls._schedule_reformatted_mountpoint(storage, mountpoint)
 
     @staticmethod
     def _get_luks_format_args(storage, request):
@@ -119,38 +296,74 @@ class AutomaticPartitioningTask(NonInteractivePartitioningTask):
             "pbkdf_args": pbkdf_args,
             "escrow_cert": escrow_cert,
             "add_backup_passphrase": request.backup_passphrase_enabled,
+            "opal_admin_passphrase": request.opal_admin_passphrase,
         }
 
     @staticmethod
-    def _get_partitioning(storage, excluded_mount_points=()):
+    def _get_partitioning(storage, scheme, request: PartitioningRequest):
         """Get the partitioning requests for autopart.
 
         :param storage: blivet.Blivet instance
-        :param excluded_mount_points: a list of mount points to exclude
+        :param scheme: a type of the partitioning scheme
+        :param request: partitioning parameters
         :return: a list of full partitioning specs
         """
-        requests = []
+        specs = []
+        swap = None
 
-        for request in get_default_partitioning():
-            # Skip excluded mount points.
-            if (request.mountpoint or request.fstype) in excluded_mount_points:
+        # Create partitioning specs based on the default configuration.
+        for spec in get_default_partitioning():
+            # Skip mount points excluded from the chosen scheme.
+            if spec.schemes and scheme not in spec.schemes:
                 continue
 
+            # Skip excluded or reused mount points.
+            skipped = request.excluded_mount_points
+            skipped.extend(request.reused_mount_points)
+            skipped.extend(request.reformatted_mount_points)
+            if (spec.mountpoint or spec.fstype) in skipped:
+                continue
+
+            # Detect swap.
+            if spec.fstype == "swap":
+                swap = spec
+
+            specs.append(spec)
+
+        # Add a swap if hibernation was requested in kickstart.
+        if request.hibernation and swap is None:
+            swap = get_part_spec({"name": "swap"})
+            specs.append(swap)
+
+        # Configure specs.
+        for spec in specs:
             # Set the default filesystem type.
-            if request.fstype is None:
-                request.fstype = storage.get_fstype(request.mountpoint)
+            if spec.fstype is None:
+                spec.fstype = storage.get_fstype(spec.mountpoint)
 
             # Update the size of swap.
-            if request.fstype == "swap":
+            if spec.fstype == "swap":
                 disk_space = storage.get_disk_free_space()
-                request.size = suggest_swap_size(disk_space=disk_space)
+                swap.size = suggest_swap_size(hibernation=request.hibernation,
+                                              disk_space=disk_space)
 
-            requests.append(request)
+        return specs
 
-        return requests
+    @classmethod
+    def _implicit_partitions_reused(cls, storage, request):
+        for mountpoint in cls._reused_devices_mountpoints(request):
+            device = cls._get_mountpoint_device(storage, mountpoint)
+            if hasattr(device, "vg"):
+                log.debug("reusing volume group %s for %s", device.vg, mountpoint)
+                return True
+            if hasattr(device, "volume"):
+                log.debug("reusing volume %s for %s", device.volume, mountpoint)
+                return True
+        return False
 
     @staticmethod
-    def _do_autopart(storage, scheme, requests, encrypted=False, luks_fmt_args=None):
+    def _do_autopart(storage, scheme, requests, encrypted=False, luks_fmt_args=None,
+                     create_implicit_partitions=True):
         """Perform automatic partitioning.
 
         :param storage: an instance of Blivet
@@ -172,8 +385,12 @@ class AutomaticPartitioningTask(NonInteractivePartitioningTask):
         log.debug("candidate disks: %s", [d.name for d in disks])
 
         # Schedule implicit partitions.
-        extra_disks = get_disks_for_implicit_partitions(disks, scheme, requests)
-        devs = schedule_implicit_partitions(storage, extra_disks, scheme, encrypted, luks_fmt_args)
+        devs = []
+        if create_implicit_partitions:
+            extra_disks = get_disks_for_implicit_partitions(disks, scheme, requests)
+            devs = schedule_implicit_partitions(
+                storage, extra_disks, scheme, encrypted, luks_fmt_args
+            )
 
         # Schedule requested partitions.
         devs = schedule_partitions(storage, disks, devs, scheme, requests, encrypted, luks_fmt_args)

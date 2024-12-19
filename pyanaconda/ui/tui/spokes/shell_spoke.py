@@ -17,15 +17,17 @@
 #
 """Text mode shell spoke"""
 
-from pyanaconda.ui.categories.system import SystemCategory
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.core.i18n import N_, _
+from blivet import arch
+from simpleline.render.widgets import TextWidget
+
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.constants import ANACONDA_ENVIRON
+from pyanaconda.core.i18n import N_, _
 from pyanaconda.core.util import execConsole
-from blivet import arch
+from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
 
-from simpleline.render.widgets import TextWidget
+__all__ = ["ShellSpoke"]
 
 
 class ShellSpoke(NormalTUISpoke):
@@ -34,6 +36,11 @@ class ShellSpoke(NormalTUISpoke):
           :parts: 3
     """
     category = SystemCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "shell"
 
     def __init__(self, data, storage, payload):
         super().__init__(data, storage, payload)
@@ -61,10 +68,12 @@ class ShellSpoke(NormalTUISpoke):
         NormalTUISpoke.refresh(self, args)
         self.window.add_with_separator(TextWidget(_("Exit the shell to continue")))
 
+    # pylint: disable-next=useless-return
     def prompt(self, args=None):
         # run shell instead of printing prompt and close window on shell exit
         execConsole()
         self.close()
 
         # suppress the prompt
+        # ruff: noqa: PLR1711
         return None

@@ -1,4 +1,3 @@
-# Class for management payload threading.
 #
 # Copyright (C) 2019  Red Hat, Inc.
 #
@@ -16,234 +15,173 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
-
-import threading
-from enum import IntEnum
-
-from dasbus.error import DBusError
-from pyanaconda.core.constants import THREAD_STORAGE, THREAD_PAYLOAD, THREAD_PAYLOAD_RESTART, \
-    THREAD_WAIT_FOR_CONNECTING_NM, THREAD_SUBSCRIPTION, PAYLOAD_TYPE_DNF
-from pyanaconda.core.i18n import _, N_
-from pyanaconda.threading import threadMgr, AnacondaThread
-from pyanaconda.payload.errors import PayloadError
-from pyanaconda.errors import errorHandler, ERROR_RAISE
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import (
+    PAYLOAD_STATUS_PROBING_STORAGE,
+    PAYLOAD_STATUS_SETTING_SOURCE,
+    THREAD_EXECUTE_STORAGE,
+    THREAD_PAYLOAD,
+    THREAD_PAYLOAD_RESTART,
+    THREAD_STORAGE,
+    THREAD_STORAGE_WATCHER,
+    THREAD_SUBSCRIPTION,
+    THREAD_WAIT_FOR_CONNECTING_NM,
+)
+from pyanaconda.core.i18n import _
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.errors import ERROR_RAISE
+from pyanaconda.errors import errorHandler as error_handler
+from pyanaconda.modules.common.errors.payload import SourceSetupError
+from pyanaconda.modules.common.structures.validation import ValidationReport
+from pyanaconda.modules.common.task.progress import ProgressReporter
+from pyanaconda.modules.common.task.runnable import Runnable
 
 log = get_module_logger(__name__)
 
-
-__all__ = ["payloadMgr", "PayloadState"]
-
-
-class PayloadState(IntEnum):
-    """Enum for payload state after payload was restarted."""
-    STARTED = 0
-    WAITING_STORAGE = 1
-    WAITING_NETWORK = 2
-    VERIFYING_AVAILABILITY = 3
-    DOWNLOADING_PKG_METADATA = 4
-    DOWNLOADING_GROUP_METADATA = 5
-    FINISHED = 6
-
-    # Error
-    ERROR = -1
+__all__ = ["NonCriticalSourceSetupError", "payloadMgr"]
 
 
-class PayloadManager(object):
+class NonCriticalSourceSetupError(SourceSetupError):
+    """Non-critical error raised during the source setup."""
+    pass
+
+
+class _PayloadManager(Runnable, ProgressReporter):
     """Framework for starting and watching the payload thread.
 
-    This class defines several states (PayloadState enum), and events can
-    be triggered upon reaching a state. Depending on whether a state has
-    already been reached when a listener is added, the event code may be
-    run in either the calling thread or the payload thread. The event code
-    will block the payload thread regardless, so try not to run anything
-    that takes a long time.
-
-    All states except ERROR are expected to happen linearly, and adding
-    a listener for a state that has already been reached or passed will
-    immediately trigger that listener. For example, if the payload thread is
-    currently in DOWNLOADING_GROUP_METADATA, adding a listener for
-    WAITING_NETWORK will immediately run the code being added
-    for WAITING_NETWORK.
-
     The payload thread data should be accessed using the payloadMgr object,
-    and the running thread can be accessed using threadMgr with the
+    and the running thread can be accessed using thread_manager with the
     THREAD_PAYLOAD constant, if you need to wait for it or something. The
-    thread should be started using payloadMgr.restart_thread.
+    thread should be started using payloadMgr.start.
     """
-    # Error strings
-    ERROR_SETUP = N_("Failed to set up installation source")
-    ERROR_MD = N_("Error downloading package metadata")
 
     def __init__(self):
-        self._event_lock = threading.Lock()
-        self._event_listeners = {}
-        self._thread_state = PayloadState.STARTED
-        self._error = None
-
-        # Initialize a list for each event state
-        for _name, value in PayloadState.__members__.items():  # pylint: disable=no-member
-            self._event_listeners[PayloadState(value)] = []
+        super().__init__()
+        self._report = ValidationReport()
 
     @property
-    def error(self):
-        return _(self._error)
+    def report(self):
+        """The latest validation report."""
+        return self._report
 
-    def add_listener(self, event_id, func):
-        """Add a listener for an event.
+    @property
+    def steps(self):
+        """Total number of steps."""
+        return 1
 
-        :param int event_id: The event to listen for, one of the EVENT_* constants
-        :param function func: An object to call when the event is reached
-        """
+    @property
+    def is_running(self):
+        """Is the payload thread running right now?"""
+        return thread_manager.exists(THREAD_PAYLOAD_RESTART) or thread_manager.exists(THREAD_PAYLOAD)
 
-        # Check that the event_id is valid
-        assert isinstance(event_id, PayloadState)
-
-        # Add the listener inside the lock in case we need to run immediately,
-        # to make sure the listener isn't triggered twice
-        with self._event_lock:
-            self._event_listeners[event_id].append(func)
-
-            # If an error event was requested, run it if currently in an error state
-            if event_id == PayloadState.ERROR:
-                if event_id == self._thread_state:
-                    func()
-            # Otherwise, run if the requested event has already occurred
-            elif event_id <= self._thread_state:
-                func()
-
-    def restart_thread(self, payload, fallback=False, checkmount=True, onlyOnChange=False):
+    def start(self, *args, **kwargs):
         """Start or restart the payload thread.
 
         This method starts a new thread to restart the payload thread, so
         this method's return is not blocked by waiting on the previous payload
         thread. If there is already a payload thread restart pending, this method
         has no effect.
-
-        :param payload.Payload payload: The payload instance
-        :param bool fallback: Whether to fall back to the default repo in case of error
-        :param bool checkmount: Whether to check for valid mounted media
-        :param bool onlyOnChange: Restart thread only if existing repositories changed.
-                                  This won't restart thread even when a new repository was added!!
         """
         log.debug("Restarting payload thread")
 
-        # If a restart thread is already running, don't start a new one
-        if threadMgr.get(THREAD_PAYLOAD_RESTART):
+        # If a restart thread is already running, don't start a new one.
+        if thread_manager.get(THREAD_PAYLOAD_RESTART):
             return
 
-        # Launch a new thread so that this method can return immediately
-        threadMgr.add(AnacondaThread(
+        # Launch a new thread so that this method can return immediately.
+        thread_manager.add_thread(
             name=THREAD_PAYLOAD_RESTART,
-            target=self._restart_thread,
-            args=(payload, fallback, checkmount, onlyOnChange)
-        ))
+            target=self._start,
+            args=args,
+            kwargs=kwargs,
+        )
 
-    @property
-    def running(self):
-        """Is the payload thread running right now?"""
-        return threadMgr.exists(THREAD_PAYLOAD_RESTART) or threadMgr.exists(THREAD_PAYLOAD)
+    def _start(self, *args, **kwargs):
+        """Start the payload thread after it is finished."""
+        # Wait for the previous payload thread to finish.
+        thread_manager.wait(THREAD_PAYLOAD)
 
-    def _restart_thread(self, payload, fallback, checkmount, onlyOnChange):
-        # Wait for the old thread to finish
-        threadMgr.wait(THREAD_PAYLOAD)
-
-        # Start a new payload thread
-        threadMgr.add(AnacondaThread(
+        # Start a new payload thread.
+        thread_manager.add_thread(
             name=THREAD_PAYLOAD,
-            target=self._run_thread,
-            args=(payload, fallback, checkmount, onlyOnChange)
-        ))
+            target=self._task_run_callback,
+            target_started=self._task_started_callback,
+            target_stopped=self._task_stopped_callback,
+            args=args,
+            kwargs=kwargs,
+        )
 
-    def _set_state(self, event_id):
-        # Update the current state
-        log.debug("Updating payload thread state: %s", event_id.name)
-        with self._event_lock:
-            # Update the state within the lock to avoid a race with listeners
-            # currently being added
-            self._thread_state = event_id
+    def _task_run_callback(self, *args, **kwargs):
+        """Run the task."""
+        self._report = ValidationReport()
 
-            # Run any listeners for the new state
-            for func in self._event_listeners[event_id]:
-                func()
+        try:
+            # Try to set up the payload.
+            self._run(*args, **kwargs)
+        except NonCriticalSourceSetupError as e:
+            # Report the non-fatal error.
+            self._report.error_messages.append(str(e))
 
-    def _run_thread(self, payload, fallback, checkmount, onlyOnChange):
-        # This is the thread entry
-        # Set the initial state
-        self._error = None
-        self._set_state(PayloadState.STARTED)
+            # The payload has failed, but it can be reconfigured in the UI.
+            # Emit the failed signal, but don't propagate the error.
+            self._task_failed_callback()
 
+        except Exception as e:  # pylint: disable=broad-except
+            # The payload has failed and it cannot be reconfigured in the UI.
+            # Emit the failed signal and ask the user what to do.
+            self._task_failed_callback()
+
+            # Handle the fatal error.
+            if error_handler.cb(e) == ERROR_RAISE:
+                raise
+        else:
+            # The payload is successfully set up.
+            # Emit the succeeded signal.
+            self._task_succeeded_callback()
+
+    def _run(self, payload, **kwargs):
+        """The task implementation.
+
+        Report the progress of the task with the self.report_progress
+        method. Raise the _InteractivePayloadFailed exception to indicate
+        that we failed to set up the installation source, but it can be
+        reconfigured in the UI.
+
+        :param payload: the payload instance
+        """
         # Wait for storage
-        self._set_state(PayloadState.WAITING_STORAGE)
-        threadMgr.wait(THREAD_STORAGE)
+        self.report_progress(PAYLOAD_STATUS_PROBING_STORAGE)
+        thread_manager.wait(THREAD_STORAGE)
+        thread_manager.wait(THREAD_STORAGE_WATCHER)
+        thread_manager.wait(THREAD_EXECUTE_STORAGE)
 
         # Wait for network
-        self._set_state(PayloadState.WAITING_NETWORK)
         # FIXME: condition for cases where we don't want network
         # (set and use payload.needs_network ?)
-        threadMgr.wait(THREAD_WAIT_FOR_CONNECTING_NM)
+        thread_manager.wait(THREAD_WAIT_FOR_CONNECTING_NM)
 
         # Wait for subscription
-        threadMgr.wait(THREAD_SUBSCRIPTION)
+        thread_manager.wait(THREAD_SUBSCRIPTION)
 
-        # Non-package payloads do everything in the setup method.
-        # There is no UI support that could handle the error state,
-        # so we need to handle or raise the error directly.
-        try:
-            payload.setup()
-        except (DBusError, PayloadError) as e:
-            # Handle an error.
-            if errorHandler.cb(e) == ERROR_RAISE:
-                raise
-
-        # If this is a non-package Payload, we're done
-        if payload.type != PAYLOAD_TYPE_DNF:
-            self._set_state(PayloadState.FINISHED)
-            return
-
-        # Test if any repository changed from the last update
-        if onlyOnChange:
-            log.debug("Testing repositories availability")
-            self._set_state(PayloadState.VERIFYING_AVAILABILITY)
-            if payload.dnf_manager.verify_repomd_hashes():
-                log.debug("Payload isn't restarted, repositories are still available.")
-                self._set_state(PayloadState.FINISHED)
-                return
-
-        # Keep setting up package-based repositories
-        # Download package metadata
-        self._set_state(PayloadState.DOWNLOADING_PKG_METADATA)
-
-        # FIXME: This import is a temporary workaround. Use a DBus error instead.
-        from pyanaconda.modules.payloads.payload.dnf.dnf_manager import DNFManagerError
+        # Set up the payload.
+        self.report_progress(_(PAYLOAD_STATUS_SETTING_SOURCE))
 
         try:
-            payload.update_base_repo(fallback=fallback, checkmount=checkmount)
-            payload.add_driver_repos()
-        except (OSError, DBusError, PayloadError, DNFManagerError) as e:
-            log.error("PayloadError: %s", e)
-            self._error = self.ERROR_SETUP
-            self._set_state(PayloadState.ERROR)
+            # Try to set up the payload.
+            payload.setup(self.report_progress, **kwargs)
+
+        except Exception:  # pylint: disable=broad-except
+            # Tear down the payload if we failed.
             payload.unsetup()
-            return
+            raise
 
-        # Gather the group data
-        self._set_state(PayloadState.DOWNLOADING_GROUP_METADATA)
-        payload.gather_repo_metadata()
+    def finish(self):
+        """Finish the task run.
 
-        # Check if that failed
-        if not payload.base_repo:
-            log.error("No base repo configured")
-            self._error = self.ERROR_MD
-            self._set_state(PayloadState.ERROR)
-            payload.unsetup()
-            return
-
-        # run payload specific post configuration tasks
-        payload.dnf_manager.load_repomd_hashes()
-
-        self._set_state(PayloadState.FINISHED)
+        The thread errors are fatal, so there is nothing to do here.
+        """
+        pass
 
 
-# Initialize the PayloadManager instance
-payloadMgr = PayloadManager()
+# Initialize the PayloadManager instance.
+payloadMgr = _PayloadManager()

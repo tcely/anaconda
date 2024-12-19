@@ -18,11 +18,12 @@
 # Red Hat, Inc.
 #
 from pyanaconda.modules.payloads.constants import SourceType
+from pyanaconda.modules.payloads.source.utils import is_tar
 
 __all__ = ["SourceFactory"]
 
 
-class SourceFactory(object):
+class SourceFactory:
     """Factory to create payload sources."""
 
     @staticmethod
@@ -33,12 +34,20 @@ class SourceFactory(object):
         :return: a source module
         """
         if source_type == SourceType.LIVE_OS_IMAGE:
-            from pyanaconda.modules.payloads.source.live_os.live_os import LiveOSSourceModule
+            from pyanaconda.modules.payloads.source.live_os.live_os import (
+                LiveOSSourceModule,
+            )
             return LiveOSSourceModule()
         elif source_type == SourceType.LIVE_IMAGE:
-            from pyanaconda.modules.payloads.source.live_image.live_image import \
-                LiveImageSourceModule
+            from pyanaconda.modules.payloads.source.live_image.live_image import (
+                LiveImageSourceModule,
+            )
             return LiveImageSourceModule()
+        elif source_type == SourceType.LIVE_TAR:
+            from pyanaconda.modules.payloads.source.live_tar.live_tar import (
+                LiveTarSourceModule,
+            )
+            return LiveTarSourceModule()
         elif source_type == SourceType.CDROM:
             from pyanaconda.modules.payloads.source.cdrom.cdrom import CdromSourceModule
             return CdromSourceModule()
@@ -46,9 +55,15 @@ class SourceFactory(object):
             from pyanaconda.modules.payloads.source.hmc.hmc import HMCSourceModule
             return HMCSourceModule()
         elif source_type == SourceType.REPO_FILES:
-            from pyanaconda.modules.payloads.source.repo_files.repo_files import \
-                RepoFilesSourceModule
+            from pyanaconda.modules.payloads.source.repo_files.repo_files import (
+                RepoFilesSourceModule,
+            )
             return RepoFilesSourceModule()
+        elif source_type == SourceType.REPO_PATH:
+            from pyanaconda.modules.payloads.source.repo_path.repo_path import (
+                RepoPathSourceModule,
+            )
+            return RepoPathSourceModule()
         elif source_type == SourceType.NFS:
             from pyanaconda.modules.payloads.source.nfs.nfs import NFSSourceModule
             return NFSSourceModule()
@@ -56,23 +71,32 @@ class SourceFactory(object):
             from pyanaconda.modules.payloads.source.url.url import URLSourceModule
             return URLSourceModule()
         elif source_type == SourceType.HDD:
-            from pyanaconda.modules.payloads.source.harddrive.harddrive import \
-                HardDriveSourceModule
+            from pyanaconda.modules.payloads.source.harddrive.harddrive import (
+                HardDriveSourceModule,
+            )
             return HardDriveSourceModule()
         elif source_type == SourceType.CDN:
             from pyanaconda.modules.payloads.source.cdn.cdn import CDNSourceModule
             return CDNSourceModule()
         elif source_type == SourceType.CLOSEST_MIRROR:
-            from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror import \
-                ClosestMirrorSourceModule
+            from pyanaconda.modules.payloads.source.closest_mirror.closest_mirror import (
+                ClosestMirrorSourceModule,
+            )
             return ClosestMirrorSourceModule()
         elif source_type == SourceType.RPM_OSTREE:
-            from pyanaconda.modules.payloads.source.rpm_ostree.rpm_ostree import \
-                RPMOSTreeSourceModule
+            from pyanaconda.modules.payloads.source.rpm_ostree.rpm_ostree import (
+                RPMOSTreeSourceModule,
+            )
             return RPMOSTreeSourceModule()
+        elif source_type == SourceType.RPM_OSTREE_CONTAINER:
+            from pyanaconda.modules.payloads.source.rpm_ostree_container.rpm_ostree_container import (
+                RPMOSTreeContainerSourceModule,
+            )
+            return RPMOSTreeContainerSourceModule()
         elif source_type == SourceType.FLATPAK:
-            from pyanaconda.modules.payloads.source.flatpak.flatpak import \
-                FlatpakSourceModule
+            from pyanaconda.modules.payloads.source.flatpak.flatpak import (
+                FlatpakSourceModule,
+            )
             return FlatpakSourceModule()
 
         raise ValueError("Unknown source type: {}".format(source_type))
@@ -108,6 +132,8 @@ class SourceFactory(object):
         :param ks_data: kickstart data from DNF payload
         :return: SourceType value
         """
+        if ks_data.ostreecontainer.seen:
+            return SourceType.RPM_OSTREE_CONTAINER
         if ks_data.ostreesetup.seen:
             return SourceType.RPM_OSTREE
 
@@ -121,6 +147,9 @@ class SourceFactory(object):
         :return: SourceType value
         """
         if ks_data.liveimg.seen:
-            return SourceType.LIVE_IMAGE
+            if is_tar(ks_data.liveimg.url):
+                return SourceType.LIVE_TAR
+            else:
+                return SourceType.LIVE_IMAGE
 
         return None

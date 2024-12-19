@@ -18,24 +18,37 @@
 #
 import sys
 
+import gi
 from blivet.size import Size
+
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.core import util, constants
-from pyanaconda.core.async_utils import async_action_nowait
+from pyanaconda.core import constants, util
+from pyanaconda.core.async_utils import async_action_nowait, async_action_wait
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import CLEAR_PARTITIONS_NONE, BOOTLOADER_ENABLED, \
-    STORAGE_METADATA_RATIO, WARNING_NO_DISKS_SELECTED, WARNING_NO_DISKS_DETECTED, \
-    PARTITIONING_METHOD_AUTOMATIC, PARTITIONING_METHOD_INTERACTIVE, PARTITIONING_METHOD_BLIVET
-from pyanaconda.core.i18n import _, C_, CN_
+from pyanaconda.core.constants import (
+    BOOTLOADER_ENABLED,
+    CLEAR_PARTITIONS_NONE,
+    PARTITIONING_METHOD_AUTOMATIC,
+    PARTITIONING_METHOD_BLIVET,
+    PARTITIONING_METHOD_INTERACTIVE,
+    STORAGE_METADATA_RATIO,
+    WARNING_NO_DISKS_DETECTED,
+    WARNING_NO_DISKS_SELECTED,
+)
+from pyanaconda.core.i18n import C_, CN_, _
+from pyanaconda.core.storage import suggest_swap_size
+from pyanaconda.core.threads import thread_manager
 from pyanaconda.flags import flags
-from pyanaconda.modules.common.constants.objects import DISK_SELECTION, DISK_INITIALIZATION, \
-    BOOTLOADER, DEVICE_TREE
+from pyanaconda.modules.common.constants.objects import (
+    BOOTLOADER,
+    DEVICE_TREE,
+    DISK_INITIALIZATION,
+    DISK_SELECTION,
+)
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.structures.partitioning import PartitioningRequest
 from pyanaconda.modules.common.structures.storage import DeviceData
 from pyanaconda.modules.common.structures.validation import ValidationReport
-from pyanaconda.core.storage import suggest_swap_size
-from pyanaconda.threading import threadMgr, AnacondaThread
 from pyanaconda.ui.categories.system import SystemCategory
 from pyanaconda.ui.communication import hubQ
 from pyanaconda.ui.gui.spokes import NormalSpoke
@@ -45,21 +58,39 @@ from pyanaconda.ui.gui.spokes.lib.detailederror import DetailedErrorDialog
 from pyanaconda.ui.gui.spokes.lib.passphrase import PassphraseDialog
 from pyanaconda.ui.gui.spokes.lib.refresh import RefreshDialog
 from pyanaconda.ui.gui.spokes.lib.resize import ResizeDialog
+from pyanaconda.ui.gui.spokes.lib.storage_dialogs import (
+    DASD_FORMAT_NO_CHANGE,
+    DASD_FORMAT_REFRESH,
+    DASD_FORMAT_RETURN_TO_HUB,
+    RESPONSE_CANCEL,
+    RESPONSE_MODIFY_SW,
+    RESPONSE_OK,
+    RESPONSE_QUIT,
+    RESPONSE_RECLAIM,
+    NeedSpaceDialog,
+    NoSpaceDialog,
+)
 from pyanaconda.ui.gui.utils import ignoreEscape
 from pyanaconda.ui.helpers import StorageCheckHandler
 from pyanaconda.ui.lib.format_dasd import DasdFormatting
-from pyanaconda.ui.lib.storage import find_partitioning, apply_partitioning, \
-    select_default_disks, apply_disk_selection, get_disks_summary, create_partitioning, \
-    is_local_disk, filter_disks_by_names, reset_storage
-from pyanaconda.ui.gui.spokes.lib.storage_dialogs import NeedSpaceDialog, NoSpaceDialog, \
-    RESPONSE_CANCEL, RESPONSE_OK, RESPONSE_MODIFY_SW, RESPONSE_RECLAIM, RESPONSE_QUIT, \
-    DASD_FORMAT_NO_CHANGE, DASD_FORMAT_REFRESH, DASD_FORMAT_RETURN_TO_HUB
+from pyanaconda.ui.lib.storage import (
+    apply_disk_selection,
+    apply_partitioning,
+    create_partitioning,
+    filter_disks_by_names,
+    find_partitioning,
+    get_disks_summary,
+    is_local_disk,
+    is_passphrase_required,
+    reset_storage,
+    select_default_disks,
+    set_required_passphrase,
+)
 
-import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-gi.require_version("AnacondaWidgets", "3.3")
-from gi.repository import Gdk, AnacondaWidgets, Gtk
+gi.require_version("AnacondaWidgets", "3.4")
+from gi.repository import AnacondaWidgets, Gdk, Gtk
 
 log = get_module_logger(__name__)
 
@@ -74,13 +105,15 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
     builderObjects = ["storageWindow", "addSpecializedImage"]
     mainWidgetName = "storageWindow"
     uiFile = "spokes/storage.glade"
-    helpFile = "StorageSpoke.xml"
-
     category = SystemCategory
-
     # other candidates: computer-symbolic, folder-symbolic
     icon = "drive-harddisk-symbolic"
     title = CN_("GUI|Spoke", "Installation _Destination")
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "storage-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -150,9 +183,21 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
             self._custom_part_radio_button.set_visible(False)
             self._custom_part_radio_button.set_no_show_all(True)
 
-        if "BlivetGuiSpoke" in conf.ui.hidden_spokes or not conf.ui.blivet_gui_supported:
+        if "BlivetGuiSpoke" in conf.ui.hidden_spokes or not self._is_blivet_gui_supported():
             self._blivet_gui_radio_button.set_visible(False)
             self._blivet_gui_radio_button.set_no_show_all(True)
+
+    def _is_blivet_gui_supported(self):
+        """Is the partitioning with blivet-gui supported?"""
+        try:
+            # pylint:disable=unused-import
+            # ruff: noqa: F401
+            import pyanaconda.ui.gui.spokes.blivet_gui
+        except ImportError as e:
+            log.info("Blivet-GUI is not supported: %s", str(e))
+            return False
+
+        return True
 
     def _get_selected_partitioning_method(self):
         """Get the selected partitioning method.
@@ -207,8 +252,8 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
                 self._check_problems()
 
     def apply(self):
-        self._disk_init_module.SetInitializationMode(CLEAR_PARTITIONS_NONE)
-        self._disk_init_module.SetInitializeLabelsEnabled(True)
+        self._disk_init_module.InitializationMode = CLEAR_PARTITIONS_NONE
+        self._disk_init_module.InitializeLabelsEnabled = True
         apply_disk_selection(self._selected_disks, reset_boot_drive=True)
 
     @async_action_nowait
@@ -229,10 +274,10 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         # Spawn storage execution as a separate thread so there's no big delay
         # going back from this spoke to the hub while StorageCheckHandler.run runs.
         # Yes, this means there's a thread spawning another thread.  Sorry.
-        threadMgr.add(AnacondaThread(
+        thread_manager.add_thread(
             name=constants.THREAD_EXECUTE_STORAGE,
             target=self._do_execute
-        ))
+        )
 
     def _do_execute(self):
         """Apply a non-interactive partitioning."""
@@ -267,9 +312,9 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         # By default, the storage spoke is not ready.  We have to wait until
         # storageInitialize is done.
         return self._ready \
-            and not threadMgr.get(constants.THREAD_STORAGE) \
-            and not threadMgr.get(constants.THREAD_DASDFMT) \
-            and not threadMgr.get(constants.THREAD_EXECUTE_STORAGE)
+            and not thread_manager.get(constants.THREAD_STORAGE) \
+            and not thread_manager.get(constants.THREAD_DASDFMT) \
+            and not thread_manager.get(constants.THREAD_EXECUTE_STORAGE)
 
     @property
     def status(self):
@@ -379,25 +424,24 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         # of them, we do not display them in the box by default.  Instead, only
         # those selected in the filter UI are displayed.  This means refresh
         # needs to know to create and destroy overviews as appropriate.
-        for device_name in self._available_disks:
+        for disk_id in self._available_disks:
 
             # Get the device data.
             device_data = DeviceData.from_structure(
-                self._device_tree.GetDeviceData(device_name)
+                self._device_tree.GetDeviceData(disk_id)
             )
 
             if is_local_disk(device_data.type):
                 # Add all available local disks.
                 self._add_disk_overview(device_data, self._local_disks_box)
 
-            elif device_name in self._selected_disks:
+            elif disk_id in self._selected_disks:
                 # Add only selected advanced disks.
                 self._add_disk_overview(device_data, self._specialized_disks_box)
 
         # update the selections in the ui
         for overview in self.local_overviews + self.advanced_overviews:
-            name = overview.get_property("name")
-            overview.set_chosen(name in self._selected_disks)
+            overview.set_chosen(overview.device_id in self._selected_disks)
 
         # Update the encryption checkbox.
         if self._partitioning_request.encrypted:
@@ -432,8 +476,10 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         self._main_box.set_focus_vadjustment(
             Gtk.Scrollable.get_vadjustment(self._main_viewport))
 
-        threadMgr.add(AnacondaThread(name=constants.THREAD_STORAGE_WATCHER,
-                                     target=self._initialize))
+        thread_manager.add_thread(
+            name=constants.THREAD_STORAGE_WATCHER,
+            target=self._initialize
+        )
 
     def _add_disk_overview(self, device_data, box):
         if device_data.type == "dm-multipath":
@@ -448,15 +494,11 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
                 wwpn=device_data.attrs.get("wwpn", ""),
                 lun=device_data.attrs.get("fcp-lun", "")
             )
-        elif device_data.type == "nvdimm":
-            description = _("NVDIMM device {namespace}").format(
-                namespace=device_data.attrs.get("namespace", "")
-            )
         else:
             description = device_data.description
 
         kind = "drive-removable-media" if device_data.removable else "drive-harddisk"
-        free_space = self._device_tree.GetDiskFreeSpace([device_data.name])
+        free_space = self._device_tree.GetDiskFreeSpace([device_data.device_id])
         serial_number = device_data.attrs.get("serial") or None
 
         overview = AnacondaWidgets.DiskOverview(
@@ -465,11 +507,12 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
             str(Size(device_data.size)),
             _("{} free").format(str(Size(free_space))),
             device_data.name,
+            device_data.device_id,
             serial_number
         )
 
         box.pack_start(overview, False, False, 0)
-        overview.set_chosen(device_data.name in self._selected_disks)
+        overview.set_chosen(device_data.device_id in self._selected_disks)
         overview.connect("button-press-event", self._on_disk_clicked)
         overview.connect("key-release-event", self._on_disk_clicked)
         overview.connect("focus-in-event", self._on_disk_focus_in)
@@ -482,7 +525,7 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         """
         # Wait for storage.
         hubQ.send_message(self.__class__.__name__, _(constants.PAYLOAD_STATUS_PROBING_STORAGE))
-        threadMgr.wait(constants.THREAD_STORAGE)
+        thread_manager.wait(constants.THREAD_STORAGE)
 
         # Automatically format DASDs if allowed.
         disks = self._disk_select_module.GetUsableDisks()
@@ -496,6 +539,7 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         # Do not set ready in the automated installation before
         # the execute method is run.
         if flags.automatedInstall and self._is_preconfigured:
+            self._check_required_passphrase()
             self.execute()
         else:
             self._ready = True
@@ -506,6 +550,22 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
 
     def _show_dasdfmt_report(self, msg):
         hubQ.send_message(self.__class__.__name__, msg)
+
+    @async_action_wait
+    def _check_required_passphrase(self):
+        """Ask a user for a default passphrase if required."""
+        if not is_passphrase_required(self._partitioning):
+            return
+
+        dialog = PassphraseDialog(self.data)
+
+        with self.main_window.enlightbox(dialog.window):
+            rc = dialog.run()
+
+        if rc != 1:
+            return
+
+        set_required_passphrase(self._partitioning, dialog.passphrase)
 
     def _update_summary(self):
         """ Update the summary based on the UI. """
@@ -538,13 +598,13 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         """ Update self.selected_disks based on the UI. """
         for overview in self.local_overviews + self.advanced_overviews:
             selected = overview.get_chosen()
-            name = overview.get_property("name")
+            disk_id = overview.device_id
 
-            if selected and name not in self._selected_disks:
-                self._selected_disks.append(name)
+            if selected and disk_id not in self._selected_disks:
+                self._selected_disks.append(disk_id)
 
-            if not selected and name in self._selected_disks:
-                self._selected_disks.remove(name)
+            if not selected and disk_id in self._selected_disks:
+                self._selected_disks.remove(disk_id)
 
     # signal handlers
     def on_summary_clicked(self, button):
@@ -560,8 +620,7 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
 
         # update the UI to reflect changes to self.selected_disks
         for overview in self.local_overviews + self.advanced_overviews:
-            name = overview.get_property("name")
-            overview.set_chosen(name in self._selected_disks)
+            overview.set_chosen(overview.device_id in self._selected_disks)
 
         self._update_summary()
 
@@ -586,8 +645,8 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
             return rc
 
         # Allow to format DASDs.
-        self._disk_init_module.SetFormatUnrecognizedEnabled(True)
-        self._disk_init_module.SetFormatLDLEnabled(True)
+        self._disk_init_module.FormatUnrecognizedEnabled = True
+        self._disk_init_module.FormatLDLEnabled = True
 
         # Get selected disks.
         disks = filter_disks_by_names(self._available_disks, self._selected_disks)
@@ -608,6 +667,13 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
 
         return rc
 
+    @staticmethod
+    def _is_swap_configured():
+        for attrs in conf.storage.default_partitioning:
+            if attrs.get("name") == "swap":
+                return True
+        return False
+
     def _check_space_and_run_dialog(self, partitioning, disks):
         # User wants to reclaim the space.
         if self._reclaim_checkbox.get_active():
@@ -621,7 +687,8 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         fs_free = Size(device_tree.GetDiskReclaimableSpace(disks))
         disks_size = Size(device_tree.GetDiskTotalSpace(disks))
         sw_space = Size(self.payload.space_required)
-        auto_swap = suggest_swap_size()
+        # Count swap only if the default partitioning scheme includes it.
+        auto_swap = suggest_swap_size() if self._is_swap_configured() else Size(0)
 
         log.debug("disk free: %s  fs free: %s  sw needs: %s  auto swap: %s",
                   disk_free, fs_free, sw_space, auto_swap)
@@ -794,9 +861,8 @@ class StorageSpoke(NormalSpoke, StorageCheckHandler):
         # Use the automatic partitioning and reset it.
         self._partitioning = create_partitioning(PARTITIONING_METHOD_AUTOMATIC)
 
-        self._partitioning.SetRequest(
+        self._partitioning.Request = \
             PartitioningRequest.to_structure(self._partitioning_request)
-        )
 
         # Reclaim space.
         disks = filter_disks_by_names(self._available_disks, self._selected_disks)

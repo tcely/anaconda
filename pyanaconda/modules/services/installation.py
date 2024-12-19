@@ -18,18 +18,27 @@
 import os
 from configparser import ConfigParser
 
-from pyanaconda.core import util
+from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import GRAPHICAL_TARGET, TEXT_ONLY_TARGET
+from pyanaconda.core.path import touch
+from pyanaconda.core.service import (
+    disable_service,
+    enable_service,
+    is_service_installed,
+)
 from pyanaconda.core.util import get_anaconda_version_string
-from pyanaconda.core.constants import TEXT_ONLY_TARGET, GRAPHICAL_TARGET
 from pyanaconda.modules.common.task import Task
 from pyanaconda.modules.services.constants import SetupOnBootAction
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
-__all__ = ["ConfigureInitialSetupTask", "ConfigureServicesTask",
-           "ConfigureSystemdDefaultTargetTask", "ConfigureDefaultDesktopTask"]
+__all__ = [
+    "ConfigureDefaultDesktopTask",
+    "ConfigureInitialSetupTask",
+    "ConfigureServicesTask",
+    "ConfigureSystemdDefaultTargetTask",
+]
 
 
 class ConfigureInitialSetupTask(Task):
@@ -54,33 +63,23 @@ class ConfigureInitialSetupTask(Task):
     def name(self):
         return "Configure Initial Setup"
 
-    def _unit_file_exists(self, service):
-        """Check if unit file corresponding to the service exists in the chroot.
-
-        The check works by taking the service name and checking if a file with
-        such name exists in the folder where system wide unit files are stored.
-
-        :param str service: name of the service (including the .service extension) to check
-        """
-        return os.path.exists(os.path.join(self._sysroot, "lib/systemd/system/", service))
-
     def _enable_service(self):
         """Enable the Initial Setup service."""
-        if self._unit_file_exists(self.INITIAL_SETUP_UNIT_NAME):
-            util.enable_service(self.INITIAL_SETUP_UNIT_NAME)
+        if is_service_installed(self.INITIAL_SETUP_UNIT_NAME, root=self._sysroot):
+            enable_service(self.INITIAL_SETUP_UNIT_NAME, root=self._sysroot)
         else:
             log.debug("Initial Setup will not be started on first boot, because "
                       "its unit file (%s) is not installed.", self.INITIAL_SETUP_UNIT_NAME)
 
     def _disable_service(self):
         """Disable the Initial Setup service."""
-        if self._unit_file_exists(self.INITIAL_SETUP_UNIT_NAME):
-            util.disable_service(self.INITIAL_SETUP_UNIT_NAME, root=self._sysroot)
+        if is_service_installed(self.INITIAL_SETUP_UNIT_NAME, root=self._sysroot):
+            disable_service(self.INITIAL_SETUP_UNIT_NAME, root=self._sysroot)
 
     def _enable_reconfig_mode(self):
         """Write the reconfig mode trigger file."""
         log.debug("Initial Setup reconfiguration mode will be enabled.")
-        util.touch(os.path.join(self._sysroot, "etc/reconfigSys"))
+        touch(os.path.join(self._sysroot, "etc/reconfigSys"))
 
     def run(self):
         if self._setup_on_boot == SetupOnBootAction.ENABLED:
@@ -173,11 +172,11 @@ class ConfigureServicesTask(Task):
     def run(self):
         for service_name in self._disabled_services:
             log.debug("Disabling service: %s.", service_name)
-            util.disable_service(service_name, root=self._sysroot)
+            disable_service(service_name, root=self._sysroot)
 
         for service_name in self._enabled_services:
             log.debug("Enabling service: %s.", service_name)
-            util.enable_service(service_name, root=self._sysroot)
+            enable_service(service_name, root=self._sysroot)
 
 
 class ConfigureSystemdDefaultTargetTask(Task):

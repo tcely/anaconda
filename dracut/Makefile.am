@@ -15,9 +15,12 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+SUBDIRS = dd
+
 dracutdir = $(prefix)/lib/dracut/modules.d/80$(PACKAGE_NAME)
 dist_dracut_SCRIPTS = module-setup.sh \
                       python-deps \
+                      kickstart_version.py \
                       anaconda-lib.sh \
                       parse-anaconda-options.sh \
                       parse-anaconda-repo.sh \
@@ -34,9 +37,9 @@ dist_dracut_SCRIPTS = module-setup.sh \
                       anaconda-copy-cmdline.sh \
                       anaconda-copy-dhclient.sh \
                       anaconda-copy-prefixdevname.sh \
-                      anaconda-copy-s390ccwconf.sh \
                       anaconda-ifcfg.sh \
                       anaconda-set-kernel-hung-timeout.sh \
+                      anaconda-error-reporting.sh \
                       fetch-kickstart-net.sh \
                       fetch-kickstart-disk \
                       fetch-updates-disk \
@@ -50,7 +53,8 @@ dist_dracut_SCRIPTS = module-setup.sh \
                       anaconda-depmod.sh \
                       find-net-intfs-by-driver \
                       anaconda-ifdown \
-                      driver_updates.py
+                      driver_updates.py \
+                      anaconda-nfsrepo-cleanup.sh
 
 dist_dracut_DATA = driver-updates@.service
 

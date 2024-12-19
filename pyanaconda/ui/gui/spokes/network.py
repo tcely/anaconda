@@ -18,41 +18,46 @@
 #
 
 import gi
+
 gi.require_version("Gtk", "3.0")
 gi.require_version("GObject", "2.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("Gio", "2.0")
 gi.require_version("NM", "1.0")
 
-from gi.repository import Gtk
-from gi.repository import GObject, Pango, Gio, NM
-
-from pyanaconda.core.i18n import _, N_, CN_
-from pyanaconda.flags import flags as anaconda_flags
-from pyanaconda.ui.communication import hubQ
-from pyanaconda.ui.gui import GUIObject
-from pyanaconda.ui.gui.spokes import NormalSpoke, StandaloneSpoke
-from pyanaconda.ui.gui.spokes.lib.network_secret_agent import register_secret_agent
-from pyanaconda.ui.categories.system import SystemCategory
-from pyanaconda.ui.gui.hubs.summary import SummaryHub
-from pyanaconda.ui.gui.utils import gtk_call_once, escape_markup, really_hide, really_show
-from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.util import startProgram
-from pyanaconda.core.process_watchers import PidWatcher
-from pyanaconda.core.constants import ANACONDA_ENVIRON
-from pyanaconda.core import glib
-from pyanaconda.modules.common.constants.services import NETWORK
-from pyanaconda.modules.common.structures.network import NetworkDeviceConfiguration
-from pyanaconda.modules.network.constants import NM_CONNECTION_TYPE_WIFI, \
-    NM_CONNECTION_TYPE_ETHERNET
-
-
-from pyanaconda import network
-
 from uuid import uuid4
 
+from gi.repository import NM, Gio, GObject, Gtk, Pango
+
+from pyanaconda import network
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import glib
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import ANACONDA_ENVIRON, NETWORK_CAPABILITY_TEAM
+from pyanaconda.core.i18n import CN_, N_, _
+from pyanaconda.core.process_watchers import PidWatcher
+from pyanaconda.core.util import startProgram
+from pyanaconda.flags import flags as anaconda_flags
+from pyanaconda.modules.common.constants.services import NETWORK
+from pyanaconda.modules.common.structures.network import NetworkDeviceConfiguration
+from pyanaconda.modules.network.constants import (
+    NM_CONNECTION_TYPE_ETHERNET,
+    NM_CONNECTION_TYPE_WIFI,
+)
+from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.common import FirstbootSpokeMixIn
+from pyanaconda.ui.communication import hubQ
+from pyanaconda.ui.gui import GUIObject
+from pyanaconda.ui.gui.hubs.summary import SummaryHub
+from pyanaconda.ui.gui.spokes import NormalSpoke, StandaloneSpoke
+from pyanaconda.ui.gui.spokes.lib.network_secret_agent import register_secret_agent
+from pyanaconda.ui.gui.utils import (
+    escape_markup,
+    gtk_call_once,
+    really_hide,
+    really_show,
+)
+
 log = get_module_logger(__name__)
 
 NM._80211ApFlags = getattr(NM, "80211ApFlags")
@@ -364,15 +369,28 @@ class NetworkControlBox(GObject.GObject):
         self.button_apply_hostname = self.builder.get_object("button_apply_hostname")
         self.button_apply_hostname.connect("clicked", self.on_apply_hostname)
 
+        if NETWORK_CAPABILITY_TEAM not in self._network_module.Capabilities:
+            self._remove_team_selection()
+
+    def _remove_team_selection(self):
+        log.debug("team functionality is not supported")
+        model = self.builder.get_object("liststore_add_device")
+        for row in model:
+            if row[1] == "team":
+                model.remove(row.iter)
+                return True
+        return False
+
     @property
     def vbox(self):
         return self.builder.get_object("networkControlBox_vbox")
 
     def _add_device_columns(self, treeview):
         rnd = Gtk.CellRendererPixbuf()
-        rnd.set_property("stock-size", Gtk.IconSize.DND)
+        rnd.set_property("stock-size", Gtk.IconSize.MENU)
         # TODO Gtk3 icon-name? (also at other places)
         col = Gtk.TreeViewColumn("Icon", rnd, **{"icon-name":0})
+        col.set_min_width(27)
         treeview.append_column(col)
 
         rnd = Gtk.CellRendererText()
@@ -383,6 +401,9 @@ class NetworkControlBox(GObject.GObject):
         treeview.append_column(col)
 
     def initialize(self):
+        if not self.client:
+            return
+
         self.client.connect("notify::%s" % NM.CLIENT_WIRELESS_ENABLED,
                             self.on_wireless_enabled)
         self.client.connect("notify::%s" % NM.CLIENT_STATE,
@@ -781,13 +802,13 @@ class NetworkControlBox(GObject.GObject):
             device = self.client.get_device_by_iface(dev_cfg.device_name)
             if device:
                 if device.get_state() == NM.DeviceState.UNAVAILABLE:
-                    icon_name = "network-wired-disconnected"
+                    icon_name = "network-wired-disconnected-symbolic"
                 else:
-                    icon_name = "network-wired"
+                    icon_name = "network-wired-symbolic"
             else:
-                icon_name = "network-wired-disconnected"
+                icon_name = "network-wired-disconnected-symbolic"
         elif dev_cfg.device_type == NM.DeviceType.WIFI:
-            icon_name = "network-wireless"
+            icon_name = "network-wireless-symbolic"
 
         return icon_name
 
@@ -930,7 +951,9 @@ class NetworkControlBox(GObject.GObject):
             device = self.client.get_device_by_iface(dev_cfg.device_name)
             if device:
                 vlanid = device.get_vlan_id()
-                parent = device.get_parent().get_iface()
+                parent = device.get_parent() or ""
+                if parent:
+                    parent = parent.get_iface()
             else:
                 con = self.client.get_connection_by_uuid(dev_cfg.connection_uuid)
                 if con:
@@ -1029,7 +1052,7 @@ class NetworkControlBox(GObject.GObject):
         if dev_type_str == "wired":
             # update icon according to device status
             img = self.builder.get_object("image_wired_device")
-            img.set_from_icon_name(self._dev_icon_name(dev_cfg), Gtk.IconSize.DIALOG)
+            img.set_from_icon_name(self._dev_icon_name(dev_cfg), Gtk.IconSize.LARGE_TOOLBAR)
 
         # TODO: is this necessary? Isn't it static from glade?
         device_type_label = _(self.device_type_name.get(dev_cfg.device_type, ""))
@@ -1121,6 +1144,9 @@ class NetworkControlBox(GObject.GObject):
         self.label_current_hostname.set_text(value)
 
     def disconnect_client_callbacks(self):
+        if not self.client:
+            return
+
         for cb in [self.on_wireless_enabled, self.on_nm_state_changed]:
             _try_disconnect(self.client, cb)
 
@@ -1459,12 +1485,14 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalSpoke):
                       "liststore_add_device"]
     mainWidgetName = "networkWindow"
     uiFile = "spokes/network.glade"
-    helpFile = "NetworkSpoke.xml"
-
     title = CN_("GUI|Spoke", "_Network & Host Name")
     icon = "network-transmit-receive-symbolic"
-
     category = SystemCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "network-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -1499,24 +1527,31 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalSpoke):
         # and we want to generate kickstart from device configurations
         # (persistent NM / config files configuration), instead of using original kickstart.
         self._network_module.NetworkDeviceConfigurationChanged()
-        self._network_module.SetHostname(self.network_control_box.hostname)
+        self._network_module.Hostname = self.network_control_box.hostname
 
         # if installation media or hdd aren't used and settings have changed
         # try if source is available
         if self.networking_changed:
             if self.payload and self.payload.needs_network:
                 if ANACONDA_ENVIRON in anaconda_flags.environs:
-                    log.debug("network spoke (apply), network configuration changed - restarting payload thread")
+                    log.debug(
+                        "network spoke (apply), network configuration changed - "
+                        "restarting payload thread"
+                    )
                     from pyanaconda.payload.manager import payloadMgr
-                    payloadMgr.restart_thread(self.payload, fallback=not anaconda_flags.automatedInstall, onlyOnChange=True)
+                    payloadMgr.start(self.payload, only_on_change=True)
                 else:
-                    log.debug("network spoke (apply), network configuration changed - "
-                              "skipping restart of payload thread, outside of Anaconda environment")
+                    log.debug(
+                        "network spoke (apply), network configuration changed - "
+                        "skipping restart of payload thread, outside of Anaconda environment"
+                    )
             else:
-                log.debug("network spoke (apply), network configuration changed - "
-                          "skipping restart of payload thread, payload does not need network")
-        self.networking_changed = False
+                log.debug(
+                    "network spoke (apply), network configuration changed - "
+                    "skipping restart of payload thread, payload does not need network"
+                )
 
+        self.networking_changed = False
         self.network_control_box.kill_nmce(msg="leaving network spoke")
 
     @property
@@ -1524,7 +1559,8 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalSpoke):
         # TODO: check also if source requires updates when implemented
         # If we can't configure network, don't require it
         return (not conf.system.can_configure_network
-                or self._network_module.GetActivatedInterfaces())
+                or self._network_module.IsConnecting
+                or self._network_module.Connected)
 
     @property
     def mandatory(self):
@@ -1542,7 +1578,7 @@ class NetworkSpoke(FirstbootSpokeMixIn, NormalSpoke):
         NormalSpoke.initialize(self)
         self.initialize_start()
         self.network_control_box.initialize()
-        if not conf.system.can_configure_network:
+        if not conf.system.can_configure_network or not self._nm_client:
             self.builder.get_object("network_config_vbox").set_no_show_all(True)
             self.builder.get_object("network_config_vbox").hide()
         else:
@@ -1622,6 +1658,11 @@ class NetworkStandaloneSpoke(StandaloneSpoke):
     preForHub = SummaryHub
     priority = 10
 
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "network-pre-configuration"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._network_module = NETWORK.get_proxy()
@@ -1652,7 +1693,7 @@ class NetworkStandaloneSpoke(StandaloneSpoke):
         # and we want to generate kickstart from device configurations
         # (persistent NM / config files configuration), instead of using original kickstart.
         self._network_module.NetworkDeviceConfigurationChanged()
-        self._network_module.SetHostname(self.network_control_box.hostname)
+        self._network_module.Hostname = self.network_control_box.hostname
 
         self._now_available = self.completed
 
@@ -1662,7 +1703,7 @@ class NetworkStandaloneSpoke(StandaloneSpoke):
         if (not self.payload.is_ready() and not self._initially_available
             and self._now_available and self.payload.needs_network):
             from pyanaconda.payload.manager import payloadMgr
-            payloadMgr.restart_thread(self.payload, fallback=not anaconda_flags.automatedInstall)
+            payloadMgr.start(self.payload)
 
         self.network_control_box.kill_nmce(msg="leaving standalone network spoke")
         self.network_control_box.disconnect_client_callbacks()
@@ -1670,7 +1711,8 @@ class NetworkStandaloneSpoke(StandaloneSpoke):
     @property
     def completed(self):
         return (not conf.system.can_configure_network
-                or self._network_module.GetActivatedInterfaces()
+                or self._network_module.Connected
+                or self._network_module.IsConnecting
                 or not (self.payload.source_type != conf.payload.default_source
                         and self.payload.needs_network))
 

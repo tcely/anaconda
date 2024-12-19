@@ -18,6 +18,7 @@
 #  Author(s):  Vendula Poncova <vponcova@redhat.com>
 #
 from enum import Enum
+
 from pyanaconda.core.configuration.base import Section
 
 
@@ -74,13 +75,18 @@ class SystemSection(Section):
         return self._is_boot_iso
 
     @property
+    def can_start_compositor(self):
+        """Can we start our own Wayland session?"""
+        return self._is_boot_iso
+
+    @property
     def can_switch_tty(self):
         """Can we change the foreground virtual terminal?"""
         return self._is_boot_iso
 
     @property
     def can_audit(self):
-        """Can we run the audit daemon?"""
+        """Can we control auditing?"""
         return self._is_boot_iso
 
     @property
@@ -143,16 +149,6 @@ class SystemSection(Section):
         return self._is_boot_iso or self._is_booted_os
 
     @property
-    def can_detect_unsupported_hardware(self):
-        """Can we try to detect unsupported hardware?"""
-        return self._get_option("can_detect_unsupported_hardware", bool)
-
-    @property
-    def can_detect_support_removed(self):
-        """Can we try to detect removed support for hardware"""
-        return self._get_option("can_detect_support_removed", bool)
-
-    @property
     def can_detect_enabled_smt(self):
         """Can we try to detect enabled SMT?"""
         return self._get_option("can_detect_enabled_smt", bool)
@@ -178,6 +174,16 @@ class SystemSection(Section):
         return self._is_boot_iso
 
     @property
-    def provides_web_browser(self):
-        """Can we redirect users to web pages?"""
+    def provides_liveuser(self):
+        """Is the user `liveuser` available?"""
         return self._is_live_os
+
+    @property
+    def can_use_driver_disks(self):
+        """Can the system use driver disks?"""
+        return self._is_boot_iso
+
+    @property
+    def supports_web_ui(self):
+        """Can we run Web UI on this system?"""
+        return self._is_boot_iso or self._is_live_os

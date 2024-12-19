@@ -30,46 +30,12 @@ class UserInterfaceSection(Section):
         return self._get_option("custom_stylesheet", str)
 
     @property
-    def help_directory(self):
-        """The path to a directory with help files."""
-        return self._get_option("help_directory", str)
-
-    @property
-    def default_help_pages(self):
-        """Default help pages for TUI, GUI and Live OS."""
-        values = self._get_option("default_help_pages", str).split()
-
-        if not values:
-            return "", "", ""
-
-        if len(values) != 3:
-            raise ValueError("Invalid number of values: {}".format(values))
-
-        return tuple(values)
-
-    @property
-    def blivet_gui_supported(self):
-        """Is the partitioning with blivet-gui supported?"""
-        return self._get_option("blivet_gui_supported", bool)
-
-    @property
     def hidden_spokes(self):
         """A list of spokes to hide in UI.
 
         :return: a list of strings
         """
         return self._get_option("hidden_spokes", str).split()
-
-    @property
-    def decorated_window(self):
-        """Run GUI installer in a decorated window.
-
-        By default, the window is not decorated, so it doesn't
-        have a title bar, resize controls, etc.
-
-        :return: True or False
-        """
-        return self._get_option("decorated_window", bool)
 
     @property
     def can_change_root(self):
@@ -155,3 +121,7 @@ class UserInterfaceSection(Section):
 
         if "quality" not in attrs:
             raise ValueError("The minimal quality is not specified.")
+
+    @property
+    def show_kernel_options(self):
+        return self._get_option("show_kernel_options", bool)

@@ -16,23 +16,32 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+from simpleline.render.containers import ListColumnContainer
+from simpleline.render.screen import InputState
+from simpleline.render.widgets import CheckboxWidget, EntryWidget
+
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.core.constants import FIRSTBOOT_ENVIRON, PASSWORD_SET, PASSWORD_POLICY_USER
-from pyanaconda.flags import flags
+from pyanaconda.core.constants import (
+    FIRSTBOOT_ENVIRON,
+    PASSWORD_POLICY_USER,
+    PASSWORD_SET,
+)
 from pyanaconda.core.i18n import N_, _
 from pyanaconda.core.regexes import GECOS_VALID
+from pyanaconda.core.users import check_grouplist, check_username, guess_username
+from pyanaconda.flags import flags
 from pyanaconda.modules.common.constants.services import USERS
 from pyanaconda.modules.common.util import is_module_available
 from pyanaconda.ui.categories.user_settings import UserSettingsCategory
 from pyanaconda.ui.common import FirstbootSpokeMixIn
-from pyanaconda.ui.tui.spokes import NormalTUISpoke
-from pyanaconda.ui.tui.tuiobject import Dialog, PasswordDialog, report_if_failed, report_check_func
 from pyanaconda.ui.lib.users import get_user_list, set_user_list
-from pyanaconda.core.users import guess_username, check_username, check_grouplist
-
-from simpleline.render.screen import InputState
-from simpleline.render.containers import ListColumnContainer
-from simpleline.render.widgets import CheckboxWidget, EntryWidget
+from pyanaconda.ui.tui.spokes import NormalTUISpoke
+from pyanaconda.ui.tui.tuiobject import (
+    Dialog,
+    PasswordDialog,
+    report_check_func,
+    report_if_failed,
+)
 
 __all__ = ["UserSpoke"]
 
@@ -45,8 +54,12 @@ class UserSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
        .. inheritance-diagram:: UserSpoke
           :parts: 3
     """
-    helpFile = "UserSpoke.txt"
     category = UserSettingsCategory
+
+    @staticmethod
+    def get_screen_id():
+        """Return a unique id of this UI screen."""
+        return "user-configuration"
 
     @classmethod
     def should_run(cls, environment, data):
@@ -144,6 +157,7 @@ class UserSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
                     title=_("Password"),
                     policy_name=PASSWORD_POLICY_USER
                 )
+                password_dialog.username = self.user.name
                 if self.user.password:
                     entry = EntryWidget(password_dialog.title, _(PASSWORD_SET))
                 else:
@@ -223,8 +237,15 @@ class UserSpoke(FirstbootSpokeMixIn, NormalTUISpoke):
 
     @property
     def mandatory(self):
-        """Only mandatory if no admin user has been requested."""
-        return not self._users_module.CheckAdminUserExists()
+        """The spoke is mandatory only if some input is missing.
+
+        Possible reasons to be mandatory:
+        - No admin user has been created
+        - Password has been requested but not entered
+        """
+        return (not self._users_module.CheckAdminUserExists() or
+                (self._use_password and not bool(self.user.password or
+                                                 self.user.is_crypted)))
 
     @property
     def status(self):

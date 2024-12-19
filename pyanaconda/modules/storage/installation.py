@@ -17,27 +17,29 @@
 # License and may only be used or replicated with the express permission of
 # Red Hat, Inc.
 #
+import itertools
 import os
-import parted
-
+import shutil
 from datetime import timedelta
 from time import sleep
 
-from blivet import callbacks as blivet_callbacks, util as blivet_util, arch
-from blivet.errors import FSResizeError, FormatResizeError, StorageError
+import parted
+from blivet import arch, blockdev
+from blivet import callbacks as blivet_callbacks
+from blivet import util as blivet_util
+from blivet.devicelibs.lvm import HAVE_LVMDEVICES
+from blivet.errors import FormatResizeError, FSResizeError, StorageError
 from blivet.util import get_current_entropy
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.core.i18n import _
 from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.modules.common.constants.objects import ISCSI, FCOE, ZFCP
+from pyanaconda.core.i18n import _
+from pyanaconda.core.path import make_directories
+from pyanaconda.core.util import execWithRedirect, join_paths
+from pyanaconda.modules.common.constants.objects import FCOE, ISCSI, NVME
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.errors.installation import StorageInstallationError
 from pyanaconda.modules.common.task import Task
-
-import gi
-gi.require_version("BlockDev", "2.0")
-from gi.repository import BlockDev as blockdev
 
 log = get_module_logger(__name__)
 
@@ -281,16 +283,18 @@ class WriteConfigurationTask(Task):
         storage.make_mtab()
         storage.fsset.write()
 
+        self._write_lvm_devices_file(self._storage, sysroot)
+
         iscsi_proxy = STORAGE.get_proxy(ISCSI)
         iscsi_proxy.WriteConfiguration()
 
         fcoe_proxy = STORAGE.get_proxy(FCOE)
         fcoe_proxy.WriteConfiguration()
 
-        zfcp_proxy = STORAGE.get_proxy(ZFCP)
-        zfcp_proxy.WriteConfiguration()
+        nvme_proxy = STORAGE.get_proxy(NVME)
+        nvme_proxy.WriteConfiguration()
 
-        self._write_dasd_conf(storage, sysroot)
+        self._write_s390_device_config(sysroot)
 
     def _write_escrow_packets(self, storage, sysroot):
         """Write the escrow packets.
@@ -327,46 +331,49 @@ class WriteConfigurationTask(Task):
 
         log.debug("escrow: write_escrow_packets done")
 
-    def _write_dasd_conf(self, storage, sysroot):
-        """Write DASD configuration to sysroot.
+    @staticmethod
+    def _write_lvm_devices_file(storage, sysroot):
+        """Create the LVM devices file for the target system.
 
-        Write /etc/dasd.conf to target system for all DASD devices
-        configured during installation.
+        Adds all present PVs according to https://bugzilla.redhat.com/show_bug.cgi?id=2011329#c9
+        The file is located at /etc/lvm/devices/system.devices
 
-        :param storage: the storage object
+        :param Blivet storage: instance of Blivet or a subclass
+        :param str sysroot: path to the target OS installation
+        """
+        if conf.target.is_image:
+            log.debug("Don't write the LVM devices file during image installation.")
+            return
+
+        if not HAVE_LVMDEVICES:
+            return
+
+        for device in itertools.chain(storage.devices, storage.devicetree._hidden):
+            if device.format and device.format.type == "lvmpv":
+                device.format.lvmdevices_add()
+
+        in_filename = "/etc/lvm/devices/system.devices"
+        out_filename = join_paths(sysroot, in_filename)
+
+        if os.path.exists(in_filename):
+            make_directories(os.path.dirname(out_filename))
+            shutil.copyfile(in_filename, out_filename)
+
+    def _write_s390_device_config(self, sysroot):
+        """Copy entire persistent config of any s390 devices to sysroot.
+
+        This includes config imported from initrd as well as anything the user
+        configured via the installer user interface.
+
         :param sysroot: a path to the target OS installation
         """
-        dasds = [d for d in storage.devices if d.type == "dasd"]
-        dasds.sort(key=lambda d: d.name)
-        if not (arch.is_s390() and dasds):
-            return
-
-        with open(os.path.realpath(sysroot + "/etc/dasd.conf"), "w") as f:
-            for dasd in dasds:
-                fields = [dasd.busid] + dasd.get_opts()
-                f.write("%s\n" % " ".join(fields),)
-
-        # check for hyper PAV aliases; they need to get added to dasd.conf as well
-        sysfs = "/sys/bus/ccw/drivers/dasd-eckd"
-
-        # in the case that someone is installing with *only* FBA DASDs,the above
-        # sysfs path will not exist; so check for it and just bail out of here if
-        # that's the case
-        if not os.path.exists(sysfs):
-            return
-
-        # this does catch every DASD, even non-aliases, but we're only going to be
-        # checking for a very specific flag, so there won't be any duplicate entries
-        # in dasd.conf
-        devs = [d for d in os.listdir(sysfs) if d.startswith("0.0")]
-        with open(os.path.realpath(sysroot + "/etc/dasd.conf"), "a") as f:
-            for d in devs:
-                aliasfile = "%s/%s/alias" % (sysfs, d)
-                with open(aliasfile, "r") as falias:
-                    alias = falias.read().strip()
-
-                # if alias == 1, then the device is an alias; otherwise it is a
-                # normal dasd (alias == 0) and we can skip it, since it will have
-                # been added to dasd.conf in the above block of code
-                if alias == "1":
-                    f.write("%s\n" % d)
+        if arch.is_s390():
+            execWithRedirect("chzdev",
+                             ["--export", "/tmp/zdev.config",
+                              "--all", "--type", "--persistent",
+                              "--verbose"])
+            execWithRedirect("chzdev",
+                             ["--import", "/tmp/zdev.config",
+                              "--persistent",
+                              "--yes", "--no-root-update", "--force", "--verbose",
+                              "--base", "/etc=%s/etc" % sysroot])

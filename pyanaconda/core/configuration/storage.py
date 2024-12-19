@@ -20,9 +20,12 @@
 from enum import Enum
 
 from blivet.size import Size
-
-from pykickstart.constants import AUTOPART_TYPE_PLAIN, AUTOPART_TYPE_BTRFS, AUTOPART_TYPE_LVM, \
-    AUTOPART_TYPE_LVM_THINP
+from pykickstart.constants import (
+    AUTOPART_TYPE_BTRFS,
+    AUTOPART_TYPE_LVM,
+    AUTOPART_TYPE_LVM_THINP,
+    AUTOPART_TYPE_PLAIN,
+)
 
 from pyanaconda.core.configuration.base import Section
 from pyanaconda.core.configuration.utils import split_name_and_attributes
@@ -51,19 +54,9 @@ class StorageSection(Section):
     """The Storage section."""
 
     @property
-    def dmraid(self):
-        """Enable dmraid usage during the installation."""
-        return self._get_option("dmraid", bool)
-
-    @property
     def ibft(self):
         """Enable iBFT usage during the installation."""
         return self._get_option("ibft", bool)
-
-    @property
-    def gpt(self):
-        """Do you prefer creation of GPT disk labels?"""
-        return self._get_option("gpt", bool)
 
     @property
     def multipath_friendly_names(self):
@@ -73,6 +66,14 @@ class StorageSection(Section):
         during the installation.
         """
         return self._get_option("multipath_friendly_names", bool)
+
+    @property
+    def gpt_discoverable_partitions(self):
+        """Use GPT discoverable partition type IDs, if possible.
+
+        Tell Blivet to do this.
+        """
+        return self._get_option("gpt_discoverable_partitions", bool)
 
     @property
     def allow_imperfect_devices(self):
@@ -93,6 +94,21 @@ class StorageSection(Section):
         For example: "zstd:1"
         """
         return self._get_option("btrfs_compression", str) or None
+
+    @property
+    def disk_label_type(self):
+        """Default disk label type.
+
+        Valid values:
+
+          gpt  Prefer creation of GPT disk labels.
+          mbr  Prefer creation of MBR disk labels.
+
+        If no type is specified, we will use whatever Blivet uses by default.
+
+        :return: a string with the disk label type
+        """
+        return self._get_option("disk_label_type", str)
 
     @property
     def file_system_type(self):
@@ -151,6 +167,7 @@ class StorageSection(Section):
             min        The size will grow from min size to max size.
             max        The max size is unlimited by default.
             free       The required available space.
+            btrfs      The mount point will be created only for the Btrfs scheme
 
         :return: a list of dictionaries with mount point attributes
         """
@@ -170,7 +187,10 @@ class StorageSection(Section):
         attrs = {"name": name}
 
         for name, value in raw_attrs.items():
-            if value and name in ("size", "min", "max", "free"):
+            if not value and name in ("btrfs", ):
+                # Handle a boolean attribute.
+                attrs[name] = True
+            elif value and name in ("size", "min", "max", "free"):
                 # Handle a size attribute.
                 attrs[name] = Size(value)
             else:

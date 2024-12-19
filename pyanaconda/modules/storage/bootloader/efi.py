@@ -18,20 +18,32 @@
 import os
 import re
 
+from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core import util
+from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.i18n import _
+from pyanaconda.core.kernel import kernel_arguments
+from pyanaconda.core.path import join_paths
+from pyanaconda.core.product import get_product_name
 from pyanaconda.modules.storage.bootloader.base import BootLoaderError
 from pyanaconda.modules.storage.bootloader.grub2 import GRUB2
-from pyanaconda.core import util
-from pyanaconda.core.kernel import kernel_arguments
-from pyanaconda.core.configuration.anaconda import conf
-from pyanaconda.product import productName
+from pyanaconda.modules.storage.bootloader.systemd import SystemdBoot
 
-from pyanaconda.anaconda_loggers import get_module_logger
 log = get_module_logger(__name__)
 
-__all__ = ["EFIBase", "EFIGRUB", "Aarch64EFIGRUB", "ArmEFIGRUB", "MacEFIGRUB"]
+__all__ = [
+    "EFIGRUB",
+    "RISCV64EFIGRUB",
+    "Aarch64EFIGRUB",
+    "Aarch64EFISystemdBoot",
+    "ArmEFIGRUB",
+    "EFIBase",
+    "EFISystemdBoot",
+    "X64EFISystemdBoot"
+]
 
 
-class EFIBase(object):
+class EFIBase:
     """A base class for EFI-based boot loaders."""
 
     @property
@@ -41,6 +53,16 @@ class EFIBase(object):
     @property
     def _efi_config_dir(self):
         return "efi/EFI/{}".format(conf.bootloader.efi_dir)
+
+    def get_fw_platform_size(self):
+        try:
+            with open("/sys/firmware/efi/fw_platform_size", "r") as f:
+                value = f.readline().strip()
+        except OSError:
+            log.info("Reading /sys/firmware/efi/fw_platform_size failed, "
+                     "defaulting to 64-bit install.")
+            value = '64'
+        return value
 
     def efibootmgr(self, *args, **kwargs):
         if not conf.target.is_hardware:
@@ -69,8 +91,10 @@ class EFIBase(object):
         boot_disk = partition.disk
         boot_part_num = str(partition.parted_partition.number)
 
+        create_method = "-C" if self.keep_boot_order else "-c" # pylint: disable=no-member
+
         rc = self.efibootmgr(
-            "-c", "-w", "-L", productName.split("-")[0],  # pylint: disable=no-member
+            create_method, "-w", "-L", get_product_name().split("-")[0],  # pylint: disable=no-member
             "-d", boot_disk.path, "-p", boot_part_num,
             "-l", self.efi_dir_as_efifs_dir + self._efi_binary,  # pylint: disable=no-member
             root=conf.target.system_root
@@ -91,10 +115,12 @@ class EFIBase(object):
         for line in buf.splitlines():
             try:
                 (slot, _product) = line.split(None, 1)
+                # keep only the name, if verbose output is default in this version
+                _product = _product.split("\t")[0]
             except ValueError:
                 continue
 
-            if _product == productName.split("-")[0]:           # pylint: disable=no-member
+            if _product == get_product_name().split("-")[0]:           # pylint: disable=no-member
                 slot_id = slot[4:8]
                 # slot_id is hex, we can't use .isint and use this regex:
                 if not re.match("^[0-9a-fA-F]+$", slot_id):
@@ -130,7 +156,7 @@ class EFIBase(object):
 class EFIGRUB(EFIBase, GRUB2):
     """EFI GRUBv2"""
     _packages32 = [ "grub2-efi-ia32", "shim-ia32" ]
-    _packages_common = [ "efibootmgr", "grub2-tools" ]
+    _packages_common = ["efibootmgr", "grub2-tools", "grub2-tools-extra", "grubby" ]
     stage2_is_valid_stage1 = False
     stage2_bootable = False
 
@@ -140,14 +166,7 @@ class EFIGRUB(EFIBase, GRUB2):
         super().__init__()
         self._packages64 = [ "grub2-efi-x64", "shim-x64" ]
 
-        try:
-            f = open("/sys/firmware/efi/fw_platform_size", "r")
-            value = f.readline().strip()
-        except OSError:
-            log.info("Reading /sys/firmware/efi/fw_platform_size failed, "
-                     "defaulting to 64-bit install.")
-            value = '64'
-        if value == '32':
+        if self.get_fw_platform_size() == '32':
             self._is_32bit_firmware = True
 
     @property
@@ -193,13 +212,75 @@ class EFIGRUB(EFIBase, GRUB2):
         super().write_config()
 
 
+class EFISystemdBoot(EFIBase, SystemdBoot):
+    """EFI Systemd-boot"""
+    _packages_common = ["efibootmgr", "systemd-udev", "systemd-boot", "sdubby"]
+    _packages64 = []
+
+    def __init__(self):
+        super().__init__()
+
+        if self.get_fw_platform_size() == '32':
+            # not supported try a different bootloader
+            log.error("efi.py: systemd-boot is not supported on 32-bit platforms")
+            raise BootLoaderError(_("Systemd-boot is not supported on this platform"))
+
+    @property
+    def packages(self):
+        return self._packages64 + self._packages_common
+
+    @property
+    def efi_config_file(self):
+        """ Full path to EFI configuration file. """
+        return join_paths(self.efi_config_dir, self._config_file)
+
+    def check(self):
+        """Verify the bootloader configuration."""
+        # Force the resolution order to run the systemd-boot check.
+        return SystemdBoot.check(self) and EFIBase.check(self)
+
+    def write_config(self):
+        """ Write the config settings to config file (ex: grub.cfg) not needed for systemd. """
+        config_path = join_paths(conf.target.system_root, self.efi_config_file)
+
+        log.info("efi.py: (systemd) write_config systemd : %s ", config_path)
+
+        super().write_config()
+
+    def install(self, args=None):
+        log.info("efi.py: (systemd) install")
+        # force the resolution order, we don't want to:
+        #   efibootmgr remove old "fedora"
+        #   or use efiboot mgr to install a new one
+        # lets just use `bootctl install` directly.
+        # which will fix the efi boot variables too.
+        SystemdBoot.install(self)
+
+
 class Aarch64EFIGRUB(EFIGRUB):
     _serial_consoles = ["ttyAMA", "ttyS"]
     _efi_binary = "\\shimaa64.efi"
 
     def __init__(self):
         super().__init__()
-        self._packages64 = ["grub2-efi-aa64", "shim-aa64"]
+        self._packages64 = ["grub2-efi-aa64", "shim-aa64", "grub2-efi-aa64-cdboot"]
+
+
+class Aarch64EFISystemdBoot(EFISystemdBoot):
+    _serial_consoles = ["ttyAMA", "ttyS"]
+    _efi_binary = "\\systemd-bootaa64.efi"
+
+    def __init__(self):
+        super().__init__()
+        self._packages64 = []
+
+class X64EFISystemdBoot(EFISystemdBoot):
+    _efi_binary = "\\systemd-bootx64.efi"
+
+    def __init__(self):
+        super().__init__()
+        self._packages64 = []
+
 
 
 class ArmEFIGRUB(EFIGRUB):
@@ -212,30 +293,10 @@ class ArmEFIGRUB(EFIGRUB):
         self._is_32bit_firmware = True
 
 
-class MacEFIGRUB(EFIGRUB):
+class RISCV64EFIGRUB(EFIGRUB):
+    _serial_consoles = ["ttyS"]
+    _efi_binary = "\\grubriscv64.efi"
+
     def __init__(self):
         super().__init__()
-        self._packages64.extend(["grub2-tools-efi", "mactel-boot"])
-
-    def mactel_config(self):
-        if os.path.exists(conf.target.system_root + "/usr/libexec/mactel-boot-setup"):
-            rc = util.execInSysroot("/usr/libexec/mactel-boot-setup", [])
-            if rc:
-                log.error("failed to configure Mac boot loader")
-
-    def install(self, args=None):
-        super().install()
-        self.mactel_config()
-
-    def is_valid_stage1_device(self, device, early=False):
-        valid = super().is_valid_stage1_device(device, early)
-
-        # Make sure we don't pick the OSX root partition
-        if valid and getattr(device.format, "name", "") != "Linux HFS+ ESP":
-            valid = False
-
-        if hasattr(device.format, "name"):
-            log.debug("device.format.name is '%s'", device.format.name)
-
-        log.debug("MacEFIGRUB.is_valid_stage1_device(%s) returning %s", device.name, valid)
-        return valid
+        self._packages64 = ["grub2-efi-riscv64"]

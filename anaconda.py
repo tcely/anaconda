@@ -23,12 +23,15 @@
 # ...still messy (2013-07-12)
 # A lot less messy now. :) (2016-10-13)
 
-import os
 import atexit
+import os
+import signal
 import sys
 import time
-import signal
+
 import pid
+
+from pyanaconda.modules.common.structures.rescue import RescueData
 
 
 def exitHandler(rebootData):
@@ -36,9 +39,13 @@ def exitHandler(rebootData):
     from pyanaconda.core.process_watchers import WatchProcesses
     WatchProcesses.unwatch_all_processes()
 
-    if flags.usevnc:
-        vnc.shutdownServer()
+    # pylint: disable=possibly-used-before-assignment
+    # pylint: disable=used-before-assignment
+    if flags.use_rd:
+        gnome_remote_desktop.shutdown_server()
 
+    # pylint: disable=possibly-used-before-assignment
+    # pylint: disable=used-before-assignment
     if "nokill" in kernel_arguments:
         util.vtActivate(1)
         print("anaconda halting due to nokill flag.")
@@ -46,29 +53,29 @@ def exitHandler(rebootData):
         while True:
             time.sleep(10000)
 
-    if anaconda.dbus_inhibit_id:
-        from pyanaconda.screensaver import uninhibit_screensaver
-        uninhibit_screensaver(anaconda.dbus_session_connection, anaconda.dbus_inhibit_id)
-        anaconda.dbus_inhibit_id = None
+    from pyanaconda.screensaver import uninhibit_screensaver
+    uninhibit_screensaver()
 
     # Unsetup the payload, which most usefully unmounts live images
+    # pylint: disable=possibly-used-before-assignment
     if anaconda.payload:
         anaconda.payload.unsetup()
 
     # Collect all optical media.
     from pyanaconda.modules.common.constants.objects import DEVICE_TREE
     from pyanaconda.modules.common.structures.storage import DeviceData
-    device_tree = STORAGE.get_proxy(DEVICE_TREE)
+    device_tree = STORAGE.get_proxy(DEVICE_TREE)  # pylint: disable=possibly-used-before-assignment
     optical_media = []
 
-    for device_name in device_tree.FindOpticalMedia():
+    for device_id in device_tree.FindOpticalMedia():
         device_data = DeviceData.from_structure(
-            device_tree.GetDeviceData(device_name)
+            device_tree.GetDeviceData(device_id)
         )
         optical_media.append(device_data.path)
 
     # Tear down the storage module.
     storage_proxy = STORAGE.get_proxy()
+    from pyanaconda.modules.common.task import sync_run_task  # pylint: disable=redefined-outer-name
 
     for task_path in storage_proxy.TeardownWithTasks():
         task_proxy = STORAGE.get_proxy(task_path)
@@ -78,28 +85,29 @@ def exitHandler(rebootData):
     anaconda.dbus_launcher.stop()
 
     # Clean up the PID file
-    if pidfile:
+    if pidfile:  # pylint: disable=possibly-used-before-assignment
         pidfile.close()
 
     # Reboot the system.
-    if conf.system.can_reboot:
+    if conf.system.can_reboot:  # pylint: disable=possibly-used-before-assignment
         from pykickstart.constants import KS_SHUTDOWN, KS_WAIT
 
         if flags.eject or rebootData.eject:
             for device_path in optical_media:
-                if util.get_mount_paths(device_path):
+                # pylint: disable=possibly-used-before-assignment
+                if path.get_mount_paths(device_path):
                     util.dracut_eject(device_path)
 
         if flags.kexec:
-            util.execWithRedirect("systemctl", ["--no-wall", "kexec"])
+            util.execWithRedirect("systemctl", ["--no-wall", "kexec"], do_preexec=False)
             while True:
                 time.sleep(10000)
         elif rebootData.action == KS_SHUTDOWN:
-            util.execWithRedirect("systemctl", ["--no-wall", "poweroff"])
+            util.execWithRedirect("systemctl", ["--no-wall", "poweroff"], do_preexec=False)
         elif rebootData.action == KS_WAIT:
-            util.execWithRedirect("systemctl", ["--no-wall", "halt"])
+            util.execWithRedirect("systemctl", ["--no-wall", "halt"], do_preexec=False)
         else:  # reboot action is KS_REBOOT or None
-            util.execWithRedirect("systemctl", ["--no-wall", "reboot"])
+            util.execWithRedirect("systemctl", ["--no-wall", "reboot"], do_preexec=False)
 
 
 def parse_arguments(argv=None, boot_cmdline=None):
@@ -107,16 +115,14 @@ def parse_arguments(argv=None, boot_cmdline=None):
 
     :param argv: command like arguments
     :param boot_cmdline: boot options
-    :returns: namespace of parsed options and a list of deprecated
-              anaconda options that have been found
+    :returns: namespace of parsed options.
     """
     from pyanaconda.argument_parsing import getArgumentParser
     from pyanaconda.core.util import get_anaconda_version_string
 
     ap = getArgumentParser(get_anaconda_version_string(), boot_cmdline)
 
-    namespace = ap.parse_args(argv, boot_cmdline=boot_cmdline)
-    return (namespace, ap.removed_no_inst_bootargs)
+    return ap.parse_args(argv, boot_cmdline=boot_cmdline)
 
 
 def setup_environment():
@@ -145,12 +151,24 @@ def setup_environment():
     if "LD_PRELOAD" in os.environ:
         del os.environ["LD_PRELOAD"]
 
+    # Go ahead and set $WAYLAND_DISPLAY whether we're going to use Wayland or not
+    if "WAYLAND_DISPLAY" in os.environ:
+        flags.preexisting_wayland = True
+    else:
+        os.environ["WAYLAND_DISPLAY"] = constants.WAYLAND_SOCKET_NAME  # pylint: disable=possibly-used-before-assignment
+
     # Go ahead and set $DISPLAY whether we're going to use X or not
     if "DISPLAY" in os.environ:
         flags.preexisting_x11 = True
     else:
-        os.environ["DISPLAY"] = ":%s" % constants.X_DISPLAY_NUMBER
+        # This line is too long, unfortunately this disable won't work when used on above line
+        # pylint: disable=used-before-assignment
+        os.environ["DISPLAY"] = ":%s" % constants.X_DISPLAY_NUMBER  # pylint: disable=possibly-used-before-assignment
 
+    # We mostly don't run from bash, so it won't load the file for us, and libreport will then
+    # show vi instead of nano. Resolves https://bugzilla.redhat.com/show_bug.cgi?id=1889674
+    if "EDITOR" not in os.environ and os.path.isfile("/etc/profile.d/nano-default-editor.sh"):
+        os.environ["EDITOR"] = "/usr/bin/nano"
 
 if __name__ == "__main__":
     # check if the CLI help is requested and return it at once,
@@ -163,6 +181,10 @@ if __name__ == "__main__":
         log = logging.getLogger("anaconda.main")
         log.addHandler(logging.StreamHandler(stream=sys.stdout))
         parse_arguments()
+
+    if os.geteuid() != 0:
+        print("anaconda must be run as root.")
+        sys.exit(1)
 
     print("Starting installer, one moment...")
 
@@ -177,23 +199,22 @@ if __name__ == "__main__":
     from pyanaconda.core.constants import ADDON_PATHS
     sys.path.extend(ADDON_PATHS)
 
-    # init threading before Gtk can do anything and before we start using threads
-    from pyanaconda.threading import AnacondaThread, threadMgr
-    from pyanaconda.core.i18n import _
-    from pyanaconda.core import util, constants
     from pyanaconda import startup_utils
+    from pyanaconda.core import constants, path, util
+    from pyanaconda.core.i18n import _
+    from pyanaconda.core.kernel import kernel_arguments
+    # init threading before Gtk can do anything and before we start using threads
+    from pyanaconda.core.threads import thread_manager
 
     # do this early so we can set flags before initializing logging
     from pyanaconda.flags import flags
-    from pyanaconda.core.kernel import kernel_arguments
-    (opts, removed_no_inst_args) = parse_arguments(boot_cmdline=kernel_arguments)
+    opts = parse_arguments(boot_cmdline=kernel_arguments)
 
     from pyanaconda.core.configuration.anaconda import conf
     conf.set_from_opts(opts)
 
     # Set up logging as early as possible.
-    from pyanaconda import anaconda_logging
-    from pyanaconda import anaconda_loggers
+    from pyanaconda import anaconda_loggers, anaconda_logging
     anaconda_logging.init(write_to_journal=conf.target.is_hardware)
     anaconda_logging.logger.setupVirtio(opts.virtiolog)
 
@@ -214,39 +235,20 @@ if __name__ == "__main__":
     log = anaconda_loggers.get_main_logger()
     stdout_log = anaconda_loggers.get_stdout_logger()
 
-    if os.geteuid() != 0:
-        stdout_log.error("anaconda must be run as root.")
-        sys.exit(1)
-
-    # check if input kickstart should be saved
-    if flags.nosave_input_ks:
-        log.warning("Input kickstart will not be saved to the installed system due to the nosave option.")
-        util.touch('/tmp/NOSAVE_INPUT_KS')
-
-    # check if logs should be saved
-    if flags.nosave_logs:
-        log.warning("Installation logs will not be saved to the installed system due to the nosave option.")
-        util.touch('/tmp/NOSAVE_LOGS')
-
     # see if we're on s390x and if we've got an ssh connection
     if startup_utils.prompt_for_ssh(opts):
         sys.exit(0)
 
     log.info("%s %s", sys.argv[0], util.get_anaconda_version_string(build_time_version=True))
+    # Do not exceed default 8K limit on message length in rsyslog
+    for log_line in util.get_image_packages_info(max_string_chars=8096-120):
+        log.debug("Image packages: %s", log_line)
 
     if opts.updates_url:
         log.info("Using updates from: %s", opts.updates_url)
 
-    # warn users that they should use inst. prefix all the time
-    for arg in removed_no_inst_args:
-        stdout_log.warning("Kernel boot argument '%s' detected. "
-                           "Did you want to use 'inst.%s' for the installer instead?",
-                           arg, arg)
-    if removed_no_inst_args:
-        stdout_log.warning("All Anaconda kernel boot arguments are now required to use "
-                           "'inst.' prefix!")
-
-    from pyanaconda import isys
+    # print errors encountered during boot
+    startup_utils.print_dracut_errors(stdout_log)
 
     util.ipmi_report(constants.IPMI_STARTED)
 
@@ -260,14 +262,26 @@ if __name__ == "__main__":
         util.ipmi_report(constants.IPMI_ABORTED)
         sys.exit(1)
 
-    from pyanaconda import vnc
-    from pyanaconda import kickstart
+    if (opts.images or opts.dirinstall) and not opts.ksfile:
+        stdout_log.error("--images and --dirinstall cannot be used without --kickstart")
+        util.ipmi_report(constants.IPMI_ABORTED)
+        sys.exit(1)
+
+    if opts.images or opts.dirinstall:
+        log.debug("Dir and image installations can run only in the non-interactive text mode.")
+        stdout_log.info("Enforcing the non-interactive text mode for dir and image installations.")
+        opts.display_mode = constants.DisplayModes.TUI
+        opts.noninteractive = True
+
     # we are past the --version and --help shortcut so we can import display &
     # startup_utils, which import Blivet, without slowing down anything critical
-    from pyanaconda import display
-    from pyanaconda import startup_utils
-    from pyanaconda import rescue
-    from pyanaconda import geoloc
+    from pyanaconda import (
+        display,
+        gnome_remote_desktop,
+        kickstart,
+        rescue,
+        startup_utils,
+    )
 
     # Print the usual "startup note" that contains Anaconda version
     # and short usage & bug reporting instructions.
@@ -276,21 +290,20 @@ if __name__ == "__main__":
 
     from pyanaconda.anaconda import Anaconda
     anaconda = Anaconda()
-    util.setup_translations()
 
     # reset python's default SIGINT handler
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, lambda num, frame: sys.exit(1))
 
-    # synchronously-delivered signals such as SIGSEGV and SIGILL cannot be
-    # handled properly from python, so install signal handlers from the C
-    # function in isys.
-    isys.installSyncSignalHandlers()
+    # synchronously-delivered signals such as SIGSEGV and SIGILL cannot be handled properly from
+    # Python, so install signal handlers from the faulthandler stdlib module.
+    import faulthandler
+    faulthandler.enable()
 
     setup_environment()
 
     # make sure we have /var/log soon, some programs fail to start without it
-    util.mkdirChain("/var/log")
+    path.make_directories("/var/log")
 
     # Create a PID file. The exit handler, installed later, will clean it up.
     pidfile = pid.PidFile(pidname='anaconda', register_term_signal_handler=False)
@@ -300,15 +313,15 @@ if __name__ == "__main__":
     except pid.PidFileError as e:
         log.error("Unable to create %s, exiting", pidfile.filename)
 
-        # If we had a $DISPLAY at start and zenity is available, we may be
-        # running in a live environment and we can display an error dialog.
+        # If we had a Wayland/X11 display at start and zenity is available, we may
+        # be running in a live environment and we can display an error dialog.
         # Otherwise just print an error.
-        if flags.preexisting_x11 and os.access("/usr/bin/zenity", os.X_OK):
+        preexisting_graphics = flags.preexisting_wayland or flags.preexisting_x11
+        if preexisting_graphics and os.access("/usr/bin/zenity", os.X_OK):
             # The module-level _() calls are ok here because the language may
             # be set from the live environment in this case, and anaconda's
             # language setup hasn't happened yet.
-            # FIXME: change the line below back to found-_-in-module-class once it works in pylint
-            # pylint: disable=W9902
+            # pylint: disable=found-_-in-module-class
             util.execWithRedirect("zenity",
                                   ["--error", "--title", _("Unable to create PID file"), "--text",
                                    _("Anaconda is unable to create %s because the file"
@@ -335,12 +348,11 @@ if __name__ == "__main__":
 
     # set flags
     flags.rescue_mode = opts.rescue
-    flags.mpath = opts.mpath
     flags.eject = opts.eject
     flags.kexec = opts.kexec
 
     if opts.liveinst:
-        startup_utils.live_startup(anaconda)
+        startup_utils.live_startup()
 
     # Switch to tty1 on exception in case something goes wrong during X start.
     # This way if, for example, window manager doesn't start, we switch back to a
@@ -356,9 +368,10 @@ if __name__ == "__main__":
         sys.excepthook = _earlyExceptionHandler
 
     if conf.system.can_audit:
-        # auditd will turn into a daemon and exit. Ignore startup errors
+        # Turn off audit, if the environment is such that we can do that. Ignore errors, because
+        # auditctl is not a dependency and can be missing for other reasons.
         try:
-            util.execWithRedirect("/sbin/auditd", [])
+            util.execWithRedirect("auditctl", ["-e", "0"])
         except OSError:
             pass
 
@@ -387,17 +400,20 @@ if __name__ == "__main__":
 
     # Pick up any changes from interactive-defaults.ks that would
     # otherwise be covered by the dracut KS parser.
-    from pyanaconda.modules.common.constants.services import STORAGE
     from pyanaconda.modules.common.constants.objects import BOOTLOADER
+    from pyanaconda.modules.common.constants.services import RUNTIME, STORAGE
+
     bootloader_proxy = STORAGE.get_proxy(BOOTLOADER)
+    runtime_proxy = RUNTIME.get_proxy()
+    rescue_data = RescueData.from_structure(runtime_proxy.Rescue)
 
     if opts.leavebootorder:
-        bootloader_proxy.SetKeepBootOrder(True)
+        bootloader_proxy.KeepBootOrder = True
 
     if opts.nombr:
-        bootloader_proxy.SetKeepMBR(True)
+        bootloader_proxy.KeepMBR = True
 
-    if ksdata.rescue.rescue:
+    if rescue_data.rescue:
         flags.rescue_mode = True
 
     # reboot with kexec
@@ -405,7 +421,7 @@ if __name__ == "__main__":
         flags.kexec = True
 
     # Change the logging configuration based on the kickstart.
-    startup_utils.setup_logging_from_kickstart(ksdata)
+    startup_utils.setup_logging_from_kickstart()
 
     anaconda.ksdata = ksdata
 
@@ -413,8 +429,8 @@ if __name__ == "__main__":
     # it override from kickstart if/when X is initialized
     startup_utils.activate_keyboard(opts)
 
-    # Some post-install parts of anaconda are implemented as kickstart
-    # scripts.  Add those to the ksdata now.
+    # Users can supply post-install actions as kickstart scripts, independent of actual kickstart.
+    # Add those to the ksdata now.
     kickstart.appendPostScripts(ksdata)
 
     # Set up the UI context.
@@ -431,7 +447,11 @@ if __name__ == "__main__":
     startup_utils.initialize_locale(opts, text_mode=anaconda.tui_mode)
 
     # Initialize the network now, in case the display needs it
-    from pyanaconda.network import initialize_network, wait_for_connecting_NM_thread, wait_for_connected_NM
+    from pyanaconda.network import (
+        initialize_network,
+        wait_for_connected_NM,
+        wait_for_connecting_NM_thread,
+    )
 
     initialize_network()
     # If required by user, wait for connection before starting the installation.
@@ -440,25 +460,16 @@ if __name__ == "__main__":
         wait_for_connected_NM(timeout=opts.waitfornet)
 
     # In any case do some actions only after NM finishes its connecting.
-    threadMgr.add(AnacondaThread(name=constants.THREAD_WAIT_FOR_CONNECTING_NM,
-                                 target=wait_for_connecting_NM_thread))
+    thread_manager.add_thread(
+        name=constants.THREAD_WAIT_FOR_CONNECTING_NM,
+        target=wait_for_connecting_NM_thread
+    )
+
+    # Start the user instance of systemd and the session bus.
+    display.start_user_systemd()
 
     # now start the interface
     display.setup_display(anaconda, opts)
-    if anaconda.gui_startup_failed:
-        # we need to reinitialize the locale if GUI startup failed,
-        # as we might now be in text mode, which might not be able to display
-        # the characters from our current locale
-        startup_utils.reinitialize_locale(opts, text_mode=anaconda.tui_mode)
-
-    # we now know in which mode we are going to run so store the information
-    from pykickstart import constants as pykickstart_constants
-    display_mode_coversion_table = {
-        constants.DisplayModes.GUI: pykickstart_constants.DISPLAY_MODE_GRAPHICAL,
-        constants.DisplayModes.TUI: pykickstart_constants.DISPLAY_MODE_TEXT
-    }
-    ksdata.displaymode.displayMode = display_mode_coversion_table[anaconda.display_mode]
-    ksdata.displaymode.nonInteractive = not anaconda.interactive_mode
 
     # Initialize the default systemd target.
     startup_utils.initialize_default_systemd_target(text_mode=anaconda.tui_mode)
@@ -468,22 +479,11 @@ if __name__ == "__main__":
         flags.ksprompt = False
 
     # Set minimal ram size to the storage checker.
-    if anaconda.display_mode == constants.DisplayModes.GUI:
-        min_ram = isys.MIN_GUI_RAM
-    else:
-        min_ram = isys.MIN_RAM
-
-    from pyanaconda.modules.common.constants.objects import STORAGE_CHECKER
-    from dasbus.typing import get_variant, Int
-    storage_checker = STORAGE.get_proxy(STORAGE_CHECKER)
-    storage_checker.SetConstraint(
-        constants.STORAGE_MIN_RAM,
-        get_variant(Int, min_ram * 1024 * 1024)
-    )
+    startup_utils.set_storage_checker_minimal_ram_size(anaconda.display_mode)
 
     # Set the disk images.
-    from pyanaconda.modules.common.constants.objects import DISK_SELECTION
     from pyanaconda.argument_parsing import name_path_pairs
+    from pyanaconda.modules.common.constants.objects import DISK_SELECTION
     disk_select_proxy = STORAGE.get_proxy(DISK_SELECTION)
     disk_images = {}
 
@@ -496,29 +496,22 @@ if __name__ == "__main__":
         util.ipmi_abort(scripts=ksdata.scripts)
         sys.exit(1)
 
-    disk_select_proxy.SetDiskImages(disk_images)
+    disk_select_proxy.DiskImages = disk_images
 
     # Ignore disks labeled OEMDRV
     from pyanaconda.ui.lib.storage import ignore_oemdrv_disks
     ignore_oemdrv_disks()
 
-    # Ignore nvdimm devices.
-    from pyanaconda.ui.lib.storage import ignore_nvdimm_blockdevs
-    ignore_nvdimm_blockdevs()
-
     # Specify protected devices.
     from pyanaconda.modules.common.constants.services import STORAGE
-
-    protected_devices = anaconda.get_protected_devices(opts)
-    disk_select_proxy.SetProtectedDevices(protected_devices)
-
-    from pyanaconda.payload.manager import payloadMgr
 
     if not conf.target.is_directory:
         from pyanaconda.ui.lib.storage import reset_storage
 
-        threadMgr.add(AnacondaThread(name=constants.THREAD_STORAGE,
-                                     target=reset_storage))
+        thread_manager.add_thread(
+            name=constants.THREAD_STORAGE,
+            target=reset_storage
+        )
 
     # Initialize the system clock.
     startup_utils.initialize_system_clock()
@@ -543,34 +536,29 @@ if __name__ == "__main__":
     #   else currently talks to the Subscription DBus module,
     #   we only check if organization id & at least one activation
     #   key are available
-    from pyanaconda.modules.common.util import is_module_available
     from pyanaconda.modules.common.constants.services import SUBSCRIPTION
+    from pyanaconda.modules.common.util import is_module_available
+
     if is_module_available(SUBSCRIPTION):
-        from pyanaconda.ui.lib.subscription import org_keys_sufficient, register_and_subscribe
+        from pyanaconda.ui.lib.subscription import (
+            kickstart_error_handler,
+            org_keys_sufficient,
+            register_and_subscribe,
+        )
         if org_keys_sufficient():
-            threadMgr.add(
-                AnacondaThread(
-                    name=constants.THREAD_SUBSCRIPTION,
-                    target=register_and_subscribe,
-                    args=[anaconda.payload]
-                )
+            thread_manager.add_thread(
+                name=constants.THREAD_SUBSCRIPTION,
+                target=register_and_subscribe,
+                args=[anaconda.payload],
+                kwargs={"error_callback": kickstart_error_handler}
             )
 
-    # add additional repositories from the cmdline to kickstart data
-    anaconda.add_additional_repositories_to_ksdata()
+    # Start the setup tasks of the configured payload.
+    from pyanaconda.payload.manager import payloadMgr
+    payloadMgr.start(anaconda.payload)
 
-    # Fallback to default for interactive or for a kickstart with no installation method.
-    fallback = not flags.automatedInstall \
-        or anaconda.payload.source_type == conf.payload.default_source
-
-    payloadMgr.restart_thread(anaconda.payload, fallback=fallback)
-
-    # initialize the geolocation singleton
-    geoloc.init_geolocation(geoloc_option=opts.geoloc, options_override=opts.geoloc_use_with_ks)
-
-    # start geolocation lookup if enabled
-    if geoloc.geoloc.enabled:
-        geoloc.geoloc.refresh()
+    # initialize geolocation and start geolocation lookup if possible and enabled
+    geoloc_task_proxy = startup_utils.start_geolocation_conditionally(opts)
 
     # setup ntp servers and start NTP daemon if not requested otherwise
     startup_utils.start_chronyd()
@@ -581,6 +569,7 @@ if __name__ == "__main__":
 
     # Create pre-install snapshots
     from pykickstart.constants import SNAPSHOT_WHEN_PRE_INSTALL
+
     from pyanaconda.kickstart import check_kickstart_error
     from pyanaconda.modules.common.constants.objects import SNAPSHOT
     from pyanaconda.modules.common.task import sync_run_task
@@ -589,7 +578,7 @@ if __name__ == "__main__":
     if snapshot_proxy.IsRequested(SNAPSHOT_WHEN_PRE_INSTALL):
         # What for the storage to load devices.
         # FIXME: Don't block the main thread!
-        threadMgr.wait(constants.THREAD_STORAGE)
+        thread_manager.wait(constants.THREAD_STORAGE)
 
         # Run the task.
         snapshot_task_path = snapshot_proxy.CreateWithTask(SNAPSHOT_WHEN_PRE_INSTALL)
@@ -597,6 +586,9 @@ if __name__ == "__main__":
 
         with check_kickstart_error():
             sync_run_task(snapshot_task_proxy)
+
+    # wait for geolocation, if needed
+    startup_utils.wait_for_geolocation_and_use(geoloc_task_proxy, anaconda.display_mode)
 
     anaconda.intf.setup(ksdata)
     anaconda.intf.run()

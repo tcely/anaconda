@@ -22,21 +22,23 @@ configuration, valid timezones recognition etc.
 
 """
 
-import langtable
+import datetime
+import time
 import zoneinfo
 from collections import OrderedDict
 from functools import cache
 
-from pyanaconda.core import util
-from pyanaconda.core.constants import THREAD_STORAGE
-from pyanaconda.flags import flags
-from pyanaconda.modules.common.constants.objects import BOOTLOADER
-from pyanaconda.modules.common.constants.services import TIMEZONE, STORAGE
-from pyanaconda.modules.common.util import is_module_available
-from pyanaconda.threading import threadMgr
+import langtable
 from blivet import arch
 
 from pyanaconda.anaconda_loggers import get_module_logger
+from pyanaconda.core.constants import THREAD_STORAGE
+from pyanaconda.core.threads import thread_manager
+from pyanaconda.core.util import execWithRedirect
+from pyanaconda.flags import flags
+from pyanaconda.modules.common.constants.objects import BOOTLOADER
+from pyanaconda.modules.common.constants.services import STORAGE
+
 log = get_module_logger(__name__)
 
 # The Etc category in zoneinfo.available_timezones() includes some more,
@@ -65,10 +67,9 @@ def time_initialize(timezone_proxy):
 
     if not timezone_proxy.IsUTC and not flags.automatedInstall:
         # if set in the kickstart, no magic needed here
-        threadMgr.wait(THREAD_STORAGE)
+        thread_manager.wait(THREAD_STORAGE)
         bootloader_proxy = STORAGE.get_proxy(BOOTLOADER)
-        is_utc = not bootloader_proxy.DetectWindows()
-        timezone_proxy.SetIsUTC(is_utc)
+        timezone_proxy.IsUTC = not bootloader_proxy.DetectWindows()
 
     cmd = "hwclock"
     args = ["--hctosys"]
@@ -77,33 +78,7 @@ def time_initialize(timezone_proxy):
     else:
         args.append("--localtime")
 
-    util.execWithRedirect(cmd, args)
-
-
-def save_hw_clock(timezone_proxy=None):
-    """
-    Save system time to HW clock.
-
-    :param timezone_proxy: DBus proxy of the timezone module
-
-    """
-    if arch.is_s390():
-        return
-
-    if not is_module_available(TIMEZONE):
-        return
-
-    if not timezone_proxy:
-        timezone_proxy = TIMEZONE.get_proxy()
-
-    cmd = "hwclock"
-    args = ["--systohc"]
-    if timezone_proxy.IsUTC:
-        args.append("--utc")
-    else:
-        args.append("--local")
-
-    util.execWithRedirect(cmd, args)
+    execWithRedirect(cmd, args)
 
 
 def get_preferred_timezone(territory):
@@ -143,20 +118,38 @@ def get_all_regions_and_timezones():
     Get a dictionary mapping the regions to the list of their timezones.
 
     :rtype: dict
-
     """
-
     result = OrderedDict()
 
     for tz in sorted(all_timezones()):
-        parts = tz.split("/", 1)
+        region, city = parse_timezone(tz)
 
-        if len(parts) > 1:
-            if parts[0] not in result:
-                result[parts[0]] = set()
-            result[parts[0]].add(parts[1])
+        if region and city:
+            result.setdefault(region, set())
+            result[region].add(city)
 
     return result
+
+
+def parse_timezone(timezone):
+    """Parse the specified timezone.
+
+    Return empty strings if the timezone cannot be parsed.
+
+    :return: a region and a city
+    :rtype: a tuple of strings
+    """
+    try:
+        region, city = timezone.split("/", 1)
+
+        if region and city:
+            return region, city
+
+    except ValueError:
+        pass
+
+    log.debug("Invalid timezone: %s", timezone)
+    return "", ""
 
 
 def is_valid_timezone(timezone):
@@ -180,3 +173,42 @@ def get_timezone(timezone):
     """
 
     return zoneinfo.ZoneInfo(timezone)
+
+
+def set_system_date_time(year=None, month=None, day=None, hour=None, minute=None,
+                         tz=None):
+    """Set system date and time given by the parameters.
+
+    If some parameter is missing or None, the current system date/time field is used instead
+    (i.e. the value is not changed by this function).
+
+    :param int|None year: year to set
+    :param int|None month: month to set
+    :param int|None day: day to set
+    :param int|None hour: hour to set
+    :param int|None minute: minute to set
+    :param str tz: time zone of the requested time
+    """
+    utc = zoneinfo.ZoneInfo(key='UTC')
+    # If no timezone is set, use UTC
+    if not tz:
+        tz = utc
+    else:
+        tz = zoneinfo.ZoneInfo(key=tz)
+
+    time.tzset()
+
+    # get the right values
+    now = datetime.datetime.now(tz)
+    year = year if year is not None else now.year
+    month = month if month is not None else now.month
+    day = day if day is not None else now.day
+    hour = hour if hour is not None else now.hour
+    minute = minute if minute is not None else now.minute
+    second = now.second
+
+    set_date = datetime.datetime(year, month, day, hour, minute, second, tzinfo=tz)
+    epoch_seconds = int(set_date.timestamp())
+
+    log.info("Setting system time to %s UTC", time.asctime(time.gmtime(epoch_seconds)))
+    execWithRedirect("/usr/bin/date", ['--set=@{}'.format(epoch_seconds)])

@@ -57,10 +57,10 @@ class InstalledFilesTestCase(RPMTestCase):
                 FileFilters.pyc_exclude,
                 FileFilters.no_extension_exlude,
                 FileFilters.makefiles_exclude,
-                FileFilters.isys_exclude,
                 FileFilters.glade_files_exclude,
                 FileFilters.text_files_exclude,
-                FileFilters.src_ignore_exclude
+                FileFilters.src_ignore_exclude,
+                FileFilters.template_exclude,
             ], self._get_source_files()
         )
 
@@ -292,15 +292,11 @@ class InstalledFilesTestCase(RPMTestCase):
         return in_iter
 
 
-class FileFilters(object):
+class FileFilters:
 
     @staticmethod
     def makefiles_exclude(path):
         return "Makefile" not in path
-
-    @staticmethod
-    def isys_exclude(path):
-        return "/isys/" not in path
 
     @staticmethod
     def pycache_exclude(path):
@@ -329,6 +325,10 @@ class FileFilters(object):
     @staticmethod
     def text_files_exclude(path):
         return not path.endswith(".rst")
+
+    @staticmethod
+    def template_exclude(path):
+        return not path.endswith(".j2")
 
     @staticmethod
     def rpm_dbus_confs_only(path):
@@ -382,8 +382,7 @@ class FileFilters(object):
     def src_ignore_exclude(path):
         return path not in IGNORED_SOURCE_FILES
 
-
-class RPMFilters(object):
+class RPMFilters:
 
     @staticmethod
     def debug_exclude(rpm):
@@ -399,7 +398,7 @@ class RPMFilters(object):
         return "anaconda-core" in rpm
 
 
-class ModifyingFilters(object):
+class ModifyingFilters:
 
     @staticmethod
     def rename_dot_in_files(path):

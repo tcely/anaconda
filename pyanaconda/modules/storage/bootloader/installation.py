@@ -19,25 +19,37 @@
 #
 from blivet import arch
 from blivet.devices import BTRFSDevice
-from pyanaconda.core.constants import PAYLOAD_TYPE_RPM_OSTREE, PAYLOAD_LIVE_TYPES
-from pyanaconda.modules.storage.bootloader import BootLoaderError
-
-from pyanaconda.core.util import execInSysroot
-from pyanaconda.modules.common.errors.installation import BootloaderInstallationError
-from pyanaconda.modules.storage.constants import BootloaderMode
 
 from pyanaconda.anaconda_loggers import get_module_logger
-from pyanaconda.modules.storage.bootloader.utils import configure_boot_loader, \
-    install_boot_loader, recreate_initrds, create_rescue_images, create_bls_entries
 from pyanaconda.core.configuration.anaconda import conf
+from pyanaconda.core.constants import PAYLOAD_LIVE_TYPES, PAYLOAD_TYPE_RPM_OSTREE
+from pyanaconda.core.util import execWithRedirect
+from pyanaconda.modules.common.errors.installation import BootloaderInstallationError
 from pyanaconda.modules.common.task import Task
+from pyanaconda.modules.payloads.payload.rpm_ostree.util import have_bootupd
+from pyanaconda.modules.storage.bootloader import BootLoaderError
+from pyanaconda.modules.storage.bootloader.systemd import SystemdBoot
+from pyanaconda.modules.storage.bootloader.utils import (
+    configure_boot_loader,
+    create_bls_entries,
+    create_rescue_images,
+    recreate_initrds,
+)
+from pyanaconda.modules.storage.constants import BootloaderMode
 
 log = get_module_logger(__name__)
 
 
-__all__ = ["ConfigureBootloaderTask", "InstallBootloaderTask", "FixBTRFSBootloaderTask",
-           "FixZIPLBootloaderTask", "RecreateInitrdsTask", "CreateRescueImagesTask",
-           "CreateBLSEntriesTask"]
+__all__ = [
+    "CollectKernelArgumentsTask",
+    "ConfigureBootloaderTask",
+    "CreateBLSEntriesTask",
+    "CreateRescueImagesTask",
+    "FixBTRFSBootloaderTask",
+    "FixZIPLBootloaderTask",
+    "InstallBootloaderTask",
+    "RecreateInitrdsTask",
+]
 
 
 class CreateRescueImagesTask(Task):
@@ -105,8 +117,8 @@ class ConfigureBootloaderTask(Task):
         )
 
 
-class InstallBootloaderTask(Task):
-    """Installation task for the bootloader."""
+class CollectKernelArgumentsTask(Task):
+    """Installation task for collecting the kernel arguments."""
 
     def __init__(self, storage, mode):
         """Create a new task."""
@@ -116,7 +128,59 @@ class InstallBootloaderTask(Task):
 
     @property
     def name(self):
+        """Name of the task."""
+        return "Collect kernel arguments"
+
+    @property
+    def _bootloader(self):
+        """Representation of the bootloader."""
+        return self._storage.bootloader
+
+    def run(self):
+        """Run the task."""
+        if conf.target.is_directory:
+            log.debug("The bootloader installation is disabled for dir installations.")
+            return
+
+        if self._mode == BootloaderMode.DISABLED:
+            log.debug("The bootloader installation is disabled.")
+            return
+
+        if self._mode == BootloaderMode.SKIPPED:
+            log.debug("The bootloader installation is skipped.")
+            return
+
+        log.debug("Collecting the kernel arguments.")
+
+        stage1_device = self._bootloader.stage1_device
+        log.info("boot loader stage1 target device is %s", stage1_device.name)
+
+        stage2_device = self._bootloader.stage2_device
+        log.info("boot loader stage2 target device is %s", stage2_device.name)
+
+        self._bootloader.collect_arguments(self._storage)
+
+
+class InstallBootloaderTask(Task):
+    """Installation task for the bootloader."""
+
+    def __init__(self, storage, mode, payload_type, sysroot):
+        """Create a new task."""
+        super().__init__()
+        self._storage = storage
+        self._mode = mode
+        self._payload_type = payload_type
+        self._sysroot = sysroot
+
+    @property
+    def name(self):
+        """Name of the task."""
         return "Install the bootloader"
+
+    @property
+    def _bootloader(self):
+        """Representation of the bootloader."""
+        return self._storage.bootloader
 
     def run(self):
         """Run the task.
@@ -135,8 +199,15 @@ class InstallBootloaderTask(Task):
             log.debug("The bootloader installation is skipped.")
             return
 
+        if self._payload_type == PAYLOAD_TYPE_RPM_OSTREE and have_bootupd(self._sysroot):
+            log.debug("Will not install regular bootloader for ostree with bootupd")
+            return
+
+        log.debug("Installing the boot loader.")
+
         try:
-            install_boot_loader(storage=self._storage)
+            self._bootloader.prepare()
+            self._bootloader.write()
         except BootLoaderError as e:
             log.exception("Bootloader installation has failed: %s", e)
             raise BootloaderInstallationError(str(e)) from None
@@ -173,9 +244,10 @@ class CreateBLSEntriesTask(Task):
 class RecreateInitrdsTask(Task):
     """Installation task that recreates the initrds."""
 
-    def __init__(self, payload_type, kernel_versions, sysroot):
+    def __init__(self, storage, payload_type, kernel_versions, sysroot):
         """Create a new task."""
         super().__init__()
+        self._storage = storage
         self._payload_type = payload_type
         self._versions = kernel_versions
         self._sysroot = sysroot
@@ -191,6 +263,9 @@ class RecreateInitrdsTask(Task):
         # them per-machine.
         if self._payload_type == PAYLOAD_TYPE_RPM_OSTREE:
             log.debug("Don't regenerate initramfs on rpm-ostree systems.")
+            return
+        if isinstance(self._storage.bootloader, SystemdBoot):
+            log.debug("Don't regenerate initramfs on systemd-boot systems.")
             return
 
         recreate_initrds(
@@ -249,14 +324,16 @@ class FixBTRFSBootloaderTask(Task):
 
         InstallBootloaderTask(
             self._storage,
-            self._mode
+            self._mode,
+            self._payload_type,
+            self._sysroot
         ).run()
 
 
 class FixZIPLBootloaderTask(Task):
     """Installation task fixing the ZIPL bootloader.
 
-    Invoking zipl should be the last thing done on a s390x installation (see #1652727).
+    Invoking zipl should be the last thing done on a s390x installation (see #1652727, #2022841).
     """
 
     def __init__(self, mode):
@@ -282,4 +359,4 @@ class FixZIPLBootloaderTask(Task):
             log.debug("The bootloader installation is disabled.")
             return
 
-        execInSysroot("zipl", [])
+        execWithRedirect("zipl", [], root=conf.target.system_root)
